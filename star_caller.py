@@ -114,9 +114,9 @@ def load_parameters():
         description="Call CYP2D6 genotypes from a WGS BAM file."
     )
     parser.add_argument(
-        "-m",
-        "--manifest",
-        help="Manifest listing absolute paths to BAM/CRAM files",
+        "-i",
+        "--input",
+        help="Input BAM/CRAM file",
         required=True,
     )
     parser.add_argument(
@@ -489,9 +489,83 @@ def prepare_resource(datadir, parameters):
     return call_parameters
 
 
+def matchPhenotype(phenotypes, genotype):
+    # Matches genotype with phenotype
+    predicted = ['n/a', 'n/a']
+    if genotype:
+        for p in phenotypes:
+            if compareGenotypes(genotype, p["Genotype"]):
+                predicted = [p["ActivityScore"], p["PredictedPhenotype"]]
+
+    return predicted
+
+
+def compareGenotypes(query, subject):
+    # Compare the detected genotype (query) to the ones in database (subject)
+    if not "/" in query:
+        return None
+
+    query_a1_star, query_a2_star = query.split("/")
+    query_a1_int, query_a1_xint = query_a1_star.split("*")[1].split("x") if "x" in query_a1_star else [query_a1_star.split("*")[1], None]
+    query_a2_int, query_a2_xint = query_a2_star.split("*")[1].split("x") if "x" in query_a2_star else [query_a2_star.split("*")[1], None]
+
+    subject_a1_star, subject_a2_star = subject.split("/")
+    subject_a1_int, subject_a1_xint = subject_a1_star.split("*")[1].split("x") if "x" in subject_a1_star else [subject_a1_star.split("*")[1], None]
+    subject_a2_int, subject_a2_xint = subject_a2_star.split("*")[1].split("x") if "x" in subject_a2_star else [subject_a2_star.split("*")[1], None]
+
+    match = [False, False]
+
+    if query_a1_int == subject_a1_int and query_a2_int == subject_a2_int:
+        if query_a1_xint == subject_a1_xint:
+            match[0] = True
+
+        if query_a2_xint == subject_a2_xint:
+            match[1] = True
+
+        if query_a1_xint:
+            if query_a1_xint == subject_a1_xint:
+                match[0] = True
+            else:
+                if query_a1_xint and subject_a1_xint and "≥" in subject_a1_xint:
+                    subject_a1_xint = subject_a1_xint.split("≥")[1]
+                    if query_a1_xint >= subject_a1_xint:
+                        match[0] = True
+
+        if query_a2_xint:
+            if query_a2_xint == subject_a2_xint:
+                match[1] = True
+            else:
+                if query_a2_xint and subject_a2_xint and "≥" in subject_a2_xint:
+                    subject_a2_xint = subject_a2_xint.split("≥")[1]
+                    if query_a2_xint >= subject_a2_xint:
+                        match[1] = True
+
+        if match[0] and match[1]:
+            return subject
+
+def sortGenotype(genotype):
+    # Sorts genotype so smaller integer will be first element
+    if not genotype:
+        return genotype
+
+    genotype_split = genotype.split("/")
+    if len(genotype_split) == 1:
+        return genotype
+
+    a1_star = genotype_split[0]
+    a2_star = genotype_split[1]
+
+    a1_int = a1_star.split("*")[1].split("x")[0]
+    a2_int = a2_star.split("*")[1].split("x")[0]
+
+    sorted_genotype = a2_star+"/"+a1_star if a1_int > a2_int else genotype
+
+    return sorted_genotype
+
+
 def main():
     parameters = load_parameters()
-    manifest = parameters.manifest
+    inputfile = parameters.input
     outdir = parameters.outDir
     prefix = parameters.prefix
     reference_fasta = parameters.reference
@@ -502,41 +576,57 @@ def main():
     if os.path.exists(outdir) == 0:
         os.makedirs(outdir)
 
-    # Prepare data files
     datadir = os.path.join(os.path.dirname(__file__), "data")
+
+    # Get all phenotypes from a file where predicted phenotypes are (https://files.cpicpgx.org/data/report/current/diplotype_phenotype/CYP2D6_Diplotype_Phenotype_Table.xlsx)
+    phenotypes = []
+    with open(os.path.join(datadir, "CYP2D6_Diplotype_Phenotype_Table.txt"), "r") as genotype_phenotype_table:
+        for line in genotype_phenotype_table:
+            if line.startswith("#"):
+                continue
+            fields = line.split('\t')
+            phenotypes.append({
+                "Genotype": fields[0].strip(),
+                "ActivityScore": fields[1].strip(),
+                "PredictedPhenotype": fields[2].strip(),
+                "PriorityNotation": fields[3].strip()
+                })
+
+
+    # Prepare data files
     call_parameters = prepare_resource(datadir, parameters)
 
     out_json = os.path.join(outdir, prefix + ".json")
     out_tsv = os.path.join(outdir, prefix + ".tsv")
     final_output = {}
-    with open(manifest) as read_manifest:
-        for line in read_manifest:
-            bam_name = line.strip()
-            index_name = None
-            if '##idx##' in bam_name:
-                bam_name, index_name = bam_name.split('##idx##')
 
-            sample_id = os.path.splitext(os.path.basename(bam_name))[0]
-            count_file = None
-            if path_count_file is not None:
-                count_file = os.path.join(path_count_file, sample_id + "_count.txt")
-            if "://" not in bam_name and os.path.exists(bam_name) == 0:
-                logging.warning("Input file for sample %s does not exist.", sample_id)
-            else:
-                logging.info(
-                    "Processing sample %s at %s", sample_id, datetime.datetime.now()
-                )
-                cyp2d6_call = d6_star_caller(
-                    bam_name, call_parameters, threads, count_file, reference_fasta, index_name=index_name
-                )._asdict()
-                # Use normalized coverage MAD across stable regions
-                # as a sample QC measure.
-                if cyp2d6_call["Coverage_MAD"] > MAD_THRESHOLD:
-                    logging.warning(
-                        "Sample %s has uneven coverage. CN calls may be unreliable.",
-                        sample_id,
-                    )
-                final_output.setdefault(sample_id, cyp2d6_call)
+    bam_name = inputfile
+    index_name = None
+    if '##idx##' in bam_name:
+        bam_name, index_name = bam_name.split('##idx##')
+
+    sample_id = os.path.splitext(os.path.basename(bam_name))[0]
+    count_file = None
+    if path_count_file is not None:
+        count_file = os.path.join(path_count_file, sample_id + "_count.txt")
+    if "://" not in bam_name and os.path.exists(bam_name) == 0:
+        logging.warning("Input file for sample %s does not exist.", sample_id)
+    else:
+        logging.info(
+            "Processing sample %s at %s", sample_id, datetime.datetime.now()
+        )
+        cyp2d6_call = d6_star_caller(
+            bam_name, call_parameters, threads, count_file, reference_fasta, index_name=index_name
+        )._asdict()
+        # Use normalized coverage MAD across stable regions
+        # as a sample QC measure.
+        if cyp2d6_call["Coverage_MAD"] > MAD_THRESHOLD:
+            logging.warning(
+                "Sample %s has uneven coverage. CN calls may be unreliable.",
+                sample_id,
+            )
+        final_output.setdefault(sample_id, cyp2d6_call)
+
 
     # Write to json
     logging.info("Writing to json at %s", datetime.datetime.now())
@@ -545,15 +635,21 @@ def main():
 
     # Write to tsv
     logging.info("Writing to tsv at %s", datetime.datetime.now())
-    header = ["Sample", "Genotype", "Filter"]
+    header = ["Sample", "Genotype", "Filter", "ActivityScore", "PredictedPhenotype"]
+
     with open(out_tsv, "w") as tsv_output:
         tsv_output.write("\t".join(header) + "\n")
         for sample_id in final_output:
             final_call = final_output[sample_id]
+            sorted_genotype = sortGenotype(final_call["Genotype"])
+            activity_score, predicted_phenotype = matchPhenotype(phenotypes, sorted_genotype)
+
             output_per_sample = [
                 sample_id,
-                final_call["Genotype"],
+                sorted_genotype,
                 final_call["Filter"],
+                activity_score,
+                predicted_phenotype
             ]
             tsv_output.write("\t".join(str(a) for a in output_per_sample) + "\n")
 
