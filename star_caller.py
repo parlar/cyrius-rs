@@ -17,6 +17,9 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+# This script has been modified by Andreas Halman to provide additional functionality and is different from the original.
+#
 
 
 import os
