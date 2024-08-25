@@ -17,6 +17,17 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+# ----------------------------------------------------------------------------
+#
+# BCyrius: CYP2D6 genotyper (upgraded version of Cyrius)
+# Copyright (c) 2024 Andreas Halman
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 import os
 import sys
@@ -96,8 +107,6 @@ CLEAN_VAR = [
 # resulting in strand bias
 NOISY_VAR = [
     "g.42127473C>T",
-    "g.42128181A>T",
-    "g.42128185C>T",
     "g.42129042T>C",
     "g.42129174C>A",
     "g.42129180A>T",
@@ -107,7 +116,6 @@ NOISY_VAR = [
     "g.42127973T>C",
     "g.42127556T>C",
 ]
-
 
 def get_total_cn_per_site(cnvtag, var_db, var_list):
     """
@@ -212,16 +220,15 @@ def good_read(read):
 
 def get_allele_counts_var42128936(bamfile_handle, genome):
     """
-    Search for the inserstions at 42128936 defining
+    Search for the insertsions at 42128936 defining
     *30/*40/*58 in read sequences
     """
     long_ins_read = 0
     short_ins_read = 0
     ref_read = 0
     dregion = {
-        "19": ("chr22", 42524850, 42524980),
-        "37": ("22", 42524850, 42524980),
-        "38": ("chr22", 42128848, 42128978),
+        "chr38": ("chr22", 42128848, 42128978),
+        "38": ("22", 42128848, 42128978),
     }
     region = dregion[genome]
     for read in bamfile_handle.fetch(region[0], region[1], region[2]):
@@ -292,6 +299,7 @@ def call_var42126938(bamfile, full_length_cn, base_db):
     Call variant g.42126938C>T (gene conversion variant in homology region)
     based on read depth and phased haplotypes
     """
+
     var_called = []
     # Whether g.42126938C>T is on the same haplotype as g.42126611C>G
     G_haplotype = False
@@ -363,6 +371,42 @@ def call_var42127803hap(bamfile, cnvtag, base_db):
         ):
             diff_haplotype = True
     return diff_haplotype
+
+
+
+def call_var42130655insA(bamfile, full_length_cn, base_db):
+    """
+    Call haplotype with regard to g.42130655-42130656insA (only for calling *15.003)
+    """
+    var_called = []
+    has_long_insert_size_reads_d67 = False
+    length_between_d67_regions = 13000 # Distance in bases (at least) between reads in one pair (one is aligned on d6 and the other one on d7)
+    no_AA_on_d6 = 0
+    no_A_on_d6 = 0
+
+    var_AA_d6, var_AA_d7, var_ref_forward_AA, var_ref_reverse_AA = get_supporting_reads_single_region(bamfile, base_db.dsnp2, base_db.nchr, base_db.dindex, length_between_d67_regions)
+    no_AA_on_d6 = var_AA_d7[-1]
+
+    # Set threshold at least 5 read on d7 where the other pair is aligned on d6 and at the same time the number of reads with the insertion on d6 has to be 2 or less
+    if int(var_AA_d7[-1]) >= 5 and var_AA_d6[-1] <= 2:
+        has_long_insert_size_reads_d67 = True
+
+    if has_long_insert_size_reads_d67:
+        # Also count how many AA on d6 (don't use long insert size)
+        var_AA_d6, var_AA_d7, var_ref_forward_AA, var_ref_reverse_AA = get_supporting_reads_single_region(bamfile, base_db.dsnp2, base_db.nchr, base_db.dindex)
+        no_AA_on_d6 += var_AA_d6[-1]
+
+        var_A_d6, var_A_d7, var_ref_forward_A, var_ref_reverse_A = get_supporting_reads_single_region(bamfile, base_db.dsnp1, base_db.nchr, base_db.dindex)
+
+        no_A_on_d6 = var_A_d6[-1] # This is to determine if heterozygous
+
+        if no_A_on_d6 >= no_AA_on_d6:
+            var_called.append("g.42130655-42130656insA")
+        else:
+            var_called.append("g.42130655-42130656insA")
+            var_called.append("g.42130655-42130656insA")
+
+    return [no_A_on_d6, no_AA_on_d6], var_called
 
 
 def get_called_variants(var_list, cn_prob_processed, starting_index=0):

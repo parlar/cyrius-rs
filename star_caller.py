@@ -18,8 +18,16 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
-# This script has been modified by Andreas Halman to provide additional functionality and is different from the original.
+# ----------------------------------------------------------------------------
 #
+# BCyrius: CYP2D6 genotyper (upgraded version of Cyrius)
+# Copyright (c) 2024 Andreas Halman
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 
 import os
@@ -30,6 +38,8 @@ import logging
 import datetime
 from collections import namedtuple, OrderedDict
 import pysam
+import pandas as pd
+import regex
 
 
 from depth_calling.snp_count import (
@@ -61,16 +71,19 @@ from caller.call_variants import (
     call_var42126938,
     call_var42127526_var42127556,
     call_var42127803hap,
+    call_var42130655insA,
 )
 from caller.cnv_hybrid import get_cnvtag
 from caller.construct_star_table import get_hap_table
 from caller.match_star_allele import match_star
 
+TOOL_NAME = "BCyrius"
+TOOL_VERSION = "1.0.0"
 MAD_THRESHOLD = 0.11
 EXON9_SITE1 = 7
 EXON9_SITE2 = 8
 HIGH_CN_DEPTH_THRESHOLD = 7.5
-HAPLOTYPE_VAR = ["g.42126938C>T", "g.42127803C>T", "g.42127526C>T_g.42127556T>C"]
+HAPLOTYPE_VAR = ["g.42126938C>T", "g.42127803C>T", "g.42127526C>T_g.42127556T>C", "g.42130655-42130656insA"]
 resource_info = namedtuple(
     "resource_info",
     "genome gmm_parameter region_dic snp_db var_db var_homo_db haplotype_db var_list star_combinations",
@@ -114,7 +127,7 @@ CNV_ACCEPTED = [
 def load_parameters():
     """Return parameters."""
     parser = argparse.ArgumentParser(
-        description="Call CYP2D6 genotypes from a WGS BAM file."
+        description=f"{TOOL_NAME} v{TOOL_VERSION} - a CYP2D6 genotyping tool"
     )
     parser.add_argument(
         "-i",
@@ -125,11 +138,13 @@ def load_parameters():
     parser.add_argument(
         "-g",
         "--genome",
-        help="Reference genome, select from 19, 37, or 38",
-        required=True,
+        help="Reference genome style, select 'chr38' if contig names start with 'chr' otherwise use '38'. If nothing is selected, it will be detected automatically",
+        required=False,
+        choices = ["autodetect", "38", "chr38"],
+        default="autodetect"
     )
     parser.add_argument("-o", "--outDir", help="Output directory", required=True)
-    parser.add_argument("-p", "--prefix", help="Prefix to output file", required=True)
+    parser.add_argument("--id", help="Sample ID (output file name)", required=False)
     parser.add_argument(
         "-t",
         "--threads",
@@ -148,9 +163,19 @@ def load_parameters():
         required=False,
     )
 
+    parser.add_argument(
+        "--population",
+        help="Export population frequencies",
+        action="store_true",
+    )
+
+    parser.add_argument(
+        "--print",
+        help="Print the results on screen",
+        action="store_true",
+    )
+
     args = parser.parse_args()
-    if args.genome not in ["19", "37", "38"]:
-        raise Exception("Genome not recognized. Select from 19, 37, or 38")
 
     return args
 
@@ -234,7 +259,7 @@ def d6_star_caller(
     snp_d6, snp_d7 = get_supporting_reads(
         bamfile, snp_db.dsnp1, snp_db.dsnp2, snp_db.nchr, snp_db.dindex
     )
-
+    
     # Variants not in homology regions. Get read counts only at D6 positions.
     var_db = call_parameters.var_db
     var_alt, var_ref, var_alt_forward, var_alt_reverse = get_supporting_reads_single_region(
@@ -257,6 +282,7 @@ def d6_star_caller(
         var_homo_db.nchr,
         var_homo_db.dindex,
     )
+    
     # This ordered dictionary is for final reporting.
     raw_count = OrderedDict()
     non_homology_variant_count = len(var_alt)
@@ -354,6 +380,7 @@ def d6_star_caller(
     )
     # call haplotypes
     haplotype_db = call_parameters.haplotype_db
+
     site42126938_count, var42126938, var42126938_G_haplotype = call_var42126938(
         bamfile, raw_cn_call.d67_cn, haplotype_db["g.42126938C>T"]
     )
@@ -375,12 +402,20 @@ def d6_star_caller(
         bamfile, cnvtag, haplotype_db["g.42127803C>T"]
     )
 
+    var42130655insA_count, var42130655insA = call_var42130655insA(
+        bamfile, raw_cn_call.d67_cn, haplotype_db["g.42130655-42130656insA"]
+    )
+    raw_count.setdefault(
+        "g.42130655-42130656insA", "%i,%i" % (var42130655insA_count[1], var42130655insA_count[0])
+    )
+
     # 6. Call star allele
     total_callset = get_called_variants(var_list, cn_call_var)
     called_var_homo = get_called_variants(var_list, cn_call_var_homo, len(cn_call_var))
     total_callset += called_var_homo
     total_callset += var42126938
     total_callset += var42127526
+    total_callset += var42130655insA
 
     star_called = match_star(
         total_callset,
@@ -436,17 +471,21 @@ def d6_star_caller(
 
 
 def prepare_resource(datadir, parameters):
-    genome = parameters.genome
-    region_file = os.path.join(datadir, "CYP2D6_region_%s.bed" % genome)
-    snp_file = os.path.join(datadir, "CYP2D6_SNP_%s.txt" % genome)
+    region_file = os.path.join(datadir, "CYP2D6_region_38.bed")
+    snp_file = os.path.join(datadir, "CYP2D6_SNP_38.txt")
     gmm_file = os.path.join(datadir, "CYP2D6_gmm.txt")
     star_table = os.path.join(datadir, "star_table.txt")
-    variant_file = os.path.join(datadir, "CYP2D6_target_variant_%s.txt" % genome)
+    variant_file = os.path.join(datadir, "CYP2D6_target_variant_38.txt")
     variant_homology_file = os.path.join(
-        datadir, "CYP2D6_target_variant_homology_region_%s.txt" % genome
+        datadir, "CYP2D6_target_variant_homology_region_38.txt"
     )
-    haplotype_file = os.path.join(datadir, "CYP2D6_haplotype_%s.txt" % genome)
+    haplotype_file = os.path.join(datadir, "CYP2D6_haplotype_38.txt")
     star_combinations = get_hap_table(star_table)
+
+    if parameters.genome == "autodetect":
+        genome = "chr38" if isChrInChromosomeNames(parameters.input) else "38"
+    else:
+        genome = parameters.genome
 
     for required_file in [
         region_file,
@@ -459,12 +498,12 @@ def prepare_resource(datadir, parameters):
         if os.path.exists(required_file) == 0:
             raise Exception("File %s not found." % required_file)
 
-    snp_db = get_snp_position(snp_file)
-    var_db = get_snp_position(variant_file)
-    var_homo_db = get_snp_position(variant_homology_file)
+    snp_db = get_snp_position(snp_file, genome)
+    var_db = get_snp_position(variant_file, genome)
+    var_homo_db = get_snp_position(variant_homology_file, genome)
     haplotype_db = {}
     for variant in HAPLOTYPE_VAR:
-        haplotype_db.setdefault(variant, get_snp_position(haplotype_file, variant))
+        haplotype_db.setdefault(variant, get_snp_position(haplotype_file, genome, variant))
     var_list = []
     with open(variant_file) as f:
         for line in f:
@@ -477,7 +516,7 @@ def prepare_resource(datadir, parameters):
                 var_name = line.split()[-1]
                 var_list.append(var_name)
     gmm_parameter = parse_gmm_file(gmm_file)
-    region_dic = parse_region_file(region_file)
+    region_dic = parse_region_file(region_file, genome)
     call_parameters = resource_info(
         genome,
         gmm_parameter,
@@ -491,17 +530,34 @@ def prepare_resource(datadir, parameters):
     )
     return call_parameters
 
+def matchPhenotype(phenotypes, genotype):
+    # Matches genotype with phenotype
+    predicted = []
+    if genotype:
+        diplotypes = genotype.split(";")
+        for diplotype in diplotypes:
+            for p in phenotypes:
+                if compareGenotypes(diplotype.strip(), p["Genotype"]):
+                    predicted.append([p["Activity score"], p["Predicted phenotype"]])
+
+    if not predicted:
+        return ['n/a', 'n/a']
+    return predicted
 
 def matchPhenotype(phenotypes, genotype):
     # Matches genotype with phenotype
-    predicted = ['n/a', 'n/a']
+    predicted = []
     if genotype:
-        for p in phenotypes:
-            if compareGenotypes(genotype, p["Genotype"]):
-                predicted = [p["ActivityScore"], p["PredictedPhenotype"]]
+        diplotypes = genotype.split(";")
+        for diplotype in diplotypes:
+            for p in phenotypes:
+                if compareGenotypes(diplotype.strip(), p["Genotype"]):
+                    predicted.append([p["Activity score"], p["Predicted phenotype"]])
+
+    if not predicted:
+        return [None, None]
 
     return predicted
-
 
 def compareGenotypes(query, subject):
     # Compare the detected genotype (query) to the ones in database (subject)
@@ -566,41 +622,125 @@ def sortGenotype(genotype):
     return sorted_genotype
 
 
+
+def get_haplotype_percentages(file_path, haplotype_name):
+    # Load the tab-delimited file into a DataFrame
+    df = pd.read_csv(file_path, delimiter='\t')
+
+    # Find the row corresponding to the haplotype name
+    row = df[df['CYP2D6 allele'] == haplotype_name]
+
+    if row.empty:
+        return None  # Return None if haplotype is not found
+
+    # Convert the values to percentages and round to one decimal place
+    percentages = (row.iloc[0, 1:].astype(float) * 100).round(3)
+
+    # Convert to string and add '%' symbol, but leave empty if NaN
+    percentages = percentages.apply(lambda x: f"{x}%" if not pd.isna(x) else "")
+
+    return percentages
+
+def get_diplotype_percentages(file_path, diplotype_name):
+    # Load the tab-delimited file into a DataFrame
+    df = pd.read_csv(file_path, delimiter='\t')
+
+    # Find the row corresponding to the diplotype name
+    row = df[df['CYP2D6 allele'] == diplotype_name]
+
+    if row.empty:
+        return None  # Return None if diplotype is not found
+
+    # Convert the values to percentages and round to one decimal place
+    percentages = (row.iloc[0, 1:].astype(float) * 100).round(3)
+
+    # Convert to string and add '%' symbol, but leave empty if NaN
+    percentages = percentages.apply(lambda x: f"{x}%" if not pd.isna(x) else "")
+
+    return percentages
+
+def diplotype_frequencies(haplotype_file_path, diplotype_file_path, diplotype_string):
+    diplotypes = diplotype_string.split(';')
+    
+    # Dictionary to store frequencies for diplotypes and haplotypes
+    frequencies = {}
+
+    for diplotype in diplotypes:
+        haplotypes = diplotype.split('/')
+
+        # Get frequencies for the diplotype itself
+        frequencies[diplotype] = get_diplotype_percentages(diplotype_file_path, diplotype)
+        if frequencies[diplotype] is None:
+            return f"Diplotype {diplotype} not found in the file."
+        
+        # Get frequencies for each haplotype
+        for haplotype in haplotypes:
+            frequencies[haplotype] = get_haplotype_percentages(haplotype_file_path, haplotype)
+            if frequencies[haplotype] is None:
+                return f"Haplotype {haplotype} not found in the file."
+
+    frequency_table = pd.DataFrame(frequencies)
+    frequency_table.index.name = 'Biogeographic group'
+    frequency_table.reset_index(inplace=True)
+
+    return frequency_table
+
+def isChrInChromosomeNames(input_file):
+    chr_in_names = False
+    input_file_read = pysam.AlignmentFile(input_file, 'rb')
+
+    for contig_id in range(5):  # Check only the first 5 chromosomes to speed it up
+        contig_name = input_file_read.get_reference_name(contig_id)
+
+        if "chr" in contig_name:
+            chr_in_names = True
+            break
+
+    return chr_in_names
+
+
 def main():
     parameters = load_parameters()
     inputfile = parameters.input
     outdir = parameters.outDir
-    prefix = parameters.prefix
+    sample_id = parameters.id
     reference_fasta = parameters.reference
     threads = parameters.threads
     path_count_file = parameters.countFilePath
+    export_population_frequencies = parameters.population
+    print_results = parameters.print
     logging.basicConfig(level=logging.DEBUG)
+
+    if not sample_id:
+        sample_id = os.path.splitext(os.path.basename(inputfile))[0]
 
     if os.path.exists(outdir) == 0:
         os.makedirs(outdir)
 
     datadir = os.path.join(os.path.dirname(__file__), "data")
 
-    # Get all phenotypes from a file where predicted phenotypes are (https://files.cpicpgx.org/data/report/current/diplotype_phenotype/CYP2D6_Diplotype_Phenotype_Table.xlsx)
     phenotypes = []
-    with open(os.path.join(datadir, "CYP2D6_Diplotype_Phenotype_Table.txt"), "r") as genotype_phenotype_table:
+    with open(os.path.join(datadir, "CYP2D6_diplotype_phenotype_table.txt"), "r") as genotype_phenotype_table:
         for line in genotype_phenotype_table:
             if line.startswith("#"):
                 continue
             fields = line.split('\t')
             phenotypes.append({
                 "Genotype": fields[0].strip(),
-                "ActivityScore": fields[1].strip(),
-                "PredictedPhenotype": fields[2].strip(),
-                "PriorityNotation": fields[3].strip()
+                "Activity score": fields[1].strip(),
+                "Predicted phenotype": fields[2].strip(),
+                "Priority notation": fields[3].strip()
                 })
 
 
     # Prepare data files
     call_parameters = prepare_resource(datadir, parameters)
 
-    out_json = os.path.join(outdir, prefix + ".json")
-    out_tsv = os.path.join(outdir, prefix + ".tsv")
+    haplotype_file_path = os.path.join(datadir, 'CYP2D6_frequency_table_haplotypes.txt')
+    diplotype_file_path = os.path.join(datadir, 'CYP2D6_frequency_table_diplotypes.txt')
+    
+    out_json = os.path.join(outdir, sample_id + ".json")
+    out_tsv = os.path.join(outdir, sample_id + ".tsv")
     final_output = {}
 
     bam_name = inputfile
@@ -608,7 +748,8 @@ def main():
     if '##idx##' in bam_name:
         bam_name, index_name = bam_name.split('##idx##')
 
-    sample_id = os.path.splitext(os.path.basename(bam_name))[0]
+    sample_file_name = os.path.basename(bam_name)
+
     count_file = None
     if path_count_file is not None:
         count_file = os.path.join(path_count_file, sample_id + "_count.txt")
@@ -616,7 +757,10 @@ def main():
         logging.warning("Input file for sample %s does not exist.", sample_id)
     else:
         logging.info(
-            "Processing sample %s at %s", sample_id, datetime.datetime.now()
+            "Starting %s v%s", TOOL_NAME, TOOL_VERSION
+        )
+        logging.info(
+            "Processing sample %s (%s) at %s", sample_id, sample_file_name, datetime.datetime.now()
         )
         cyp2d6_call = d6_star_caller(
             bam_name, call_parameters, threads, count_file, reference_fasta, index_name=index_name
@@ -632,30 +776,63 @@ def main():
 
 
     # Write to json
-    logging.info("Writing to json at %s", datetime.datetime.now())
+    logging.info("Writing to json (%s) at %s", out_json, datetime.datetime.now())
     with open(out_json, "w") as json_output:
         json.dump(final_output, json_output)
 
     # Write to tsv
-    logging.info("Writing to tsv at %s", datetime.datetime.now())
-    header = ["Sample", "Genotype", "Filter", "ActivityScore", "PredictedPhenotype"]
+    logging.info("Writing to tsv (%s) at %s", out_tsv, datetime.datetime.now())
+    header = ["Sample", "Genotype", "Filter", "Activity score", "Predicted phenotype"]
+    frequency_table = None
 
     with open(out_tsv, "w") as tsv_output:
         tsv_output.write("\t".join(header) + "\n")
         for sample_id in final_output:
             final_call = final_output[sample_id]
             sorted_genotype = sortGenotype(final_call["Genotype"])
-            activity_score, predicted_phenotype = matchPhenotype(phenotypes, sorted_genotype)
+            predictions = matchPhenotype(phenotypes, sorted_genotype)
+            count_of_diplotypes = sum(1 for diplo in predictions if isinstance(diplo, list))
+
+            if predictions[0]:
+                if count_of_diplotypes > 1:
+                    activity_scores = ";".join([p[0] for p in predictions])
+                    predicted_phenotypes = ";".join([p[1] for p in predictions])
+                else:
+                    activity_scores = predictions[0][0]
+                    predicted_phenotypes = predictions[0][1]
+            else:
+                    activity_scores = "-"
+                    predicted_phenotypes = "-"
 
             output_per_sample = [
                 sample_id,
                 sorted_genotype,
                 final_call["Filter"],
-                activity_score,
-                predicted_phenotype
+                activity_scores,
+                predicted_phenotypes
             ]
             tsv_output.write("\t".join(str(a) for a in output_per_sample) + "\n")
 
+        if export_population_frequencies and sorted_genotype:
+            frequency_table = diplotype_frequencies(haplotype_file_path, diplotype_file_path, sorted_genotype)
+            if not isinstance(frequency_table, str):
+                tsv_output.write("\n")
+                frequency_table.to_csv(tsv_output, sep='\t', index=False)
+
+    if print_results:
+        column_width = 20
+        print("""
+======================================================
+                     RESULTS
+======================================================
+        """)
+
+        for header_item, result_item in zip(header, output_per_sample):
+            print(f"{str(header_item):<{column_width}} → {str(result_item)}")
+
+        if export_population_frequencies and not isinstance(frequency_table, str):
+            print("\n")
+            print(frequency_table.to_string(index=False))
 
 if __name__ == "__main__":
     main()

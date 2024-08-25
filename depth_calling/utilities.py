@@ -17,13 +17,24 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+# ----------------------------------------------------------------------------
+#
+# BCyrius: CYP2D6 genotyper (upgraded version of Cyrius)
+# Copyright (c) 2024 Andreas Halman
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 
 from collections import namedtuple
 import pysam
 
 
-def parse_region_file(region_file):
+def parse_region_file(region_file, genome):
     """Return the set of regions for counting from a bed file."""
     region_dic = {}
     with open(region_file) as read_region:
@@ -31,6 +42,8 @@ def parse_region_file(region_file):
             nchr, region_start, region_end, region_name, region_type, region_gc = (
                 line.strip().split()
             )
+            if genome == "38":
+                nchr = nchr.replace("chr", "")
             region_start = int(region_start)
             region_end = int(region_end)
             region = (nchr, region_start, region_end, region_name)

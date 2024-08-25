@@ -17,6 +17,17 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+# ----------------------------------------------------------------------------
+#
+# BCyrius: CYP2D6 genotyper (upgraded version of Cyrius)
+# Copyright (c) 2024 Andreas Halman
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 
 from collections import namedtuple
@@ -39,7 +50,7 @@ def get_nm(ltag):
     return None
 
 
-def get_snp_position(pos_file, group=None):
+def get_snp_position(pos_file, genome, group=None):
     """Get all base differences listed in the SNP location file."""
     dsnp1 = {}
     dsnp2 = {}
@@ -71,6 +82,9 @@ def get_snp_position(pos_file, group=None):
                     dindex.setdefault(reg1_name, counter)
                     dindex.setdefault(reg2_name, counter)
     nchr = split_line[0]
+    if genome == "38":
+        nchr = nchr.replace("chr", "")
+
     snp_lookup = namedtuple("snp_lookup", "dsnp1 dsnp2 nchr dindex")
     dbsnp = snp_lookup(dsnp1, dsnp2, nchr, dindex)
     return dbsnp
@@ -100,11 +114,12 @@ def passing_read_stringent(pileupread):
 
 
 def get_reads_by_region(
-    bamfile_handle, nchr, dsnp, dindex, min_mapq=0, stringent=False
+    bamfile_handle, nchr, dsnp, dindex, min_mapq=0, min_insert_size=None, stringent=False
 ):
     """
     Return the number of reads supporting region1 and region2, forward and reverse.
     """
+
     lsnp1_forward = []
     lsnp1_reverse = []
     lsnp2_forward = []
@@ -130,14 +145,14 @@ def get_reads_by_region(
             if site_position == snp_position:
                 reg1_allele, reg2_allele = dsnp[snp_position_ori].split("_")
                 for read in pileupcolumn.pileups:
-                    if (
-                        passing_read(read)
-                        and read.alignment.mapping_quality >= min_mapq
-                    ):
+                    if passing_read(read) and read.alignment.mapping_quality >= min_mapq:
+                        if min_insert_size is not None and abs(read.alignment.template_length) < min_insert_size:
+                            continue
+
                         dsnp_index = dindex[snp_position_ori]
                         read_name = read.alignment.query_name
                         read_seq = read.alignment.query_sequence
-                        if stringent is False or passing_read_stringent(read):
+                        if not stringent or passing_read_stringent(read):
                             reg1_allele_split = reg1_allele.split(",")
                             reg2_allele_split = reg2_allele.split(",")
                             start_pos = read.query_position
@@ -156,7 +171,6 @@ def get_reads_by_region(
                                     else:
                                         lsnp2_forward[dsnp_index].add(read_name)
     return lsnp1_forward, lsnp1_reverse, lsnp2_forward, lsnp2_reverse
-
 
 def get_fraction(lsnp1, lsnp2):
     """Return the fraction of reads supporting region1."""
@@ -206,13 +220,13 @@ def get_supporting_reads(bamfile_handle, dsnp1, dsnp2, nchr, dindex):
     return [len(a) for a in lsnp1], [len(a) for a in lsnp2]
 
 
-def get_supporting_reads_single_region(bamfile_handle, dsnp1, nchr, dindex):
+def get_supporting_reads_single_region(bamfile_handle, dsnp1, nchr, dindex, min_ins_size=None):
     """
     Return the number of supporting reads at each position only in region1, as well 
     as the number of alt reads in forward and reverse.
     """
     lsnp1_for, lsnp1_rev, lsnp2_for, lsnp2_rev = get_reads_by_region(
-        bamfile_handle, nchr, dsnp1, dindex, 10
+        bamfile_handle, nchr, dsnp1, dindex, 10, min_ins_size
     )
     lsnp1 = merge_reads([lsnp1_for, lsnp1_rev])
     lsnp2 = merge_reads([lsnp2_for, lsnp2_rev])

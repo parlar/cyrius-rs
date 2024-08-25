@@ -17,12 +17,23 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+# ----------------------------------------------------------------------------
+#
+# BCyrius: CYP2D6 genotyper (upgraded version of Cyrius)
+# Copyright (c) 2024 Andreas Halman
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 
 from scipy.stats import poisson
 
 POSTERIOR_CUTOFF_STRINGENT = 0.9
-ERROR_RATE = 0.01
+ERROR_RATE = 0.1
 
 
 def call_reg1_cn(full_cn, count_reg1, count_reg2, min_read=0):

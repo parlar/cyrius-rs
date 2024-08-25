@@ -17,6 +17,17 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+# ----------------------------------------------------------------------------
+#
+# BCyrius: CYP2D6 genotyper (upgraded version of Cyrius)
+# Copyright (c) 2024 Andreas Halman
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 import os
 from collections import namedtuple
@@ -30,7 +41,7 @@ CNVTAG_TO_GENOTYPE = {
 }
 # These suballeles below are not converted to main alleles as
 # they reflect SVs.
-KEPT_SUBALLELES = ["*4.013"]
+KEPT_SUBALLELES = [] # Can include 4.013 to report it separately from *4
 # Rare alleles lead to nonunique diplotypes. Select against these
 # when there are nonunique calls.
 RARE_ALLELES = ["*34", "*39", "*4.009", "*139"]
@@ -500,7 +511,6 @@ def match_star(
     dic = get_dic(cnvcall, star_combinations)
     if dic is None:
         return star_call(None, None, None, None)
-    # print(dic)
 
     var_observed = update_variants(var_observed, cnvcall, exon9)
 
