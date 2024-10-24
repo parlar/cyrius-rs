@@ -32,6 +32,7 @@
 
 import os
 import sys
+import csv
 import argparse
 import json
 import logging
@@ -78,7 +79,7 @@ from caller.construct_star_table import get_hap_table
 from caller.match_star_allele import match_star
 
 TOOL_NAME = "BCyrius"
-TOOL_VERSION = "1.0.1"
+TOOL_VERSION = "1.0.2"
 MAD_THRESHOLD = 0.11
 EXON9_SITE1 = 7
 EXON9_SITE2 = 8
@@ -164,8 +165,14 @@ def load_parameters():
     )
 
     parser.add_argument(
-        "--population",
-        help="Export population frequencies",
+        "--population-info",
+        help="Export population frequencies information",
+        action="store_true",
+    )
+
+    parser.add_argument(
+        "--haplotype-info",
+        help="Output haplotype information",
         action="store_true",
     )
 
@@ -530,80 +537,74 @@ def prepare_resource(datadir, parameters):
     )
     return call_parameters
 
-def matchPhenotype(phenotypes, genotype):
-    # Matches genotype with phenotype
-    predicted = []
-    if genotype:
-        diplotypes = genotype.split(";")
-        for diplotype in diplotypes:
-            for p in phenotypes:
-                if compareGenotypes(diplotype.strip(), p["Genotype"]):
-                    predicted.append([p["Activity score"], p["Predicted phenotype"]])
+# Load the CYP2D6 haplotype functionality from the file
+def loadHaplotypeFunctionality(file_path):
+    haplotype_functionality = {}
+    with open(file_path, 'r') as file:
+        reader = csv.DictReader(file, delimiter="\t")
+        for row in reader:
+            haplotype = row["Haplotype"].replace("≥", "")
+            activity = row["Activity"].replace("≥", "")
+            function = row["Function"]
+            evidence_strength = row["EvidenceStrength"]
+            evidence_summary = row["EvidenceSummary"]
+            haplotype_functionality[haplotype] = {
+                "activity": activity,
+                "function": function,
+                "evidence_strength": evidence_strength,
+                "evidence_summary": evidence_summary
+            }
+    return haplotype_functionality
 
-    if not predicted:
-        return ['n/a', 'n/a']
-    return predicted
+def compareGenotypes(query, haplotype_functionality):
+    # Matches haplotype with activity value, functionality, evidence strength, and summary
+    haplotypes = []
+    diplotypes = query.split("/")
+    for haplotype_pair in diplotypes:
+        subhaplotypes = haplotype_pair.split("+")
+        haplotypes.extend(subhaplotypes)
 
-def matchPhenotype(phenotypes, genotype):
-    # Matches genotype with phenotype
-    predicted = []
-    if genotype:
-        diplotypes = genotype.split(";")
-        for diplotype in diplotypes:
-            for p in phenotypes:
-                if compareGenotypes(diplotype.strip(), p["Genotype"]):
-                    predicted.append([p["Activity score"], p["Predicted phenotype"]])
+    haplotype_details = []
+    has_na = False  # Flag to track if any haplotype results in "n/a"
 
-    if not predicted:
-        return [None, None]
+    for haplotype in haplotypes:
+        haplotype = haplotype.strip()
+        if haplotype not in haplotype_functionality:
+            has_na = True
+            haplotype_details.append({
+                "haplotype": haplotype,
+                "activity": "n/a",
+                "function": "n/a",
+                "evidence_strength": "n/a",
+                "evidence_summary": "n/a"
+            })
+        else:
+            details = haplotype_functionality[haplotype]
+            activity_value = details["activity"]
+            if activity_value == "n/a":
+                has_na = True
+            haplotype_details.append({
+                "haplotype": haplotype,
+                "activity": activity_value,
+                "function": details["function"],
+                "evidence_strength": details["evidence_strength"],
+                "evidence_summary": details["evidence_summary"]
+            })
 
-    return predicted
+    return haplotype_details, has_na
 
-def compareGenotypes(query, subject):
-    # Compare the detected genotype (query) to the ones in database (subject)
-    if not "/" in query:
-        return None
+def calculateTotalActivityScore(haplotype_details):
+    total_activity = 0.0
+    for haplotype_info in haplotype_details:
+        activity_value = haplotype_info["activity"]
+        if activity_value == "n/a":
+            return "n/a"  # If any haplotype has "n/a", total activity is "n/a"
+        total_activity += float(activity_value.replace("≥", ""))  # Clean the activity value
+    return total_activity
 
-    query_a1_star, query_a2_star = query.split("/")
-    query_a1_int, query_a1_xint = query_a1_star.split("*")[1].split("x") if "x" in query_a1_star else [query_a1_star.split("*")[1], None]
-    query_a2_int, query_a2_xint = query_a2_star.split("*")[1].split("x") if "x" in query_a2_star else [query_a2_star.split("*")[1], None]
-
-    subject_a1_star, subject_a2_star = subject.split("/")
-    subject_a1_int, subject_a1_xint = subject_a1_star.split("*")[1].split("x") if "x" in subject_a1_star else [subject_a1_star.split("*")[1], None]
-    subject_a2_int, subject_a2_xint = subject_a2_star.split("*")[1].split("x") if "x" in subject_a2_star else [subject_a2_star.split("*")[1], None]
-
-    match = [False, False]
-
-    if query_a1_int == subject_a1_int and query_a2_int == subject_a2_int:
-        if query_a1_xint == subject_a1_xint:
-            match[0] = True
-
-        if query_a2_xint == subject_a2_xint:
-            match[1] = True
-
-        if query_a1_xint:
-            if query_a1_xint == subject_a1_xint:
-                match[0] = True
-            else:
-                if query_a1_xint and subject_a1_xint and "≥" in subject_a1_xint:
-                    subject_a1_xint = subject_a1_xint.split("≥")[1]
-                    if query_a1_xint >= subject_a1_xint:
-                        match[0] = True
-
-        if query_a2_xint:
-            if query_a2_xint == subject_a2_xint:
-                match[1] = True
-            else:
-                if query_a2_xint and subject_a2_xint and "≥" in subject_a2_xint:
-                    subject_a2_xint = subject_a2_xint.split("≥")[1]
-                    if query_a2_xint >= subject_a2_xint:
-                        match[1] = True
-
-        if match[0] and match[1]:
-            return subject
 
 def sortGenotype(genotype):
-    # Sorts genotype so smaller integer will be first element
+    # Sorts genotype so smaller integer will be the first element
     if not genotype:
         return genotype
 
@@ -614,20 +615,69 @@ def sortGenotype(genotype):
     a1_star = genotype_split[0]
     a2_star = genotype_split[1]
 
-    a1_int = a1_star.split("*")[1].split("x")[0]
-    a2_int = a2_star.split("*")[1].split("x")[0]
+    try:
+        if "+" in a1_star:
+            a1_int = int(a1_star.split("*")[1].split("+")[0])
+        else:
+            a1_int = int(a1_star.split("*")[1].split("x")[0])
+    except (ValueError, IndexError):
+        a1_int = float('inf')  # Assign a very large value or some default
 
-    sorted_genotype = a2_star+"/"+a1_star if a1_int > a2_int else genotype
+    try:
+        if "+" in a2_star:
+            a2_int = int(a2_star.split("*")[1].split("+")[0])
+        else:
+            a2_int = int(a2_star.split("*")[1].split("x")[0])
+    except (ValueError, IndexError):
+        a2_int = float('inf')  # Assign a very large value or some default
+
+    sorted_genotype = a2_star + "/" + a1_star if a1_int > a2_int else genotype
 
     return sorted_genotype
 
+def matchPhenotype(phenotypes, genotype, haplotype_functionality):
+    predicted = []
+    if genotype:
+        # Split into possible diplotypes
+        diplotypes = genotype.split(";")
+        
+        for diplotype in diplotypes:
+            sorted_diplotype = sortGenotype(diplotype.strip())
+            haplotype_details, has_na = compareGenotypes(sorted_diplotype, haplotype_functionality)
+            if has_na:
+                total_activity = "n/a"
+            else:
+                total_activity = calculateTotalActivityScore(haplotype_details)
+            predicted_phenotype = determinePhenotype(total_activity)
+            predicted.append({
+                "total_activity": total_activity,
+                "predicted_phenotype": predicted_phenotype,
+                "haplotype_details": haplotype_details  # Attach haplotype information
+            })
 
+    if not predicted:
+        return [{'total_activity': 'n/a', 'predicted_phenotype': 'n/a', 'haplotype_details': []}]
+
+    return predicted
+
+def determinePhenotype(activity_score):
+    # Function to assign the phenotype based on the activity score
+    if activity_score == "n/a":
+        return "Indeterminate"
+    if activity_score == 0:
+        return "Poor Metabolizer"
+    elif 0.25 <= activity_score <= 1:
+        return "Intermediate Metabolizer"
+    elif 1.25 <= activity_score <= 2.25:
+        return "Normal Metabolizer"
+    elif activity_score > 2.25:
+        return "Ultrarapid Metabolizer"
+    return "Unknown"
 
 def get_haplotype_percentages(file_path, haplotype_name):
     # Load the tab-delimited file into a DataFrame
     df = pd.read_csv(file_path, delimiter='\t')
 
-    # Find the row corresponding to the haplotype name
     row = df[df['CYP2D6 allele'] == haplotype_name]
 
     if row.empty:
@@ -707,8 +757,9 @@ def main():
     reference_fasta = parameters.reference
     threads = parameters.threads
     path_count_file = parameters.countFilePath
-    export_population_frequencies = parameters.population
+    export_population_frequencies = parameters.population_info
     print_results = parameters.print
+    output_haplotype_info = parameters.haplotype_info
     logging.basicConfig(level=logging.DEBUG)
 
     if not sample_id:
@@ -719,25 +770,12 @@ def main():
 
     datadir = os.path.join(os.path.dirname(__file__), "data")
 
-    phenotypes = []
-    with open(os.path.join(datadir, "CYP2D6_diplotype_phenotype_table.txt"), "r") as genotype_phenotype_table:
-        for line in genotype_phenotype_table:
-            if line.startswith("#"):
-                continue
-            fields = line.split('\t')
-            phenotypes.append({
-                "Genotype": fields[0].strip(),
-                "Activity score": fields[1].strip(),
-                "Predicted phenotype": fields[2].strip(),
-                "Priority notation": fields[3].strip()
-                })
-
-
     # Prepare data files
     call_parameters = prepare_resource(datadir, parameters)
 
-    haplotype_file_path = os.path.join(datadir, 'CYP2D6_frequency_table_haplotypes.txt')
-    diplotype_file_path = os.path.join(datadir, 'CYP2D6_frequency_table_diplotypes.txt')
+    haplotypes_func_file_path = os.path.join(datadir, 'CYP2D6_haplotypes_functionality.txt')
+    haplotypes_freq_file_path = os.path.join(datadir, 'CYP2D6_frequency_table_haplotypes.txt')
+    diplotypes_freq_file_path = os.path.join(datadir, 'CYP2D6_frequency_table_diplotypes.txt')
     
     out_json = os.path.join(outdir, sample_id + ".json")
     out_tsv = os.path.join(outdir, sample_id + ".tsv")
@@ -786,24 +824,45 @@ def main():
     frequency_table = None
 
     with open(out_tsv, "w") as tsv_output:
+        # Write the main header
         tsv_output.write("\t".join(header) + "\n")
+        
         for sample_id in final_output:
             final_call = final_output[sample_id]
             sorted_genotype = sortGenotype(final_call["Genotype"])
-            predictions = matchPhenotype(phenotypes, sorted_genotype)
-            count_of_diplotypes = sum(1 for diplo in predictions if isinstance(diplo, list))
+            haplotype_functionality = loadHaplotypeFunctionality(haplotypes_func_file_path)
+            phenotypes = []
+            predictions = matchPhenotype(phenotypes, sorted_genotype, haplotype_functionality)
 
+            count_of_diplotypes = sum(1 for diplo in predictions if isinstance(diplo, dict)) 
+
+            # Variables to hold the final outputs
             if predictions[0]:
                 if count_of_diplotypes > 1:
-                    activity_scores = ";".join([p[0] for p in predictions])
-                    predicted_phenotypes = ";".join([p[1] for p in predictions])
+                    activity_scores = ";".join([str(p["total_activity"]) for p in predictions])
+                    predicted_phenotypes = ";".join([p["predicted_phenotype"] for p in predictions])
                 else:
-                    activity_scores = predictions[0][0]
-                    predicted_phenotypes = predictions[0][1]
+                    activity_scores = predictions[0]["total_activity"]
+                    predicted_phenotypes = predictions[0]["predicted_phenotype"]
             else:
-                    activity_scores = "-"
-                    predicted_phenotypes = "-"
+                activity_scores = "-"
+                predicted_phenotypes = "-"
 
+            haplotype_info_per_solution = []
+
+            for prediction in predictions:
+                haplotype_info = []
+                for haplotype_detail in prediction["haplotype_details"]:
+                    haplotype_info.append({
+                        "Haplotype": haplotype_detail["haplotype"],
+                        "ActivityValue": haplotype_detail["activity"],
+                        "Function": haplotype_detail["function"],
+                        "EvidenceStrength": haplotype_detail["evidence_strength"],
+                        "EvidenceSummary": haplotype_detail["evidence_summary"]
+                    })
+                haplotype_info_per_solution.append(haplotype_info)
+
+            # Writing output_per_sample to the file
             output_per_sample = [
                 sample_id,
                 sorted_genotype,
@@ -811,28 +870,77 @@ def main():
                 activity_scores,
                 predicted_phenotypes
             ]
+            
             tsv_output.write("\t".join(str(a) for a in output_per_sample) + "\n")
-
-        if export_population_frequencies and sorted_genotype:
-            frequency_table = diplotype_frequencies(haplotype_file_path, diplotype_file_path, sorted_genotype)
-            if not isinstance(frequency_table, str):
+            
+            # Check if haplotype_info is requested and write haplotype information
+            if output_haplotype_info and sorted_genotype != "None":
+                # Write header for haplotype details
+                tsv_output.write("\nHaplotype\tActivity value\tFunction\tEvidence strength\tEvidence summary\n")
+                
+                for solution_info in haplotype_info_per_solution:
+                    for haplotype in solution_info:
+                        # Write each haplotype detail as a row
+                        haplotype_row = [
+                            haplotype["Haplotype"],
+                            haplotype["ActivityValue"],
+                            haplotype["Function"],
+                            haplotype["EvidenceStrength"],
+                            haplotype["EvidenceSummary"]
+                        ]
+                        tsv_output.write("\t".join(str(h) for h in haplotype_row) + "\n")
+                
+            # Write population frequencies if requested and sorted_genotype is available
+            if export_population_frequencies and sorted_genotype != "None":
                 tsv_output.write("\n")
-                frequency_table.to_csv(tsv_output, sep='\t', index=False)
+                frequency_table = diplotype_frequencies(haplotypes_freq_file_path, diplotypes_freq_file_path, sorted_genotype)
+                if not isinstance(frequency_table, str):
+                    frequency_table.to_csv(tsv_output, sep='\t', index=False)
 
     if print_results:
         column_width = 20
         print("""
-======================================================
+========================================================
                      RESULTS
-======================================================
+========================================================
         """)
 
         for header_item, result_item in zip(header, output_per_sample):
             print(f"{str(header_item):<{column_width}} → {str(result_item)}")
 
+        print("")
+        processed_haplotypes = set()
+
+        if output_haplotype_info and sorted_genotype != "None":
+            # Example: How you might print or process the haplotype info
+            for index, solution_info in enumerate(haplotype_info_per_solution):
+                print(f"-------------- Details for each haplotype --------------")
+                if index > 0:
+                    print(f"~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
+                    print(f"Alternative diplotype solution:")
+
+                for haplotype in solution_info:
+                    if haplotype['Haplotype'] in processed_haplotypes:
+                        continue  # Skip this haplotype if already handled
+
+                    # If it's a new haplotype, print the details
+                    print(f"{haplotype['Haplotype']}")
+                    print(f"{'Activity value':<{column_width}} → {haplotype['ActivityValue']}")
+                    print(f"{'Function':<{column_width}} → {haplotype['Function']}")
+                    if haplotype['EvidenceStrength'] != "n/a":
+                        print(f"{'Evidence strength':<{column_width}} → {haplotype['EvidenceStrength']}")
+                        print(f"{'Evidence summary':<{column_width}} → {haplotype['EvidenceSummary']}")
+                    print("")  # For spacing between haplotypes
+
+                    # Add the haplotype to the set of processed ones
+                    processed_haplotypes.add(haplotype['Haplotype'])
+
         if export_population_frequencies and not isinstance(frequency_table, str):
-            print("\n")
+            print(f"---------------- Population frequencies ----------------")
             print(frequency_table.to_string(index=False))
+
+
+
 
 if __name__ == "__main__":
     main()
