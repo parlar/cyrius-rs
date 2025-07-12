@@ -79,7 +79,7 @@ from caller.construct_star_table import get_hap_table
 from caller.match_star_allele import match_star
 
 TOOL_NAME = "BCyrius"
-TOOL_VERSION = "1.0.4"
+TOOL_VERSION = "1.0.5"
 MAD_THRESHOLD = 0.11
 EXON9_SITE1 = 7
 EXON9_SITE2 = 8

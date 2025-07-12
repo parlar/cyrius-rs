@@ -1,6 +1,7 @@
 *1	NA	Normal_function
 *1.003	g.42128813G>A	Normal_function
 *1.011	g.42129130C>G	Normal_function
+*1.034	g.42128071C>G	Normal_function
 *2	g.42127941G>A	g.42126611C>G	Normal_function
 *2.001	g.42127941G>A	g.42126611C>G	g.42129130C>G	Normal_function
 *2.002	g.42127941G>A	g.42126611C>G	g.42129130C>G	g.42129754G>A	Normal_function
@@ -209,4 +210,4 @@
 *182	g.42126611C>G	g.42127941G>A	g.42129130C>G	g.42127593G>A	Unknown_function
 *183	g.42126611C>G	g.42127941G>A	g.42129130C>G	g.42127842G>A	Unknown_function
 *184	g.42127941G>A	g.42129130C>G	g.42130761C>T	Unknown_function
-*185	g.42129809T>C	g.42129819G>T	Unknown_function
+*185	g.42129809T>C	g.42129819G>T	g.42128071C>G	Unknown_function

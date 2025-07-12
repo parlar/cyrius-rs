@@ -2,11 +2,19 @@
 
 BCyrius (Cyrius B) is a new version of Cyrius, a tool for genotyping CYP2D6 from whole-genome sequencing data. The original version of Cyrius was developed by Illumina and is available on [GitHub](https://github.com/Illumina/Cyrius), however, it has not received updates since mid-2021. BCyrius includes fixes and updates to the software to allow genotyping of all currently known star alleles. In addition to providing genotypes, it also outputs the activity score and the predicted phenotype based on the latest CPIC data, as well as population frequencies for the detected diplotype and haplotypes. BCyrius works on samples aligned to the hg38 reference genome.
 
+## Installation
+To install BCyrius as a Python package, run the following from the root of the repository:
+```bash
+pip install .
+```
+This will install all required dependencies and make the bcyrius command-line interface available system-wide.
+
+
 ## Running the program
 
-Example of running the program with the minimum parameters:
+Once installed, run the tool using the bcyrius CLI:
 ```bash
-python3 star_caller.py --input INPUT_FILE_PATH --outDir OUTPUT_DIRECTORY
+bcyrius --input INPUT_FILE_PATH --outDir OUTPUT_DIRECTORY
 ```
 **Additional Parameters:**
 
@@ -19,6 +27,13 @@ python3 star_caller.py --input INPUT_FILE_PATH --outDir OUTPUT_DIRECTORY
 | `--population-info` | Use `--population` to output population frequencies for the determined diplotype as well as for each haplotype (see an example of the output below).                      |
 | `--haplotype-info` | Use `---haplotype-info` to output information for each haplotype (activity value, function and evidence).                      |
 | `--print`      | Besides saving the results into a TSV file, you can also use `--print` to display the results on the screen/STDOUT after the program has finished.                 |
+
+## Legacy usage (not recommended):
+
+If you prefer or need to run the script directly without installation:
+```bash
+python3 star_caller/star_caller.py --input INPUT_FILE_PATH --outDir OUTPUT_DIRECTORY
+```
 
 ## Example output
 Example of an outputted TSV file. First two rows (header and the result line) is outputted in all cases. The haplotype information is only outputted when `--haplotype-info` parameter is used and population data (last part) only when `--population-info` is used, e.g. to print both use `python3 star_caller.py --input ERR1955391.bam --outDir results/ --population-info --haplotype-info`.

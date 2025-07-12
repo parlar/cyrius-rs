@@ -1,5 +1,11 @@
 # Changelog
 
+**v1.0.5**
+Updated *185 to reduce false positives. No changes in CYP2D6 in PharmVar; current as of PharmVar v6.2.14. Merged request by Zentriole Chlorophyll to improve the usage of the tool (thanks!).
+
+**v1.0.4**
+Added *178-185 (PharmVar v6.2.7).
+
 **v1.0.3**
 Added *177, confirmed the ability to call newly added *4.035 as *4 and the modified *150.002 as *150 (PharmVar v6.1.7).
 
