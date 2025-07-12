@@ -5,7 +5,7 @@ BCyrius (Cyrius B) is a new version of Cyrius, a tool for genotyping CYP2D6 from
 ## Installation
 To install BCyrius as a Python package, run the following from the root of the repository:
 ```bash
-pip install .
+pip3 install .
 ```
 This will install all required dependencies and make the bcyrius command-line interface available system-wide.
 
