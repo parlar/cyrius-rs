@@ -32,7 +32,7 @@ bcyrius --input INPUT_FILE_PATH --outDir OUTPUT_DIRECTORY
 
 If you prefer or need to run the script directly without installation:
 ```bash
-python3 star_caller/star_caller.py --input INPUT_FILE_PATH --outDir OUTPUT_DIRECTORY
+python3 run.py --input INPUT_FILE_PATH --outDir OUTPUT_DIRECTORY
 ```
 
 ## Example output
