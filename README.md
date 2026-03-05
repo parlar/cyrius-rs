@@ -25,7 +25,7 @@ bcyrius --input INPUT_FILE_PATH --outDir OUTPUT_DIRECTORY
 | `--id`     | Specify sample ID. By default, the file name is used (e.g., sample123.bam ID is sample123 and therefore results are saved into sample123.tsv and sample123.json files). To override this, use "--id". For example, `--id 123` creates 123.tsv and 123.json. |
 | `--threads`  | Use "--threads" to allocate more threads to the tool, where X is the number of threads, e.g. `--threads 2`.                                                                    |
 | `--population-info` | Use `--population` to output population frequencies for the determined diplotype as well as for each haplotype (see an example of the output below).                      |
-| `--haplotype-info` | Use `---haplotype-info` to output information for each haplotype (activity value, function and evidence).                      |
+| `--haplotype-info` | Use `--haplotype-info` to output information for each haplotype (activity value, function and evidence).                      |
 | `--print`      | Besides saving the results into a TSV file, you can also use `--print` to display the results on the screen/STDOUT after the program has finished.                 |
 
 ## Legacy usage (not recommended):

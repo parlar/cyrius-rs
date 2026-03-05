@@ -81,6 +81,8 @@ def get_snp_position(pos_file, genome, group=None):
                         )
                     dindex.setdefault(reg1_name, counter)
                     dindex.setdefault(reg2_name, counter)
+    if counter == -1:
+        raise Exception("No valid SNP positions found in file: %s" % pos_file)
     nchr = split_line[0]
     if genome == "38":
         nchr = nchr.replace("chr", "")

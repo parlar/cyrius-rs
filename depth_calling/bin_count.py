@@ -283,6 +283,6 @@ def process_counts_and_prepare_for_normalization(count_dic, region_dic):
     for (region, gc) in region_dic["norm"]:
         region_length = int(region[2]) - int(region[1])
         counts_for_normalization.append(count_dic[region[3]] / region_length)
-        gc_for_normalization.append(gc)
+        gc_for_normalization.append(float(gc))
 
     return counts_for_normalization, gc_for_normalization, region_type_cn

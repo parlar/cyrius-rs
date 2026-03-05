@@ -232,6 +232,7 @@ def d6_star_caller(
             None,
             None,
         )
+        bamfile.close()
         return sample_call
 
     # 2. GMM and CN call
@@ -334,6 +335,7 @@ def d6_star_caller(
             None,
             raw_count,
         )
+        bamfile.close()
         return sample_call
 
     # 4. Call CNV and hybrids
@@ -376,6 +378,7 @@ def d6_star_caller(
             ",".join(str(a) for a in raw_d6_cn),
             raw_count,
         )
+        bamfile.close()
         return sample_call
 
     # 5. Call variants
@@ -739,12 +742,15 @@ def isChrInChromosomeNames(input_file):
     chr_in_names = False
     input_file_read = pysam.AlignmentFile(input_file, 'rb')
 
-    for contig_id in range(5):  # Check only the first 5 chromosomes to speed it up
-        contig_name = input_file_read.get_reference_name(contig_id)
+    try:
+        for contig_id in range(5):  # Check only the first 5 chromosomes to speed it up
+            contig_name = input_file_read.get_reference_name(contig_id)
 
-        if "chr" in contig_name:
-            chr_in_names = True
-            break
+            if "chr" in contig_name:
+                chr_in_names = True
+                break
+    finally:
+        input_file_read.close()
 
     return chr_in_names
 
@@ -897,7 +903,7 @@ def main():
                 if not isinstance(frequency_table, str):
                     frequency_table.to_csv(tsv_output, sep='\t', index=False)
 
-    if print_results:
+    if print_results and final_output:
         column_width = 20
         print("""
 ========================================================

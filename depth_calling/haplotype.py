@@ -91,7 +91,8 @@ def get_bases_per_read(
                                             dread[read_name].setdefault(pos, None)
                                     if dread[read_name][dsnp_index] not in [None, hap]:
                                         dread[read_name][dsnp_index] = None
-                                    dread[read_name][dsnp_index] = hap
+                                    else:
+                                        dread[read_name][dsnp_index] = hap
     return dread
 
 

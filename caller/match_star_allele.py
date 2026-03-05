@@ -569,7 +569,7 @@ def match_star(
 
     else:
         var_observed_68 = var_observed.copy()
-        matchtag = call_star68(var_observed, cnvcall, dic)
+        matchtag = call_star68(var_observed_68, cnvcall, dic)
         final_call = matchtag.star_call
         final_call_clean = get_final_call_clean(final_call, cnvcall, spacer_cn)
         call_info = matchtag.call_info
