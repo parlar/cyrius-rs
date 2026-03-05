@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(/home/parla/dev/bcyrius/bcyrius-rs/target/release/bcyrius --help)",
+      "Read(//home/parla/.cargo/registry/**)"
+    ]
+  }
+}

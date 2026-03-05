@@ -1,0 +1,24 @@
+[package]
+name = "cyrius-rs"
+version = "1.0.5"
+edition = "2021"
+description = "CYP2D6 genotyping tool"
+license = "Apache-2.0"
+
+[dependencies]
+rust-htslib = "0.47"
+clap = { version = "4", features = ["derive"] }
+statrs = "0.17"
+rayon = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+regex = "1"
+log = "0.4"
+env_logger = "0.11"
+indexmap = { version = "2", features = ["serde"] }
+lowess = "0.1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
