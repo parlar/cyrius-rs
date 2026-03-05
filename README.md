@@ -2,6 +2,8 @@
 
 A Rust implementation of [BCyrius](../bcyrius/), a tool for genotyping CYP2D6 from whole-genome sequencing (WGS) data. Cyrius-RS is a faithful port that produces identical output to the Python version, compiled into a single static binary with no runtime dependencies (beyond htslib).
 
+> **Warning:** This project is in early development and has not been validated against real data yet. The code is likely still buggy. Do not use for clinical or production purposes.
+
 ## Features
 
 - Genotypes CYP2D6 star alleles from BAM/CRAM files aligned to hg38
