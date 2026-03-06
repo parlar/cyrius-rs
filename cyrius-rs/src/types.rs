@@ -173,3 +173,14 @@ pub struct FrequencyRow {
     pub biogeographic_group: String,
     pub values: IndexMap<String, String>,
 }
+
+/// Feature flags for toggling experimental improvements
+#[derive(Debug, Clone, Copy)]
+pub struct FeatureFlags {
+    /// Apply strand bias filtering to ALL variant sites (not just NOISY_VAR)
+    pub strand_bias_all: bool,
+    /// Use fuzzy matching when exact star allele lookup fails
+    pub fuzzy_match: bool,
+    /// Use base-quality-aware likelihoods instead of fixed error rate
+    pub quality_aware: bool,
+}

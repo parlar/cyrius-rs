@@ -12,7 +12,9 @@ use cyrius_rs::caller::call_variants::{
 use cyrius_rs::caller::cnv_hybrid::get_cnvtag;
 use cyrius_rs::caller::construct_star_table::get_hap_table;
 use cyrius_rs::caller::match_star_allele::match_star;
+use cyrius_rs::caller::strand_bias_all;
 use cyrius_rs::data;
+use cyrius_rs::types::FeatureFlags;
 use cyrius_rs::depth_calling::bin_count::{get_normed_depth, get_normed_depth_from_count};
 use cyrius_rs::depth_calling::gmm::Gmm;
 use cyrius_rs::depth_calling::snp_count::{
@@ -111,6 +113,15 @@ struct Cli {
 
     #[arg(long = "print", help = "Print results on screen")]
     print: bool,
+
+    #[arg(long = "strand-bias-all", help = "Apply strand bias filtering to all variant sites")]
+    strand_bias_all: bool,
+
+    #[arg(long = "fuzzy-match", help = "Use fuzzy matching when exact star allele lookup fails")]
+    fuzzy_match: bool,
+
+    #[arg(long = "quality-aware", help = "Use base-quality-aware likelihoods instead of fixed error rate")]
+    quality_aware: bool,
 }
 
 /// Check if chromosome names contain "chr" prefix.
@@ -179,6 +190,7 @@ fn d6_star_caller(
     count_file: Option<&str>,
     reference_fasta: Option<&str>,
     index_name: Option<&str>,
+    features: &FeatureFlags,
 ) -> D6Call {
     // 1. Read counting and normalization
     let normalized_depth = if let Some(cf) = count_file {
@@ -232,14 +244,46 @@ fn d6_star_caller(
         }
     };
 
-    // 3. Get allele counts
-    let mut reader = open_alignment_file_with_index(bam_path, reference_fasta, index_name).unwrap();
-    let (snp_d6, snp_d7) = get_supporting_reads(&mut reader, &params.snp_db);
-    let (mut var_alt, mut var_ref, var_alt_forward, var_alt_reverse) =
-        get_supporting_reads_single_region(&mut reader, &params.var_db, None);
+    // 3. Get allele counts (parallel when threads > 1)
+    let (snp_d6, snp_d7, mut var_alt, mut var_ref, var_alt_forward, var_alt_reverse,
+     ref_read, long_ins_read, short_ins_read, var_homo_alt, var_homo_ref) = if threads > 1 {
+        std::thread::scope(|s| {
+            let h_snp = s.spawn(|| {
+                let mut r = open_alignment_file_with_index(bam_path, reference_fasta, index_name).unwrap();
+                get_supporting_reads(&mut r, &params.snp_db)
+            });
+            let h_var = s.spawn(|| {
+                let mut r = open_alignment_file_with_index(bam_path, reference_fasta, index_name).unwrap();
+                get_supporting_reads_single_region(&mut r, &params.var_db, None)
+            });
+            let h_ins = s.spawn(|| {
+                let mut r = open_alignment_file_with_index(bam_path, reference_fasta, index_name).unwrap();
+                get_allele_counts_var42128936(&mut r, &params.genome)
+            });
+            let h_homo = s.spawn(|| {
+                let mut r = open_alignment_file_with_index(bam_path, reference_fasta, index_name).unwrap();
+                get_supporting_reads(&mut r, &params.var_homo_db)
+            });
 
-    let (ref_read, long_ins_read, short_ins_read) =
-        get_allele_counts_var42128936(&mut reader, &params.genome);
+            let (snp_d6, snp_d7) = h_snp.join().unwrap();
+            let (var_alt, var_ref, var_alt_forward, var_alt_reverse) = h_var.join().unwrap();
+            let (ref_read, long_ins_read, short_ins_read) = h_ins.join().unwrap();
+            let (var_homo_alt, var_homo_ref) = h_homo.join().unwrap();
+            (snp_d6, snp_d7, var_alt, var_ref, var_alt_forward, var_alt_reverse,
+             ref_read, long_ins_read, short_ins_read, var_homo_alt, var_homo_ref)
+        })
+    } else {
+        let mut reader = open_alignment_file_with_index(bam_path, reference_fasta, index_name).unwrap();
+        let (snp_d6, snp_d7) = get_supporting_reads(&mut reader, &params.snp_db);
+        let (var_alt, var_ref, var_alt_forward, var_alt_reverse) =
+            get_supporting_reads_single_region(&mut reader, &params.var_db, None);
+        let (ref_read, long_ins_read, short_ins_read) =
+            get_allele_counts_var42128936(&mut reader, &params.genome);
+        let (var_homo_alt, var_homo_ref) = get_supporting_reads(&mut reader, &params.var_homo_db);
+        (snp_d6, snp_d7, var_alt, var_ref, var_alt_forward, var_alt_reverse,
+         ref_read, long_ins_read, short_ins_read, var_homo_alt, var_homo_ref)
+    };
+
     update_var42128936(
         &params.var_list,
         &mut var_alt,
@@ -248,8 +292,6 @@ fn d6_star_caller(
         long_ins_read,
         short_ins_read,
     );
-
-    let (var_homo_alt, var_homo_ref) = get_supporting_reads(&mut reader, &params.var_homo_db);
 
     // Build raw count dict
     let mut raw_count = IndexMap::new();
@@ -357,6 +399,16 @@ fn d6_star_caller(
     let cnvtag_str = cnvtag.unwrap();
 
     // 5. Call variants
+    // Feature: strand_bias_all — filter additional sites before CN calling
+    if features.strand_bias_all {
+        let filtered = strand_bias_all::apply_strand_bias_all(
+            &mut var_alt, &var_alt_forward, &var_alt_reverse, &params.var_list,
+        );
+        if filtered > 0 {
+            log::info!("strand_bias_all: filtered {} additional variant sites", filtered);
+        }
+    }
+
     let cn_call_var_homo = call_cn_var_homo(total_cn, &var_homo_alt, &var_homo_ref);
     let cn_call_var = call_cn_var(
         &cnvtag_str,
@@ -368,29 +420,55 @@ fn d6_star_caller(
         &params.var_db,
     );
 
-    // Call haplotype variants
+    // Call haplotype variants (parallel when threads > 1)
     let hap_db = &params.haplotype_db;
 
-    let (site42126938_count, var42126938, var42126938_g_haplotype) =
-        call_var42126938(&mut reader, total_cn, &hap_db["g.42126938C>T"]);
+    let (site42126938_count, var42126938, var42126938_g_haplotype,
+     site42127526_count, site42127556_count, var42127526,
+     var42127803_diff_haplotype,
+     var42130655_count, var42130655ins_a) = if threads > 1 {
+        std::thread::scope(|s| {
+            let h1 = s.spawn(|| {
+                let mut r = open_alignment_file_with_index(bam_path, reference_fasta, index_name).unwrap();
+                call_var42126938(&mut r, total_cn, &hap_db["g.42126938C>T"])
+            });
+            let h2 = s.spawn(|| {
+                let mut r = open_alignment_file_with_index(bam_path, reference_fasta, index_name).unwrap();
+                call_var42127526_var42127556(&mut r, &cnvtag_str, &hap_db["g.42127526C>T_g.42127556T>C"])
+            });
+            let h3 = s.spawn(|| {
+                let mut r = open_alignment_file_with_index(bam_path, reference_fasta, index_name).unwrap();
+                call_var42127803hap(&mut r, &cnvtag_str, &hap_db["g.42127803C>T"])
+            });
+            let h4 = s.spawn(|| {
+                let mut r = open_alignment_file_with_index(bam_path, reference_fasta, index_name).unwrap();
+                call_var42130655ins_a(&mut r, total_cn, &hap_db["g.42130655-42130656insA"])
+            });
+
+            let (c1, v1, g1) = h1.join().unwrap();
+            let (c2a, c2b, v2) = h2.join().unwrap();
+            let v3 = h3.join().unwrap();
+            let (c4, v4) = h4.join().unwrap();
+            (c1, v1, g1, c2a, c2b, v2, v3, c4, v4)
+        })
+    } else {
+        let mut reader = open_alignment_file_with_index(bam_path, reference_fasta, index_name).unwrap();
+        let (c1, v1, g1) = call_var42126938(&mut reader, total_cn, &hap_db["g.42126938C>T"]);
+        let (c2a, c2b, v2) = call_var42127526_var42127556(&mut reader, &cnvtag_str, &hap_db["g.42127526C>T_g.42127556T>C"]);
+        let v3 = call_var42127803hap(&mut reader, &cnvtag_str, &hap_db["g.42127803C>T"]);
+        let (c4, v4) = call_var42130655ins_a(&mut reader, total_cn, &hap_db["g.42130655-42130656insA"]);
+        (c1, v1, g1, c2a, c2b, v2, v3, c4, v4)
+    };
+
     raw_count.entry("g.42126938C>T".to_string()).or_insert_with(||
         format!("{},{}", site42126938_count[1], site42126938_count[0]),
     );
-
-    let (site42127526_count, site42127556_count, var42127526) =
-        call_var42127526_var42127556(&mut reader, &cnvtag_str, &hap_db["g.42127526C>T_g.42127556T>C"]);
     raw_count.entry("g.42127526C>T".to_string()).or_insert_with(||
         format!("{},{}", site42127526_count[1], site42127526_count[0]),
     );
     raw_count.entry("g.42127556T>C".to_string()).or_insert_with(||
         format!("{},{}", site42127556_count[1], site42127556_count[0]),
     );
-
-    let var42127803_diff_haplotype =
-        call_var42127803hap(&mut reader, &cnvtag_str, &hap_db["g.42127803C>T"]);
-
-    let (var42130655_count, var42130655ins_a) =
-        call_var42130655ins_a(&mut reader, total_cn, &hap_db["g.42130655-42130656insA"]);
     raw_count.entry("g.42130655-42130656insA".to_string()).or_insert_with(||
         format!("{},{}", var42130655_count[1], var42130655_count[0]),
     );
@@ -418,10 +496,16 @@ fn d6_star_caller(
         &exon9_values,
         var42126938_g_haplotype,
         var42127803_diff_haplotype,
+        features,
     );
 
     let mut genotype_filter = None;
     let mut final_star_allele_call = None;
+    let is_fuzzy = star_called
+        .call_info
+        .as_deref()
+        .map_or(false, |s| s.starts_with("fuzzy_match"));
+
     if star_called.call_info.is_some()
         && star_called.call_info.as_deref() != Some("no_match")
         && star_called.call_info.as_deref() != None
@@ -434,6 +518,8 @@ fn d6_star_caller(
                 genotype_filter = Some("Not_assigned_to_haplotypes".to_string());
             } else if high_cn_low_confidence {
                 genotype_filter = Some("LowQ_high_CN".to_string());
+            } else if is_fuzzy {
+                genotype_filter = Some("Fuzzy_match".to_string());
             } else {
                 genotype_filter = Some("PASS".to_string());
             }
@@ -508,6 +594,19 @@ fn main() {
         return;
     }
 
+    let features = FeatureFlags {
+        strand_bias_all: cli.strand_bias_all,
+        fuzzy_match: cli.fuzzy_match,
+        quality_aware: cli.quality_aware,
+    };
+
+    if features.strand_bias_all || features.fuzzy_match || features.quality_aware {
+        log::info!(
+            "Experimental features: strand_bias_all={}, fuzzy_match={}, quality_aware={}",
+            features.strand_bias_all, features.fuzzy_match, features.quality_aware
+        );
+    }
+
     log::info!("Processing sample {}", sample_id);
 
     let cyp2d6_call = d6_star_caller(
@@ -517,6 +616,7 @@ fn main() {
         count_file.as_deref(),
         cli.reference.as_deref(),
         index_name.as_deref(),
+        &features,
     );
 
     if cyp2d6_call.coverage_mad > MAD_THRESHOLD {

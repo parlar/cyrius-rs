@@ -118,175 +118,201 @@ pub fn get_hap_table(star_table_content: &str) -> StarCombinations {
     let mut star_keys: Vec<String> = star_var_ids.keys().cloned().collect();
     star_keys.sort();
 
-    // Phase 3: Build combination tables using fast integer merging
-
-    // CN=2: iterate ordered pairs (s1 <= s2) since result is symmetric
-    let mut dhap2: HashMap<String, Vec<String>> = HashMap::new();
+    // Phase 3: Build combination tables using fast integer merging (parallelized)
     let n = star_keys.len();
-    for i in 0..n {
-        let ids1 = &star_var_ids[&star_keys[i]];
-        for j in i..n {
-            let ids2 = &star_var_ids[&star_keys[j]];
-            let key = merge_to_key(&[ids1, ids2], &id_to_var);
-            // star_keys is sorted, so s1 <= s2 already — no need to sort
-            let ss = format!("{}_{}", &star_keys[i], &star_keys[j]);
-            insert_hap(&key, &ss, &mut dhap2);
-        }
-    }
 
-    // CN=3: iterate ordered triples (s1 <= s2 <= s3)
-    let mut dhap3: HashMap<String, Vec<String>> = HashMap::new();
-    for i in 0..n {
-        let ids1 = &star_var_ids[&star_keys[i]];
-        for j in i..n {
-            let ids2 = &star_var_ids[&star_keys[j]];
-            for k in j..n {
-                let ids3 = &star_var_ids[&star_keys[k]];
-                let key = merge_to_key(&[ids1, ids2, ids3], &id_to_var);
-                let ss = format!("{}_{}_{}", &star_keys[i], &star_keys[j], &star_keys[k]);
-                insert_hap(&key, &ss, &mut dhap3);
-            }
-        }
-    }
-
-    // CN=3 pair (s1 + s2×2): iterate all pairs since s1 and s2 play different roles
-    let mut dhap3pair: HashMap<String, Vec<String>> = HashMap::new();
-    for i in 0..n {
-        let ids1 = &star_var_ids[&star_keys[i]];
-        for j in 0..n {
-            let ids2 = &star_var_ids[&star_keys[j]];
-            let key = merge_to_key(&[ids1, ids2, ids2], &id_to_var);
-            let ss = make_star_set(&[&star_keys[i], &star_keys[j], &star_keys[j]]);
-            insert_hap(&key, &ss, &mut dhap3pair);
-        }
-    }
-
-    // CN=4 pair: s1×2+s2×2 (ordered i<=j) and s1+s2×3 (all pairs)
-    let mut dhap4pair: HashMap<String, Vec<String>> = HashMap::new();
-    for i in 0..n {
-        let ids1 = &star_var_ids[&star_keys[i]];
-        for j in i..n {
-            let ids2 = &star_var_ids[&star_keys[j]];
-            // s1×2 + s2×2
-            let key = merge_to_key(&[ids1, ids1, ids2, ids2], &id_to_var);
-            let ss = make_star_set(&[&star_keys[i], &star_keys[i], &star_keys[j], &star_keys[j]]);
-            insert_hap(&key, &ss, &mut dhap4pair);
-        }
-        for j in 0..n {
-            let ids2 = &star_var_ids[&star_keys[j]];
-            // s1 + s2×3
-            let key = merge_to_key(&[ids1, ids2, ids2, ids2], &id_to_var);
-            let ss = make_star_set(&[&star_keys[i], &star_keys[j], &star_keys[j], &star_keys[j]]);
-            insert_hap(&key, &ss, &mut dhap4pair);
-        }
-    }
-
-    // CN=5: s1×2+s2×3 (all pairs) and s1+s2×4 (all pairs)
-    let mut dhap5pair: HashMap<String, Vec<String>> = HashMap::new();
-    for i in 0..n {
-        let ids1 = &star_var_ids[&star_keys[i]];
-        for j in 0..n {
-            let ids2 = &star_var_ids[&star_keys[j]];
-            let key = merge_to_key(&[ids1, ids1, ids2, ids2, ids2], &id_to_var);
-            let ss = make_star_set(&[&star_keys[i], &star_keys[i], &star_keys[j], &star_keys[j], &star_keys[j]]);
-            insert_hap(&key, &ss, &mut dhap5pair);
-
-            let key = merge_to_key(&[ids1, ids2, ids2, ids2, ids2], &id_to_var);
-            let ss = make_star_set(&[&star_keys[i], &star_keys[j], &star_keys[j], &star_keys[j], &star_keys[j]]);
-            insert_hap(&key, &ss, &mut dhap5pair);
-        }
-    }
-
-    // CN=6: s1×2+s2×4, s1+s2×5, s1×3+s2×3
-    let mut dhap6pair: HashMap<String, Vec<String>> = HashMap::new();
-    for i in 0..n {
-        let ids1 = &star_var_ids[&star_keys[i]];
-        for j in 0..n {
-            let ids2 = &star_var_ids[&star_keys[j]];
-            let key = merge_to_key(&[ids1, ids1, ids2, ids2, ids2, ids2], &id_to_var);
-            let ss = make_star_set(&[&star_keys[i], &star_keys[i], &star_keys[j], &star_keys[j], &star_keys[j], &star_keys[j]]);
-            insert_hap(&key, &ss, &mut dhap6pair);
-
-            let key = merge_to_key(&[ids1, ids2, ids2, ids2, ids2, ids2], &id_to_var);
-            let ss = make_star_set(&[&star_keys[i], &star_keys[j], &star_keys[j], &star_keys[j], &star_keys[j], &star_keys[j]]);
-            insert_hap(&key, &ss, &mut dhap6pair);
-        }
-    }
-    for i in 0..n {
-        let ids1 = &star_var_ids[&star_keys[i]];
-        for j in i..n {
-            let ids2 = &star_var_ids[&star_keys[j]];
-            // s1×3 + s2×3 (ordered i<=j)
-            let key = merge_to_key(&[ids1, ids1, ids1, ids2, ids2, ids2], &id_to_var);
-            let ss = make_star_set(&[&star_keys[i], &star_keys[i], &star_keys[i], &star_keys[j], &star_keys[j], &star_keys[j]]);
-            insert_hap(&key, &ss, &mut dhap6pair);
-        }
-    }
-
-    // exon9hybx2
-    let mut dhap_exon9_x2: HashMap<String, Vec<String>> = HashMap::new();
-    for &e1 in EXON9GC_ALLELES {
-        for &e2 in EXON9GC_ALLELES {
-            if let (Some(ids_e1), Some(ids_e2)) = (star_var_ids.get(e1), star_var_ids.get(e2)) {
-                for s3 in &star_keys {
-                    let ids3 = &star_var_ids[s3];
-                    for s4 in &star_keys {
-                        let ids4 = &star_var_ids[s4];
-                        let key = merge_to_key(&[ids_e1, ids_e2, ids3, ids4], &id_to_var);
-                        let ss = make_star_set(&[e1, e2, s3, s4]);
-                        insert_hap(&key, &ss, &mut dhap_exon9_x2);
+    let (dhap2, dhap3, dhap3pair, dhap4pair, dhap5pair, dhap6pair,
+     dhap_exon9_x2, dhap_exon9_x3, dhap_exon9_x4, dhap_dup_exon9) =
+        std::thread::scope(|s| {
+            let h_dhap2 = s.spawn(|| {
+                let mut dhap2: HashMap<String, Vec<String>> = HashMap::new();
+                for i in 0..n {
+                    let ids1 = &star_var_ids[&star_keys[i]];
+                    for j in i..n {
+                        let ids2 = &star_var_ids[&star_keys[j]];
+                        let key = merge_to_key(&[ids1, ids2], &id_to_var);
+                        let ss = format!("{}_{}", &star_keys[i], &star_keys[j]);
+                        insert_hap(&key, &ss, &mut dhap2);
                     }
                 }
-            }
-        }
-    }
+                dhap2
+            });
 
-    // exon9hybx3
-    let mut dhap_exon9_x3: HashMap<String, Vec<String>> = HashMap::new();
-    for &e1 in EXON9GC_ALLELES {
-        for &e2 in EXON9GC_ALLELES {
-            for &e3 in EXON9GC_ALLELES {
-                if let (Some(ids_e1), Some(ids_e2), Some(ids_e3)) =
-                    (star_var_ids.get(e1), star_var_ids.get(e2), star_var_ids.get(e3))
-                {
-                    for s4 in &star_keys {
-                        let ids4 = &star_var_ids[s4];
-                        for s5 in &star_keys {
-                            let ids5 = &star_var_ids[s5];
-                            let key = merge_to_key(&[ids_e1, ids_e2, ids_e3, ids4, ids5], &id_to_var);
-                            let ss = make_star_set(&[e1, e2, e3, s4, s5]);
-                            insert_hap(&key, &ss, &mut dhap_exon9_x3);
+            let h_dhap3 = s.spawn(|| {
+                let mut dhap3: HashMap<String, Vec<String>> = HashMap::new();
+                for i in 0..n {
+                    let ids1 = &star_var_ids[&star_keys[i]];
+                    for j in i..n {
+                        let ids2 = &star_var_ids[&star_keys[j]];
+                        for k in j..n {
+                            let ids3 = &star_var_ids[&star_keys[k]];
+                            let key = merge_to_key(&[ids1, ids2, ids3], &id_to_var);
+                            let ss = format!("{}_{}_{}", &star_keys[i], &star_keys[j], &star_keys[k]);
+                            insert_hap(&key, &ss, &mut dhap3);
                         }
                     }
                 }
-            }
-        }
-    }
+                dhap3
+            });
 
-    // exon9hybx4
-    let mut dhap_exon9_x4: HashMap<String, Vec<String>> = HashMap::new();
-    if let (Some(ids_10), Some(ids_36)) = (star_var_ids.get("*10"), star_var_ids.get("*36")) {
-        let key = merge_to_key(&[ids_10, ids_10, ids_36, ids_36, ids_36, ids_36], &id_to_var);
-        let ss = make_star_set(&["*10", "*10", "*36", "*36", "*36", "*36"]);
-        insert_hap(&key, &ss, &mut dhap_exon9_x4);
-    }
-
-    // dup_exon9hyb
-    let mut dhap_dup_exon9: HashMap<String, Vec<String>> = HashMap::new();
-    let pair_alleles = exon9gc_pair_alleles();
-    for (&e1, &e2) in &pair_alleles {
-        if let (Some(ids_e1), Some(ids_e2)) = (star_var_ids.get(e1), star_var_ids.get(e2)) {
-            for s3 in &star_keys {
-                let ids3 = &star_var_ids[s3];
-                for s4 in &star_keys {
-                    let ids4 = &star_var_ids[s4];
-                    let key = merge_to_key(&[ids_e1, ids_e2, ids3, ids4], &id_to_var);
-                    let ss = make_star_set(&[e1, e2, s3, s4]);
-                    insert_hap(&key, &ss, &mut dhap_dup_exon9);
+            let h_dhap3pair = s.spawn(|| {
+                let mut dhap3pair: HashMap<String, Vec<String>> = HashMap::new();
+                for i in 0..n {
+                    let ids1 = &star_var_ids[&star_keys[i]];
+                    for j in 0..n {
+                        let ids2 = &star_var_ids[&star_keys[j]];
+                        let key = merge_to_key(&[ids1, ids2, ids2], &id_to_var);
+                        let ss = make_star_set(&[&star_keys[i], &star_keys[j], &star_keys[j]]);
+                        insert_hap(&key, &ss, &mut dhap3pair);
+                    }
                 }
-            }
-        }
-    }
+                dhap3pair
+            });
+
+            let h_dhap4pair = s.spawn(|| {
+                let mut dhap4pair: HashMap<String, Vec<String>> = HashMap::new();
+                for i in 0..n {
+                    let ids1 = &star_var_ids[&star_keys[i]];
+                    for j in i..n {
+                        let ids2 = &star_var_ids[&star_keys[j]];
+                        let key = merge_to_key(&[ids1, ids1, ids2, ids2], &id_to_var);
+                        let ss = make_star_set(&[&star_keys[i], &star_keys[i], &star_keys[j], &star_keys[j]]);
+                        insert_hap(&key, &ss, &mut dhap4pair);
+                    }
+                    for j in 0..n {
+                        let ids2 = &star_var_ids[&star_keys[j]];
+                        let key = merge_to_key(&[ids1, ids2, ids2, ids2], &id_to_var);
+                        let ss = make_star_set(&[&star_keys[i], &star_keys[j], &star_keys[j], &star_keys[j]]);
+                        insert_hap(&key, &ss, &mut dhap4pair);
+                    }
+                }
+                dhap4pair
+            });
+
+            let h_dhap5pair = s.spawn(|| {
+                let mut dhap5pair: HashMap<String, Vec<String>> = HashMap::new();
+                for i in 0..n {
+                    let ids1 = &star_var_ids[&star_keys[i]];
+                    for j in 0..n {
+                        let ids2 = &star_var_ids[&star_keys[j]];
+                        let key = merge_to_key(&[ids1, ids1, ids2, ids2, ids2], &id_to_var);
+                        let ss = make_star_set(&[&star_keys[i], &star_keys[i], &star_keys[j], &star_keys[j], &star_keys[j]]);
+                        insert_hap(&key, &ss, &mut dhap5pair);
+
+                        let key = merge_to_key(&[ids1, ids2, ids2, ids2, ids2], &id_to_var);
+                        let ss = make_star_set(&[&star_keys[i], &star_keys[j], &star_keys[j], &star_keys[j], &star_keys[j]]);
+                        insert_hap(&key, &ss, &mut dhap5pair);
+                    }
+                }
+                dhap5pair
+            });
+
+            let h_dhap6pair = s.spawn(|| {
+                let mut dhap6pair: HashMap<String, Vec<String>> = HashMap::new();
+                for i in 0..n {
+                    let ids1 = &star_var_ids[&star_keys[i]];
+                    for j in 0..n {
+                        let ids2 = &star_var_ids[&star_keys[j]];
+                        let key = merge_to_key(&[ids1, ids1, ids2, ids2, ids2, ids2], &id_to_var);
+                        let ss = make_star_set(&[&star_keys[i], &star_keys[i], &star_keys[j], &star_keys[j], &star_keys[j], &star_keys[j]]);
+                        insert_hap(&key, &ss, &mut dhap6pair);
+
+                        let key = merge_to_key(&[ids1, ids2, ids2, ids2, ids2, ids2], &id_to_var);
+                        let ss = make_star_set(&[&star_keys[i], &star_keys[j], &star_keys[j], &star_keys[j], &star_keys[j], &star_keys[j]]);
+                        insert_hap(&key, &ss, &mut dhap6pair);
+                    }
+                }
+                for i in 0..n {
+                    let ids1 = &star_var_ids[&star_keys[i]];
+                    for j in i..n {
+                        let ids2 = &star_var_ids[&star_keys[j]];
+                        let key = merge_to_key(&[ids1, ids1, ids1, ids2, ids2, ids2], &id_to_var);
+                        let ss = make_star_set(&[&star_keys[i], &star_keys[i], &star_keys[i], &star_keys[j], &star_keys[j], &star_keys[j]]);
+                        insert_hap(&key, &ss, &mut dhap6pair);
+                    }
+                }
+                dhap6pair
+            });
+
+            let h_exon9_x2 = s.spawn(|| {
+                let mut dhap_exon9_x2: HashMap<String, Vec<String>> = HashMap::new();
+                for &e1 in EXON9GC_ALLELES {
+                    for &e2 in EXON9GC_ALLELES {
+                        if let (Some(ids_e1), Some(ids_e2)) = (star_var_ids.get(e1), star_var_ids.get(e2)) {
+                            for s3 in &star_keys {
+                                let ids3 = &star_var_ids[s3];
+                                for s4 in &star_keys {
+                                    let ids4 = &star_var_ids[s4];
+                                    let key = merge_to_key(&[ids_e1, ids_e2, ids3, ids4], &id_to_var);
+                                    let ss = make_star_set(&[e1, e2, s3, s4]);
+                                    insert_hap(&key, &ss, &mut dhap_exon9_x2);
+                                }
+                            }
+                        }
+                    }
+                }
+                dhap_exon9_x2
+            });
+
+            let h_exon9_x3 = s.spawn(|| {
+                let mut dhap_exon9_x3: HashMap<String, Vec<String>> = HashMap::new();
+                for &e1 in EXON9GC_ALLELES {
+                    for &e2 in EXON9GC_ALLELES {
+                        for &e3 in EXON9GC_ALLELES {
+                            if let (Some(ids_e1), Some(ids_e2), Some(ids_e3)) =
+                                (star_var_ids.get(e1), star_var_ids.get(e2), star_var_ids.get(e3))
+                            {
+                                for s4 in &star_keys {
+                                    let ids4 = &star_var_ids[s4];
+                                    for s5 in &star_keys {
+                                        let ids5 = &star_var_ids[s5];
+                                        let key = merge_to_key(&[ids_e1, ids_e2, ids_e3, ids4, ids5], &id_to_var);
+                                        let ss = make_star_set(&[e1, e2, e3, s4, s5]);
+                                        insert_hap(&key, &ss, &mut dhap_exon9_x3);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                dhap_exon9_x3
+            });
+
+            let h_exon9_x4 = s.spawn(|| {
+                let mut dhap_exon9_x4: HashMap<String, Vec<String>> = HashMap::new();
+                if let (Some(ids_10), Some(ids_36)) = (star_var_ids.get("*10"), star_var_ids.get("*36")) {
+                    let key = merge_to_key(&[ids_10, ids_10, ids_36, ids_36, ids_36, ids_36], &id_to_var);
+                    let ss = make_star_set(&["*10", "*10", "*36", "*36", "*36", "*36"]);
+                    insert_hap(&key, &ss, &mut dhap_exon9_x4);
+                }
+                dhap_exon9_x4
+            });
+
+            let h_dup_exon9 = s.spawn(|| {
+                let mut dhap_dup_exon9: HashMap<String, Vec<String>> = HashMap::new();
+                let pair_alleles = exon9gc_pair_alleles();
+                for (&e1, &e2) in &pair_alleles {
+                    if let (Some(ids_e1), Some(ids_e2)) = (star_var_ids.get(e1), star_var_ids.get(e2)) {
+                        for s3 in &star_keys {
+                            let ids3 = &star_var_ids[s3];
+                            for s4 in &star_keys {
+                                let ids4 = &star_var_ids[s4];
+                                let key = merge_to_key(&[ids_e1, ids_e2, ids3, ids4], &id_to_var);
+                                let ss = make_star_set(&[e1, e2, s3, s4]);
+                                insert_hap(&key, &ss, &mut dhap_dup_exon9);
+                            }
+                        }
+                    }
+                }
+                dhap_dup_exon9
+            });
+
+            (h_dhap2.join().unwrap(), h_dhap3.join().unwrap(),
+             h_dhap3pair.join().unwrap(), h_dhap4pair.join().unwrap(),
+             h_dhap5pair.join().unwrap(), h_dhap6pair.join().unwrap(),
+             h_exon9_x2.join().unwrap(), h_exon9_x3.join().unwrap(),
+             h_exon9_x4.join().unwrap(), h_dup_exon9.join().unwrap())
+        });
 
     StarCombinations {
         dhap,

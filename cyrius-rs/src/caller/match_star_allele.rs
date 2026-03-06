@@ -1,4 +1,5 @@
-use crate::types::{RawStarCall, StarCall, StarCombinations};
+use crate::caller::fuzzy_match;
+use crate::types::{FeatureFlags, RawStarCall, StarCall, StarCombinations};
 use std::collections::HashMap;
 
 /// Direct genotype calls for certain CNV tags.
@@ -716,6 +717,7 @@ pub fn match_star(
     exon9: &crate::types::Exon9Values,
     var42126938_g_haplotype: bool,
     var42127803_diff_haplotype: bool,
+    features: &FeatureFlags,
 ) -> StarCall {
     let direct = cnvtag_to_genotype();
     if let Some(&genotype) = direct.get(cnvcall) {
@@ -742,7 +744,13 @@ pub fn match_star(
                 clean_call: final_call_clean,
             };
         }
-        let matchtag = get_star_cn1(var_observed, &star_combinations.dhap);
+        let mut matchtag = get_star_cn1(var_observed, &star_combinations.dhap);
+        // Feature: fuzzy_match — try fuzzy matching on no_match
+        if features.fuzzy_match && matchtag.call_info.as_deref() == Some("no_match") {
+            if let Some(fuzzy) = fuzzy_match::fuzzy_match_star_cn1(var_observed, &star_combinations.dhap) {
+                matchtag = fuzzy;
+            }
+        }
         let final_call = &matchtag.star_call;
         let final_call_clean = get_final_call_clean(final_call, cnvcall, spacer_cn);
         return StarCall {
@@ -766,7 +774,7 @@ pub fn match_star(
     };
 
     if !cnvcall.contains("star68") {
-        let matchtag = get_star(var_observed, dic);
+        let mut matchtag = get_star(var_observed, dic);
 
         // For cn3-cn6, try adding a variant on no_match
         if cnvcall.starts_with("cn")
@@ -801,6 +809,13 @@ pub fn match_star(
                     raw_call: Some(mt.candidate.clone()),
                     clean_call: final_call_clean,
                 };
+            }
+        }
+
+        // Feature: fuzzy_match — try fuzzy matching on no_match (after cn3+ retry)
+        if features.fuzzy_match && matchtag.call_info.as_deref() == Some("no_match") {
+            if let Some(fuzzy) = fuzzy_match::fuzzy_match_star(var_observed, dic) {
+                matchtag = fuzzy;
             }
         }
 
