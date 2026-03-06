@@ -295,15 +295,19 @@ fn d6_star_caller(
     let d6_fraction = get_fraction(&snp_d6, &snp_d7);
     let raw_d6_cn: Vec<f64> = d6_fraction
         .iter()
-        .map(|&a| (total_cn as f64 * a * 1000.0).round() / 1000.0)
+        .map(|&a| cyrius_rs::stats::python_round3(total_cn as f64 * a))
         .collect();
     let cn_call_snp = call_cn_snp(total_cn, &snp_d6, &snp_d7, 0.6);
 
-    let exon9gc_call_stringent = call_exon9gc(
-        &snp_d6[EXON9_SITE1..=EXON9_SITE2],
-        &snp_d7[EXON9_SITE1..=EXON9_SITE2],
-        Some(total_cn),
-    );
+    let exon9gc_call_stringent = if snp_d6.len() > EXON9_SITE2 && snp_d7.len() > EXON9_SITE2 {
+        call_exon9gc(
+            &snp_d6[EXON9_SITE1..=EXON9_SITE2],
+            &snp_d7[EXON9_SITE1..=EXON9_SITE2],
+            Some(total_cn),
+        )
+    } else {
+        None
+    };
 
     let (cnvtag, consensus) = get_cnvtag(
         total_cn,
@@ -402,8 +406,8 @@ fn d6_star_caller(
     let exon9_values = Exon9Values {
         exon9_cn: exon9gc_call_stringent,
         exon9cn_in_consensus: consensus.exon9_and_downstream,
-        exon9_raw_site1: raw_d6_cn[EXON9_SITE1],
-        exon9_raw_site2: raw_d6_cn[EXON9_SITE2],
+        exon9_raw_site1: raw_d6_cn.get(EXON9_SITE1).copied().unwrap_or(0.0),
+        exon9_raw_site2: raw_d6_cn.get(EXON9_SITE2).copied().unwrap_or(0.0),
     };
 
     let star_called = match_star(

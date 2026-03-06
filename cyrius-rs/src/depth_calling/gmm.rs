@@ -1,3 +1,4 @@
+use crate::stats::python_round3;
 use crate::types::{CnCall, GmmParameter};
 use statrs::distribution::{ContinuousCDF, Continuous, Normal};
 
@@ -91,7 +92,7 @@ impl Gmm {
 
         CnCall {
             cn: fcall.map(|c| c as u32),
-            depth_value: (val / self.value_shift * 1000.0).round() / 1000.0,
+            depth_value: python_round3(val / self.value_shift),
         }
     }
 

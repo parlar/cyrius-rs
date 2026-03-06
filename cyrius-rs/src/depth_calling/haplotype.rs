@@ -51,8 +51,14 @@ fn get_bases_per_read(
 
     for dsnp in &dsnps {
         for (snp_position_ori, alleles) in dsnp.iter() {
-            let dsnp_index = dindex[snp_position_ori];
-            let snp_position: i64 = snp_position_ori.split('_').next().unwrap().parse().unwrap();
+            let dsnp_index = match dindex.get(snp_position_ori) {
+                Some(&v) => v,
+                None => continue,
+            };
+            let snp_position: i64 = match snp_position_ori.split('_').next().and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => continue,
+            };
 
             if !target_positions.contains(&dsnp_index) {
                 continue;
@@ -67,7 +73,7 @@ fn get_bases_per_read(
                 .unwrap();
 
             let mut pileups = reader.pileup();
-            pileups.set_max_depth(u32::MAX);
+            pileups.set_max_depth(i32::MAX as u32);
 
             for pileup_result in pileups {
                 let pileup = pileup_result.unwrap();
@@ -76,7 +82,10 @@ fn get_bases_per_read(
                     continue;
                 }
 
-                let (reg1_allele, reg2_allele) = alleles.split_once('_').unwrap();
+                let (reg1_allele, reg2_allele) = match alleles.split_once('_') {
+                    Some(pair) => pair,
+                    None => continue,
+                };
 
                 for alignment in pileup.alignments() {
                     let record = alignment.record();
@@ -170,10 +179,22 @@ fn get_base1_base2(
     let mut base2: Vec<Option<String>> = vec![None; n];
 
     for (pos, alleles) in &base_db.dsnp1 {
-        let dsnp_index = base_db.dindex[pos];
+        let dsnp_index = match base_db.dindex.get(pos) {
+            Some(&v) => v,
+            None => continue,
+        };
         if target_positions.contains(&dsnp_index) {
-            let index: usize = pos.split('_').nth(1).unwrap().parse().unwrap();
-            let (allele1, allele2) = alleles.split_once('_').unwrap();
+            let index: usize = match pos.split('_').nth(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => continue,
+            };
+            if index >= n {
+                continue;
+            }
+            let (allele1, allele2) = match alleles.split_once('_') {
+                Some(pair) => pair,
+                None => continue,
+            };
             base1[index] = Some(allele1.to_string());
             base2[index] = Some(allele2.to_string());
         }

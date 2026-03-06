@@ -139,7 +139,7 @@ pub fn normalize(
     let vmad = if gc_med == 0.0 {
         0.0
     } else {
-        (stats::mad(&gc_corrected_depth) / gc_med * 1000.0).round() / 1000.0
+        stats::python_round3(stats::mad(&gc_corrected_depth) / gc_med)
     };
 
     let mut norm_count = std::collections::HashMap::new();

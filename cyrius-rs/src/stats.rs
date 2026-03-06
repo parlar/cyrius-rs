@@ -1,5 +1,22 @@
 /// Statistical helper functions replacing numpy.median, numpy.mean, etc.
 
+/// Round to 3 decimal places using Python's banker's rounding (round half to even).
+/// Matches Python's `round(x, 3)` behavior.
+pub fn python_round3(x: f64) -> f64 {
+    let scaled = x * 1000.0;
+    let rounded = if (scaled - scaled.floor() - 0.5).abs() < 1e-9 {
+        let floor = scaled.floor();
+        if floor as i64 % 2 == 0 {
+            floor
+        } else {
+            floor + 1.0
+        }
+    } else {
+        scaled.round()
+    };
+    rounded / 1000.0
+}
+
 pub fn median(values: &[f64]) -> f64 {
     if values.is_empty() {
         return 0.0;

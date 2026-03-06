@@ -47,15 +47,19 @@ pub fn get_reads_by_region(
     };
 
     for (snp_position_ori, alleles) in dsnp.iter() {
-        let snp_position: i64 = snp_position_ori
-            .split('_')
-            .next()
-            .unwrap()
-            .parse()
-            .unwrap();
-        let dsnp_index = dindex[snp_position_ori];
+        let snp_position: i64 = match snp_position_ori.split('_').next().and_then(|s| s.parse().ok()) {
+            Some(v) => v,
+            None => continue,
+        };
+        let dsnp_index = match dindex.get(snp_position_ori) {
+            Some(&v) => v,
+            None => continue,
+        };
 
-        let (reg1_allele, reg2_allele) = alleles.split_once('_').unwrap();
+        let (reg1_allele, reg2_allele) = match alleles.split_once('_') {
+            Some(pair) => pair,
+            None => continue,
+        };
 
         // Pileup at this position
         reader
@@ -67,7 +71,7 @@ pub fn get_reads_by_region(
             .unwrap();
 
         let mut pileups = reader.pileup();
-        pileups.set_max_depth(u32::MAX);
+        pileups.set_max_depth(i32::MAX as u32);
 
         for pileup_result in pileups {
             let pileup = pileup_result.unwrap();
@@ -178,7 +182,10 @@ pub fn get_supporting_reads(
     reader: &mut bam::IndexedReader,
     snp_db: &SnpLookup,
 ) -> (Vec<usize>, Vec<usize>) {
-    assert_eq!(snp_db.dsnp1.len(), snp_db.dsnp2.len());
+    if snp_db.dsnp1.len() != snp_db.dsnp2.len() {
+        log::warn!("SNP database region sizes differ: {} vs {}", snp_db.dsnp1.len(), snp_db.dsnp2.len());
+        return (Vec::new(), Vec::new());
+    }
 
     let (lsnp1_reg1_for, lsnp1_reg1_rev, lsnp2_reg1_for, lsnp2_reg1_rev) =
         get_reads_by_region(reader, &snp_db.nchr, &snp_db.dsnp1, &snp_db.dindex, 0, None, false);

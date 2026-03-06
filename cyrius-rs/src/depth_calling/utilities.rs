@@ -100,7 +100,7 @@ pub fn open_alignment_file_with_index(
     };
 
     use rust_htslib::bam::Read as HtslibRead;
-    reader.set_threads(0)?;
+    reader.set_threads(1)?;
     Ok(reader)
 }
 

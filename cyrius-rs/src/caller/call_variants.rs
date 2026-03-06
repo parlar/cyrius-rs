@@ -347,6 +347,9 @@ pub fn call_var42126938(
     let mut g_haplotype = false;
 
     let (snp_d6, snp_d7) = get_supporting_reads(reader, base_db);
+    if snp_d6.is_empty() || snp_d7.is_empty() {
+        return (vec![], Vec::new(), false);
+    }
     let d6_d7_base_count = vec![*snp_d6.last().unwrap(), *snp_d7.last().unwrap()];
 
     let d6_cn = call_cn_snp(full_length_cn, &[d6_d7_base_count[0]], &[d6_d7_base_count[1]], 0.8)[0];

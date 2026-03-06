@@ -3,6 +3,23 @@ use statrs::distribution::{Discrete, Poisson};
 const POSTERIOR_CUTOFF_STRINGENT: f64 = 0.9;
 const ERROR_RATE: f64 = 0.1;
 
+/// Round to 3 decimal places using Python's banker's rounding (round half to even).
+fn python_round3(x: f64) -> f64 {
+    let scaled = x * 1000.0;
+    let rounded = if (scaled - scaled.floor() - 0.5).abs() < 1e-9 {
+        // Exactly at midpoint: round to even
+        let floor = scaled.floor();
+        if floor as i64 % 2 == 0 {
+            floor
+        } else {
+            floor + 1.0
+        }
+    } else {
+        scaled.round()
+    };
+    rounded / 1000.0
+}
+
 /// Return the reg1 copy number call at each site based on Poisson likelihood,
 /// with a minimum read support cutoff.
 /// Returns a Vec of 1 element (confident call) or 4 elements (two most likely scenarios).
@@ -61,9 +78,9 @@ pub fn call_reg1_cn(full_cn: Option<u32>, count_reg1: f64, count_reg2: f64, min_
             // Output the two most likely scenarios
             vec![Some(CnProb::TwoOptions {
                 cn1: top_idx as u32,
-                prob1: (top_prob * 1000.0).round() / 1000.0,
+                prob1: python_round3(top_prob),
                 cn2: post_prob_sorted[1].0 as u32,
-                prob2: (post_prob_sorted[1].1 * 1000.0).round() / 1000.0,
+                prob2: python_round3(post_prob_sorted[1].1),
             })
             .into()]
         }
