@@ -734,7 +734,13 @@ pub fn match_star(
     if uses_cn1_dic(cnvcall) {
         if cnvcall.contains("star68") {
             // star5_star68, star13_star68: use call_star68_cn1 for iterative matching
-            let matchtag = call_star68_cn1(var_observed, cnvcall, &star_combinations.dhap);
+            let mut matchtag = call_star68_cn1(var_observed, cnvcall, &star_combinations.dhap);
+            // Feature: fuzzy_match — try fuzzy matching on no_match for star68 CN=1
+            if features.fuzzy_match && matchtag.call_info.as_deref() == Some("no_match") {
+                if let Some(fuzzy) = fuzzy_match::fuzzy_match_star_cn1(var_observed, &star_combinations.dhap) {
+                    matchtag = fuzzy;
+                }
+            }
             let final_call = &matchtag.star_call;
             let final_call_clean = get_final_call_clean(final_call, cnvcall, spacer_cn);
             return StarCall {

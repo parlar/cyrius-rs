@@ -2,7 +2,12 @@
   "permissions": {
     "allow": [
       "Bash(/home/parla/dev/bcyrius/bcyrius-rs/target/release/bcyrius --help)",
-      "Read(//home/parla/.cargo/registry/**)"
+      "Read(//home/parla/.cargo/registry/**)",
+      "Read(//home/parlar_ai/dev/pdx_caller/python/pdx_caller/**)",
+      "Bash(RUST_LOG=debug cyrius-rs/target/release/cyrius-rs -i benchmark/HG01190_pgx_regions.bam -o /tmp/debug_1190 --id HG01190)",
+      "Bash(rm -f /tmp/spacer_test/*.json)",
+      "Bash(printf '%s\\\\n' HG00111 HG00421 NA18545 NA18565 NA19143 NA12878 HG03225 NA18617 HG00463 NA19317 NA11832 NA12154)",
+      "Read(//home/parlar_ai/dev/**)"
     ]
   }
 }

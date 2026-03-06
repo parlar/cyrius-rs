@@ -326,5 +326,6 @@ pub fn get_hap_table(star_table_content: &str) -> StarCombinations {
         dhap_exon9_x3,
         dhap_exon9_x4,
         dhap_dup_exon9,
+        dstar,
     }
 }

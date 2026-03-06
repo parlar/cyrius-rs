@@ -177,14 +177,66 @@ pub fn get_fraction(lsnp1: &[usize], lsnp2: &[usize]) -> Vec<f64> {
         .collect()
 }
 
-/// Return the number of supporting reads at each position in both region1 and region2.
+/// Read-pair crossing statistics from diagnostic SNP positions.
+#[derive(Debug, Clone)]
+pub struct CrossingStats {
+    pub n_consistent: usize,
+    pub n_crossing: usize,
+    pub crossing_fraction: f64,
+}
+
+/// Compute read-pair crossing fraction from per-position D6/D7 read name sets.
+/// A read name appearing in both D6 and D7 sets (across different positions)
+/// indicates a crossing event (mate pair spans paralog boundary).
+fn compute_crossing(d6_reads: &[HashSet<String>], d7_reads: &[HashSet<String>]) -> CrossingStats {
+    use std::collections::HashMap;
+    // Build: read_name -> (seen_in_d6, seen_in_d7)
+    let mut assignments: HashMap<&str, (bool, bool)> = HashMap::new();
+
+    for pos_set in d6_reads {
+        for name in pos_set {
+            assignments.entry(name.as_str()).or_insert((false, false)).0 = true;
+        }
+    }
+    for pos_set in d7_reads {
+        for name in pos_set {
+            assignments.entry(name.as_str()).or_insert((false, false)).1 = true;
+        }
+    }
+
+    let mut n_consistent = 0usize;
+    let mut n_crossing = 0usize;
+    for (_, (is_d6, is_d7)) in &assignments {
+        if *is_d6 && *is_d7 {
+            n_crossing += 1;
+        } else if *is_d6 || *is_d7 {
+            n_consistent += 1;
+        }
+    }
+
+    let total = n_consistent + n_crossing;
+    let crossing_fraction = if total > 0 {
+        n_crossing as f64 / total as f64
+    } else {
+        0.0
+    };
+
+    CrossingStats {
+        n_consistent,
+        n_crossing,
+        crossing_fraction,
+    }
+}
+
+/// Return the number of supporting reads at each position in both region1 and region2,
+/// plus read-pair crossing statistics.
 pub fn get_supporting_reads(
     reader: &mut bam::IndexedReader,
     snp_db: &SnpLookup,
-) -> (Vec<usize>, Vec<usize>) {
+) -> (Vec<usize>, Vec<usize>, CrossingStats) {
     if snp_db.dsnp1.len() != snp_db.dsnp2.len() {
         log::warn!("SNP database region sizes differ: {} vs {}", snp_db.dsnp1.len(), snp_db.dsnp2.len());
-        return (Vec::new(), Vec::new());
+        return (Vec::new(), Vec::new(), CrossingStats { n_consistent: 0, n_crossing: 0, crossing_fraction: 0.0 });
     }
 
     let (lsnp1_reg1_for, lsnp1_reg1_rev, lsnp2_reg1_for, lsnp2_reg1_rev) =
@@ -205,9 +257,12 @@ pub fn get_supporting_reads(
         &lsnp2_reg2_rev,
     ]);
 
+    let crossing = compute_crossing(&lsnp1, &lsnp2);
+
     (
         lsnp1.iter().map(|s| s.len()).collect(),
         lsnp2.iter().map(|s| s.len()).collect(),
+        crossing,
     )
 }
 

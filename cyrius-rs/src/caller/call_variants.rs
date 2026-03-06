@@ -346,7 +346,7 @@ pub fn call_var42126938(
     let mut var_called = Vec::new();
     let mut g_haplotype = false;
 
-    let (snp_d6, snp_d7) = get_supporting_reads(reader, base_db);
+    let (snp_d6, snp_d7, _) = get_supporting_reads(reader, base_db);
     if snp_d6.is_empty() || snp_d7.is_empty() {
         return (vec![], Vec::new(), false);
     }

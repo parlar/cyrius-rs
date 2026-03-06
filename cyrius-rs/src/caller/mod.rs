@@ -1,6 +1,10 @@
 pub mod call_variants;
+pub mod changepoint;
 pub mod cnv_hybrid;
+pub mod consistency;
 pub mod construct_star_table;
 pub mod fuzzy_match;
+pub mod het_check;
 pub mod match_star_allele;
+pub mod phase_disambiguate;
 pub mod strand_bias_all;

@@ -85,6 +85,8 @@ pub struct StarCombinations {
     pub dhap_exon9_x3: HashMap<String, Vec<String>>,
     pub dhap_exon9_x4: HashMap<String, Vec<String>>,
     pub dhap_dup_exon9: HashMap<String, Vec<String>>,
+    /// Reverse map: star allele name -> variant key (e.g., "*21" -> "g.42128945C>T_g.42129033G>A")
+    pub dstar: HashMap<String, String>,
 }
 
 /// Raw star allele call result
@@ -183,4 +185,16 @@ pub struct FeatureFlags {
     pub fuzzy_match: bool,
     /// Use base-quality-aware likelihoods instead of fixed error rate
     pub quality_aware: bool,
+    /// Use physical phasing to disambiguate multiple-match diplotypes
+    pub phase_disambiguate: bool,
+    /// Use read-pair (mate-pair) phasing for longer-range disambiguation
+    pub phase_readpair: bool,
+    /// Use paralog ratio changepoint detection for hybrid identification
+    pub changepoint_hybrid: bool,
+    /// Use hemizygosity detection (zero het sites = deletion allele)
+    pub het_check: bool,
+    /// Flag calls as uncertain when spacer CN is inconsistent with CNV group
+    pub spacer_cn_check: bool,
+    /// Run post-hoc consistency checks (conversion map, mismatch rate, allele balance)
+    pub consistency_check: bool,
 }

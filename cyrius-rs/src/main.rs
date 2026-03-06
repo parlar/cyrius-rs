@@ -122,6 +122,24 @@ struct Cli {
 
     #[arg(long = "quality-aware", help = "Use base-quality-aware likelihoods instead of fixed error rate")]
     quality_aware: bool,
+
+    #[arg(long = "phase-disambiguate", help = "Use physical phasing to disambiguate multiple-match diplotypes")]
+    phase_disambiguate: bool,
+
+    #[arg(long = "phase-readpair", help = "Use read-pair (mate-pair) phasing for longer-range disambiguation")]
+    phase_readpair: bool,
+
+    #[arg(long = "changepoint-hybrid", help = "Use paralog ratio changepoint detection for hybrid identification")]
+    changepoint_hybrid: bool,
+
+    #[arg(long = "het-check", help = "Use hemizygosity detection (zero het sites = deletion allele)")]
+    het_check: bool,
+
+    #[arg(long = "spacer-cn-check", help = "Flag calls as uncertain when spacer CN is inconsistent with CNV group")]
+    spacer_cn_check: bool,
+
+    #[arg(long = "consistency-check", help = "Run post-hoc consistency checks (conversion map, mismatch rate, allele balance)")]
+    consistency_check: bool,
 }
 
 /// Check if chromosome names contain "chr" prefix.
@@ -245,7 +263,7 @@ fn d6_star_caller(
     };
 
     // 3. Get allele counts (parallel when threads > 1)
-    let (snp_d6, snp_d7, mut var_alt, mut var_ref, var_alt_forward, var_alt_reverse,
+    let (snp_d6, snp_d7, snp_crossing, mut var_alt, mut var_ref, var_alt_forward, var_alt_reverse,
      ref_read, long_ins_read, short_ins_read, var_homo_alt, var_homo_ref) = if threads > 1 {
         std::thread::scope(|s| {
             let h_snp = s.spawn(|| {
@@ -265,22 +283,22 @@ fn d6_star_caller(
                 get_supporting_reads(&mut r, &params.var_homo_db)
             });
 
-            let (snp_d6, snp_d7) = h_snp.join().unwrap();
+            let (snp_d6, snp_d7, snp_crossing) = h_snp.join().unwrap();
             let (var_alt, var_ref, var_alt_forward, var_alt_reverse) = h_var.join().unwrap();
             let (ref_read, long_ins_read, short_ins_read) = h_ins.join().unwrap();
-            let (var_homo_alt, var_homo_ref) = h_homo.join().unwrap();
-            (snp_d6, snp_d7, var_alt, var_ref, var_alt_forward, var_alt_reverse,
+            let (var_homo_alt, var_homo_ref, _) = h_homo.join().unwrap();
+            (snp_d6, snp_d7, snp_crossing, var_alt, var_ref, var_alt_forward, var_alt_reverse,
              ref_read, long_ins_read, short_ins_read, var_homo_alt, var_homo_ref)
         })
     } else {
         let mut reader = open_alignment_file_with_index(bam_path, reference_fasta, index_name).unwrap();
-        let (snp_d6, snp_d7) = get_supporting_reads(&mut reader, &params.snp_db);
+        let (snp_d6, snp_d7, snp_crossing) = get_supporting_reads(&mut reader, &params.snp_db);
         let (var_alt, var_ref, var_alt_forward, var_alt_reverse) =
             get_supporting_reads_single_region(&mut reader, &params.var_db, None);
         let (ref_read, long_ins_read, short_ins_read) =
             get_allele_counts_var42128936(&mut reader, &params.genome);
-        let (var_homo_alt, var_homo_ref) = get_supporting_reads(&mut reader, &params.var_homo_db);
-        (snp_d6, snp_d7, var_alt, var_ref, var_alt_forward, var_alt_reverse,
+        let (var_homo_alt, var_homo_ref, _) = get_supporting_reads(&mut reader, &params.var_homo_db);
+        (snp_d6, snp_d7, snp_crossing, var_alt, var_ref, var_alt_forward, var_alt_reverse,
          ref_read, long_ins_read, short_ins_read, var_homo_alt, var_homo_ref)
     };
 
@@ -378,6 +396,56 @@ fn d6_star_caller(
         .map(|v| v.to_string())
         .collect::<Vec<_>>()
         .join(",");
+
+    // Feature: changepoint_hybrid — use CBS on D6/D7 ratio to detect hybrids
+    let cnvtag = if features.changepoint_hybrid && cnvtag.is_none() {
+        let cp_result = cyrius_rs::caller::changepoint::detect_changepoints(
+            &snp_d6, &snp_d7, 5, 3.0, 5,
+        );
+        if cp_result.is_hybrid {
+            log::info!(
+                "changepoint_hybrid: detected hybrid pattern ({} segments, overall_ratio={:.3})",
+                cp_result.segments.len(),
+                cp_result.overall_ratio,
+            );
+            for (i, seg) in cp_result.segments.iter().enumerate() {
+                log::info!(
+                    "  segment {}: idx {}..{}, mean_ratio={:.3}, n_valid={}",
+                    i, seg.start_idx, seg.end_idx, seg.mean_ratio, seg.n_valid,
+                );
+            }
+        }
+        let suggested = cyrius_rs::caller::changepoint::suggest_cnv_from_changepoints(
+            &cp_result, None, total_cn,
+        );
+        if let Some(ref tag) = suggested {
+            log::info!("changepoint_hybrid: suggesting CNV tag '{}'", tag);
+        }
+        suggested.or(cnvtag)
+    } else {
+        cnvtag
+    };
+
+    // Feature: het_check — detect hemizygosity (zero het sites = deletion)
+    if features.het_check {
+        let het_result = cyrius_rs::caller::het_check::check_hemizygosity(
+            &snp_d6, &snp_d7, 10, 3, 0.1,
+        );
+        log::info!(
+            "het_check: n_het={}, n_adequate={}, het_frac={:.3}, hemizygous={}",
+            het_result.n_het_sites,
+            het_result.n_adequate_depth,
+            het_result.het_fraction,
+            het_result.is_hemizygous,
+        );
+        if het_result.is_hemizygous {
+            if let Some(ref tag) = cnvtag {
+                let _ = cyrius_rs::caller::het_check::suggest_cnv_with_deletion(
+                    &het_result, tag, total_cn,
+                );
+            }
+        }
+    }
 
     // No-call due to CNV group
     if cnvtag.is_none() || !CNV_ACCEPTED.contains(&cnvtag.as_deref().unwrap_or("")) {
@@ -511,6 +579,33 @@ fn d6_star_caller(
         && star_called.call_info.as_deref() != None
     {
         final_star_allele_call = star_called.clean_call.clone();
+
+        // Feature: phase_disambiguate — resolve ambiguous CN=2 calls using physical phasing
+        if features.phase_disambiguate
+            && star_called.call_info.as_deref() == Some("more_than_one_match")
+            && cnvtag_str == "cn2"
+        {
+            if let (Some(ref call), Some(ref raw_call)) =
+                (&final_star_allele_call, &star_called.raw_call)
+            {
+                if call.contains(';') {
+                    if let Some(resolved) = cyrius_rs::caller::phase_disambiguate::disambiguate(
+                        call,
+                        raw_call,
+                        &params.star_combinations,
+                        bam_path,
+                        &params.var_db.nchr,
+                        reference_fasta,
+                        index_name,
+                        features.phase_readpair,
+                    ) {
+                        log::info!("phase_disambiguate: {} -> {}", call, resolved);
+                        final_star_allele_call = Some(resolved);
+                    }
+                }
+            }
+        }
+
         if let Some(ref call) = final_star_allele_call {
             if call.contains(';') {
                 genotype_filter = Some("More_than_one_possible_genotype".to_string());
@@ -522,6 +617,79 @@ fn d6_star_caller(
                 genotype_filter = Some("Fuzzy_match".to_string());
             } else {
                 genotype_filter = Some("PASS".to_string());
+            }
+        }
+    }
+
+    // Feature: spacer_cn_check — flag calls where spacer CN is inconsistent with CNV group
+    // total_cn - spacer_cn = D6 exon9 copy number. Expected values per CNV group:
+    //   cn2=2, cn3=3, cn4=4, cn5=5, cn6=6
+    //   star5=1, star5_star5=0
+    //   exon9hyb=2, exon9hyb_exon9hyb=2, exon9hyb_exon9hyb_exon9hyb=2
+    //   dup_exon9hyb=3, dup_star68=3
+    //   star68: skip (variable, 1 or 2)
+    //   star13/star13intron1 variants: skip (insufficient data)
+    if features.spacer_cn_check {
+        if let Some(ref filter) = genotype_filter {
+            if filter == "PASS" || filter == "Fuzzy_match" {
+                if let Some(sp_cn) = raw_cn_call.spacer_cn {
+                    let expected_diff: Option<u32> = match cnvtag_str.as_str() {
+                        "cn2" => Some(2),
+                        "cn3" => Some(3),
+                        "cn4" => Some(4),
+                        "cn5" => Some(5),
+                        "cn6" => Some(6),
+                        "star5" => Some(1),
+                        "star5_star5" => Some(0),
+                        "exon9hyb" | "exon9hyb_exon9hyb"
+                        | "exon9hyb_exon9hyb_exon9hyb"
+                        | "exon9hyb_exon9hyb_exon9hyb_exon9hyb" => Some(2),
+                        "exon9hyb_star5" => Some(1),
+                        "dup_exon9hyb" | "dup_star68" => Some(3),
+                        "exon9hyb_star68" => Some(2),
+                        "star68_star68" | "star68_star68_star68"
+                        | "star68_star68_star68_star68" => Some(2),
+                        _ => None, // star68, star13 variants — skip
+                    };
+                    if let Some(expected) = expected_diff {
+                        let observed = total_cn.saturating_sub(sp_cn);
+                        if observed != expected {
+                            log::info!(
+                                "spacer_cn_check: inconsistent — CNV group '{}' expects \
+                                 total_cn - spacer_cn = {}, got {} - {} = {}, flagging as uncertain",
+                                cnvtag_str, expected, total_cn, sp_cn, observed,
+                            );
+                            genotype_filter = Some("Spacer_CN_inconsistent".to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Feature: consistency_check — post-hoc validation of the final call
+    if features.consistency_check {
+        if let Some(ref filter) = genotype_filter {
+            if filter == "PASS" || filter == "Fuzzy_match" {
+                let consistency = cyrius_rs::caller::consistency::run_consistency_checks(
+                    &snp_d6, &snp_d7,
+                    &var_alt, &var_ref, &params.var_list,
+                    &cnvtag_str, total_cn,
+                    final_star_allele_call.as_deref(),
+                    &params.star_combinations,
+                    &snp_crossing,
+                );
+
+                // Pick the first failing check to use as the filter
+                if let Some(ref flag) = consistency.crossing_flag {
+                    genotype_filter = Some(flag.clone());
+                } else if let Some(ref flag) = consistency.conversion_map_flag {
+                    genotype_filter = Some(flag.clone());
+                } else if let Some(ref flag) = consistency.mismatch_flag {
+                    genotype_filter = Some(flag.clone());
+                } else if let Some(ref flag) = consistency.balance_flag {
+                    genotype_filter = Some(flag.clone());
+                }
             }
         }
     }
@@ -598,12 +766,27 @@ fn main() {
         strand_bias_all: cli.strand_bias_all,
         fuzzy_match: cli.fuzzy_match,
         quality_aware: cli.quality_aware,
+        phase_disambiguate: cli.phase_disambiguate,
+        phase_readpair: cli.phase_readpair,
+        changepoint_hybrid: cli.changepoint_hybrid,
+        het_check: cli.het_check,
+        spacer_cn_check: cli.spacer_cn_check,
+        consistency_check: cli.consistency_check,
     };
 
-    if features.strand_bias_all || features.fuzzy_match || features.quality_aware {
+    if features.strand_bias_all || features.fuzzy_match || features.quality_aware
+        || features.phase_disambiguate || features.phase_readpair
+        || features.changepoint_hybrid || features.het_check || features.spacer_cn_check
+        || features.consistency_check
+    {
         log::info!(
-            "Experimental features: strand_bias_all={}, fuzzy_match={}, quality_aware={}",
-            features.strand_bias_all, features.fuzzy_match, features.quality_aware
+            "Experimental features: strand_bias_all={}, fuzzy_match={}, quality_aware={}, \
+             phase_disambiguate={}, phase_readpair={}, changepoint_hybrid={}, het_check={}, \
+             spacer_cn_check={}, consistency_check={}",
+            features.strand_bias_all, features.fuzzy_match, features.quality_aware,
+            features.phase_disambiguate, features.phase_readpair,
+            features.changepoint_hybrid, features.het_check, features.spacer_cn_check,
+            features.consistency_check
         );
     }
 
