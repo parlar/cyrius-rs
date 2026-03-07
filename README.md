@@ -8,9 +8,7 @@ Evaluated on 62 GeT-RM samples (53 with truth annotations) from the 1000 Genomes
 
 | Metric | Value |
 |---|---|
-| Exact match | 32 / 53 |
-| Order-only difference | 19 / 53 |
-| **Total correct** | **51 / 53 (96.2%)** |
+| **Correct** | **51 / 53 (96.2%)** |
 | Discordant | 2 |
 
 The 2 remaining discrepancies:

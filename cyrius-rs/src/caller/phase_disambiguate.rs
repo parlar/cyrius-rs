@@ -9,6 +9,46 @@ use crate::types::StarCombinations;
 use rust_htslib::bam::{self, Read as BamRead};
 use std::collections::{HashMap, HashSet};
 
+/// Variant info from the target variant file, mapping variant names to pileup positions
+/// and ALT/REF base patterns.
+#[derive(Debug, Clone)]
+pub struct VariantLookup {
+    /// variant_name -> (pileup_pos_0based, alt_bases, ref_bases)
+    entries: HashMap<String, (i64, String, String)>,
+}
+
+impl VariantLookup {
+    /// Parse the target variant file content into a lookup table.
+    pub fn from_target_file(content: &str) -> Self {
+        let mut entries = HashMap::new();
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let fields: Vec<&str> = line.split('\t').collect();
+            if fields.len() < 7 {
+                continue;
+            }
+            let pos: i64 = match fields[1].parse::<i64>() {
+                Ok(p) => p - 1, // convert 1-based to 0-based
+                Err(_) => continue,
+            };
+            let alt_bases = fields[2].to_string();
+            // REF may have comma-separated alternatives; take the first
+            let ref_bases = fields[4].split(',').next().unwrap_or("").to_string();
+            let variant_name = fields[6].to_string();
+            entries.insert(variant_name, (pos, alt_bases, ref_bases));
+        }
+        VariantLookup { entries }
+    }
+
+    /// Look up a variant by name. Returns (pileup_pos_0based, alt_bases, ref_bases).
+    fn get(&self, name: &str) -> Option<&(i64, String, String)> {
+        self.entries.get(name)
+    }
+}
+
 /// A diplotype option with raw (suballele) star names and clean (main allele) names.
 #[derive(Debug, Clone)]
 struct Diplotype {
@@ -70,23 +110,13 @@ fn get_star_variants(star: &str, dstar: &HashMap<String, String>) -> Vec<String>
     vec![]
 }
 
-/// Extract genomic position from a variant name like "g.42128945C>T" -> 42128945.
-fn variant_position(var_name: &str) -> Option<i64> {
-    let s = var_name.strip_prefix("g.")?;
-    let pos_str: String = s.chars().take_while(|c| c.is_ascii_digit()).collect();
-    pos_str.parse().ok()
-}
 
-/// Extract the CYP2D6 (reg1) allele from a variant name.
-/// "g.42128945C>T" -> "T" (the ALT/CYP2D6 allele, after '>').
-fn variant_alt_allele(var_name: &str) -> Option<String> {
-    if let Some(pos) = var_name.find('>') {
-        Some(var_name[pos + 1..].to_string())
-    } else if var_name.contains("ins") {
-        var_name.split("ins").nth(1).map(|s| s.to_string())
-    } else {
-        None
-    }
+/// Resolved variant info for phasing: pileup position (0-based) + ALT/REF patterns.
+#[derive(Debug, Clone)]
+struct ResolvedVariant {
+    pos_0based: i64,
+    alt_bases: String,
+    ref_bases: String,
 }
 
 /// Check if two variants at nearby positions co-occur on the same reads (cis)
@@ -101,12 +131,12 @@ fn variant_alt_allele(var_name: &str) -> Option<String> {
 fn check_phasing(
     reader: &mut bam::IndexedReader,
     nchr: &str,
-    pos1: i64,
-    alt1: &str,
-    pos2: i64,
-    alt2: &str,
+    rv1: &ResolvedVariant,
+    rv2: &ResolvedVariant,
     use_read_pairs: bool,
 ) -> (usize, usize) {
+    let pos1 = rv1.pos_0based;
+    let pos2 = rv2.pos_0based;
     let tid = match reader.header().tid(nchr.as_bytes()) {
         Some(t) => t,
         None => return (0, 0),
@@ -141,8 +171,8 @@ fn check_phasing(
             }
             let read_name = String::from_utf8_lossy(record.qname()).to_string();
             let seq = record.seq().as_bytes();
-            let allele1 = get_base_at_position(&record, &seq, pos1, alt1);
-            let allele2 = get_base_at_position(&record, &seq, pos2, alt2);
+            let allele1 = check_allele_pileup(&record, &seq, rv1);
+            let allele2 = check_allele_pileup(&record, &seq, rv2);
             let entry = read_alleles.entry(read_name).or_insert((None, None));
             if allele1.is_some() {
                 entry.0 = allele1;
@@ -173,8 +203,8 @@ fn check_phasing(
             }
             let read_name = String::from_utf8_lossy(record.qname()).to_string();
             let seq = record.seq().as_bytes();
-            let allele1 = get_base_at_position(&record, &seq, pos1, alt1);
-            let allele2 = get_base_at_position(&record, &seq, pos2, alt2);
+            let allele1 = check_allele_pileup(&record, &seq, rv1);
+            let allele2 = check_allele_pileup(&record, &seq, rv2);
             let entry = read_alleles.entry(read_name).or_insert((None, None));
             if allele1.is_some() {
                 entry.0 = allele1;
@@ -204,8 +234,8 @@ fn check_phasing(
             }
             let read_name = String::from_utf8_lossy(record.qname()).to_string();
             let seq = record.seq().as_bytes();
-            let allele1 = get_base_at_position(&record, &seq, pos1, alt1);
-            let allele2 = get_base_at_position(&record, &seq, pos2, alt2);
+            let allele1 = check_allele_pileup(&record, &seq, rv1);
+            let allele2 = check_allele_pileup(&record, &seq, rv2);
             let entry = read_alleles.entry(read_name).or_insert((None, None));
             if allele1.is_some() {
                 entry.0 = allele1;
@@ -220,13 +250,10 @@ fn check_phasing(
     let mut trans = 0;
     for (has_alt1, has_alt2) in read_alleles.values() {
         match (has_alt1, has_alt2) {
-            (Some(a1), Some(a2)) => {
-                if a1 == a2 {
-                    cis += 1;
-                } else {
-                    trans += 1;
-                }
-            }
+            (Some(true), Some(true)) => cis += 1,   // both ALT → same haplotype
+            (Some(true), Some(false)) => trans += 1, // one ALT, one REF → different haplotypes
+            (Some(false), Some(true)) => trans += 1,
+            // both REF: uninformative for phasing — skip
             _ => {}
         }
     }
@@ -234,18 +261,40 @@ fn check_phasing(
     (cis, trans)
 }
 
-/// Get whether a read has the ALT allele at a given genomic position.
+/// Check whether a read carries the ALT allele at a pileup position.
+/// Reads multiple bases from the read starting at rv.pos_0based and compares
+/// against ALT and REF patterns from the target variant file.
 /// Returns Some(true) for ALT, Some(false) for REF, None if position not covered.
-fn get_base_at_position(
+fn check_allele_pileup(
     record: &rust_htslib::bam::Record,
     seq: &[u8],
-    genomic_pos: i64,
-    alt_allele: &str,
+    rv: &ResolvedVariant,
 ) -> Option<bool> {
-    let record_start = record.pos() + 1; // 1-based
-    let cigar = record.cigar();
+    let check_len = rv.alt_bases.len().max(rv.ref_bases.len());
+    let bases = read_bases_at_pos(record, seq, rv.pos_0based, check_len)?;
+    let bases_upper = bases.to_uppercase();
+    let alt_upper = rv.alt_bases.to_uppercase();
+    let ref_upper = rv.ref_bases.to_uppercase();
 
-    let ref_offset = genomic_pos - record_start;
+    if bases_upper.starts_with(&alt_upper) || alt_upper.starts_with(&bases_upper) {
+        Some(true)
+    } else if bases_upper.starts_with(&ref_upper) || ref_upper.starts_with(&bases_upper) {
+        Some(false)
+    } else {
+        None // doesn't match either pattern
+    }
+}
+
+/// Read `n` bases from a read starting at a 0-based genomic position.
+/// Walks the CIGAR to find the query offset, then extracts bases.
+fn read_bases_at_pos(
+    record: &rust_htslib::bam::Record,
+    seq: &[u8],
+    genomic_pos_0based: i64,
+    n: usize,
+) -> Option<String> {
+    let record_start = record.pos(); // 0-based
+    let ref_offset = genomic_pos_0based - record_start;
     if ref_offset < 0 {
         return None;
     }
@@ -253,43 +302,42 @@ fn get_base_at_position(
     let mut ref_pos = 0i64;
     let mut query_pos = 0usize;
 
-    for &cigar_elem in cigar.iter() {
+    for &cigar_elem in record.cigar().iter() {
         use rust_htslib::bam::record::Cigar::*;
         match cigar_elem {
-            Match(n) | Equal(n) | Diff(n) => {
-                let n = n as i64;
-                if ref_pos + n > ref_offset {
+            Match(len) | Equal(len) | Diff(len) => {
+                let len = len as i64;
+                if ref_pos + len > ref_offset {
                     let qp = query_pos + (ref_offset - ref_pos) as usize;
-                    if qp < seq.len() {
-                        let base = (seq[qp] as char).to_string();
-                        return Some(base == alt_allele.to_uppercase());
+                    if qp + n <= seq.len() {
+                        let bases: String = seq[qp..qp + n]
+                            .iter()
+                            .map(|&b| b as char)
+                            .collect();
+                        return Some(bases);
+                    } else if qp < seq.len() {
+                        let bases: String = seq[qp..seq.len()]
+                            .iter()
+                            .map(|&b| b as char)
+                            .collect();
+                        return Some(bases);
                     }
                     return None;
                 }
-                ref_pos += n;
-                query_pos += n as usize;
+                ref_pos += len;
+                query_pos += len as usize;
             }
-            Ins(n) => {
-                query_pos += n as usize;
+            Ins(len) => { query_pos += len as usize; }
+            Del(len) => {
+                let len = len as i64;
+                if ref_pos + len > ref_offset { return None; }
+                ref_pos += len;
             }
-            Del(n) => {
-                let n = n as i64;
-                if ref_pos + n > ref_offset {
-                    return None;
-                }
-                ref_pos += n;
-            }
-            SoftClip(n) => {
-                query_pos += n as usize;
-            }
+            SoftClip(len) => { query_pos += len as usize; }
             HardClip(_) | Pad(_) => {}
-            RefSkip(n) => {
-                let n = n as i64;
-                ref_pos += n;
-            }
+            RefSkip(len) => { ref_pos += len as i64; }
         }
     }
-
     None
 }
 
@@ -303,6 +351,7 @@ pub fn disambiguate(
     clean_call: &str,
     raw_candidates: &[String],
     star_combinations: &StarCombinations,
+    variant_lookup: &VariantLookup,
     bam_path: &str,
     nchr: &str,
     reference_fasta: Option<&str>,
@@ -409,33 +458,39 @@ pub fn disambiguate(
     let mut dt2_score = 0i32;
 
     for &(va, vb, cis_in_dt1) in &phasing_pairs {
-        let pos_a = match variant_position(va) {
-            Some(p) => p,
-            None => continue,
+        let rv_a = match variant_lookup.get(va) {
+            Some((pos, alt, ref_b)) => ResolvedVariant {
+                pos_0based: *pos,
+                alt_bases: alt.clone(),
+                ref_bases: ref_b.clone(),
+            },
+            None => {
+                log::debug!("phase_disambiguate: no lookup for variant {}", va);
+                continue;
+            }
         };
-        let pos_b = match variant_position(vb) {
-            Some(p) => p,
-            None => continue,
-        };
-        let alt_a = match variant_alt_allele(va) {
-            Some(a) => a,
-            None => continue,
-        };
-        let alt_b = match variant_alt_allele(vb) {
-            Some(a) => a,
-            None => continue,
+        let rv_b = match variant_lookup.get(vb) {
+            Some((pos, alt, ref_b)) => ResolvedVariant {
+                pos_0based: *pos,
+                alt_bases: alt.clone(),
+                ref_bases: ref_b.clone(),
+            },
+            None => {
+                log::debug!("phase_disambiguate: no lookup for variant {}", vb);
+                continue;
+            }
         };
 
         let (cis_count, trans_count) =
-            check_phasing(&mut reader, nchr, pos_a, &alt_a, pos_b, &alt_b, use_read_pairs);
+            check_phasing(&mut reader, nchr, &rv_a, &rv_b, use_read_pairs);
 
         if cis_count + trans_count == 0 {
             continue;
         }
 
         log::debug!(
-            "phase_disambiguate: {}({}) vs {}({}): cis={}, trans={}, expected_cis_dt1={}",
-            va, alt_a, vb, alt_b, cis_count, trans_count, cis_in_dt1
+            "phase_disambiguate: {}(pos={}) vs {}(pos={}): cis={}, trans={}, expected_cis_dt1={}",
+            va, rv_a.pos_0based, vb, rv_b.pos_0based, cis_count, trans_count, cis_in_dt1
         );
 
         // Only count a pair's evidence when the imbalance is clear (>2:1 ratio)

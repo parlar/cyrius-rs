@@ -656,10 +656,12 @@ fn d6_star_caller(
                 (&final_star_allele_call, &star_called.raw_call)
             {
                 if call.contains(';') {
+                    let variant_lookup = cyrius_rs::caller::phase_disambiguate::VariantLookup::from_target_file(data::TARGET_VARIANT);
                     if let Some(resolved) = cyrius_rs::caller::phase_disambiguate::disambiguate(
                         call,
                         raw_call,
                         &params.star_combinations,
+                        &variant_lookup,
                         bam_path,
                         &params.var_db.nchr,
                         reference_fasta,
@@ -939,6 +941,12 @@ fn main() {
 
     // Write JSON
     log::info!("Writing to json ({})", out_json);
+    let sorted_json_genotype = cyp2d6_call.genotype.as_deref().map(|g| {
+        g.split(';')
+            .map(|d| phenotype::sort_genotype(Some(d.trim())).unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join(";")
+    });
     let mut json_map = serde_json::Map::new();
     let call_json = serde_json::json!({
         "Coverage_MAD": cyp2d6_call.coverage_mad,
@@ -949,7 +957,7 @@ fn main() {
         "Spacer_CN_raw": cyp2d6_call.spacer_cn_raw,
         "Variants_called": cyp2d6_call.variants_called,
         "CNV_group": cyp2d6_call.cnv_group,
-        "Genotype": cyp2d6_call.genotype,
+        "Genotype": sorted_json_genotype,
         "Filter": cyp2d6_call.filter,
         "Raw_star_allele": cyp2d6_call.raw_star_allele,
         "Call_info": cyp2d6_call.call_info,
