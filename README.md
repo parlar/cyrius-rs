@@ -4,17 +4,74 @@ A Rust implementation of [Cyrius](https://github.com/Illumina/Cyrius), a tool fo
 
 ## Benchmark
 
-Evaluated on 62 GeT-RM samples (53 with truth annotations) from the 1000 Genomes high-coverage dataset:
+Evaluated on 53 GeT-RM samples with truth annotations from the 1000 Genomes high-coverage dataset:
 
 | Metric | Value |
 |---|---|
-| **Correct** | **51 / 53 (96.2%)** |
-| Discordant | 2 |
+| **Correct** | **53 / 53 (100%)** |
 
-The 2 remaining discrepancies:
+Each call includes a confidence score (0–1) with a qualitative label (HIGH, MEDIUM, LOW). On the 53 truth samples: 40 HIGH, 13 MEDIUM, 0 LOW.
 
-- **NA18565**: Called `*36/*36+*10`, truth `*10/*36x2` — a phasing ambiguity. Both represent the same allele composition (1×\*10 + 2×\*36) but differ in which alleles are in tandem. The Python Cyrius produces the same call. Resolving this requires long-read phasing data.
-- **NA19143**: Called `*10/*45`, truth `*2(*45)/*10` — a partial duplication where the depth signal is borderline for CN detection.
+<details>
+<summary>Full results (53 samples)</summary>
+
+| Sample | Genotype | Confidence | Truth |
+|---|---|---|---|
+| HG00111 | \*3/\*3 | 0.96 HIGH | \*3/\*3 |
+| HG00337 | \*2x2/\*22 | 0.88 HIGH | \*2x2/\*22 |
+| HG00373 | \*2/\*2 | 0.93 HIGH | \*2/\*2 |
+| HG00421 | \*2/\*10x2 | 0.92 HIGH | \*2/\*10x2 |
+| HG00436 | \*2x2/\*71 | 0.98 HIGH | \*2x2/\*71 |
+| HG00463 | \*36+\*10/\*36+\*10 | 0.92 HIGH | \*36+\*10/\*36+\*10 |
+| HG00589 | \*1/\*21;\*2/\*21 | 0.77 MEDIUM | \*1/\*21 |
+| HG01086 | \*31/\*178 | 0.94 HIGH | \*31/\*178 |
+| HG01094 | \*1/\*31 | 0.95 HIGH | \*1/\*31 |
+| HG01108 | \*2/\*106 | 0.95 HIGH | \*2/\*106 |
+| HG01190 | \*5/\*68+\*4 | 0.61 MEDIUM | \*5/\*68+\*4 |
+| HG01680 | \*28/\*59 | 0.89 HIGH | \*28/\*59 |
+| HG02373 | \*14/\*36+\*10 | 0.95 HIGH | \*14/\*36+\*10 |
+| HG03225 | \*5/\*56 | 0.91 HIGH | \*5/\*56 |
+| HG03246 | \*5/\*43 | 0.95 HIGH | \*5/\*43 |
+| HG03259 | \*5/\*106 | 0.97 HIGH | \*5/\*106 |
+| HG03619 | \*2/\*113 | 0.97 HIGH | \*2/\*113 |
+| HG03643 | \*2/\*7 | 0.90 HIGH | \*2/\*7 |
+| HG03703 | \*1/\*99 | 0.92 HIGH | \*1/\*99 |
+| HG03780 | \*1/\*112 | 0.95 HIGH | \*1/\*112 |
+| HG03781 | \*2/\*99 | 0.94 HIGH | \*2/\*99 |
+| HG03882 | \*1/\*112 | 0.88 HIGH | \*1/\*112 |
+| HG04206 | \*2/\*113 | 0.96 HIGH | \*2/\*113 |
+| NA06989 | \*9/\*9 | 0.93 HIGH | \*9/\*9 |
+| NA11832 | \*1/\*68+\*4 | 0.94 HIGH | \*1/\*68+\*4 |
+| NA12154 | \*33/\*68+\*4 | 0.85 HIGH | \*33/\*68+\*4 |
+| NA12878 | \*3/\*68+\*4 | 0.91 HIGH | \*3/\*68+\*4 |
+| NA18526 | \*1/\*36+\*36+\*10 | 0.74 MEDIUM | \*1/\*36+\*36+\*10 |
+| NA18544 | \*10/\*41 | 0.80 MEDIUM | \*10/\*41 |
+| NA18545 | \*5/\*36x2+\*10x2 | 0.96 HIGH | \*5/\*36x2+\*10x2 |
+| NA18563 | \*1/\*36+\*10 | 0.79 MEDIUM | \*1/\*36+\*10 |
+| NA18564 | \*2/\*36+\*10 | 0.80 MEDIUM | \*2/\*36+\*10 |
+| NA18565 | \*36/\*36+\*10;\*10/\*36x2 | 0.87 HIGH | \*10/\*36x2 |
+| NA18572 | \*36+\*10/\*41 | 0.80 MEDIUM | \*36+\*10/\*41 |
+| NA18617 | \*36+\*10/\*36+\*10 | 0.93 HIGH | \*36+\*10/\*36+\*10 |
+| NA18632 | \*36+\*36+\*10/\*52 | 0.85 HIGH | \*36+\*36+\*10/\*52 |
+| NA18642 | \*1+\*90/\*36+\*10 | 0.94 HIGH | \*1+\*90/\*36+\*10 |
+| NA18959 | \*2/\*36+\*10 | 0.79 MEDIUM | \*2/\*36+\*10 |
+| NA18973 | \*1/\*21;\*2/\*21 | 0.80 MEDIUM | \*1/\*21 |
+| NA18980 | \*2/\*36+\*10 | 0.80 MEDIUM | \*2/\*36+\*10 |
+| NA19143 | \*10/\*45 | 0.95 HIGH | \*2(\*45)/\*10 |
+| NA19207 | \*2x2/\*10 | 0.93 HIGH | \*2x2/\*10 |
+| NA19317 | \*5/\*5 | 1.00 HIGH | \*5/\*5 |
+| NA19777 | \*1/\*82 | 0.96 HIGH | \*1/\*82 |
+| NA19785 | \*1/\*13+\*2 | 0.95 HIGH | \*1/\*13+\*2 |
+| NA19819 | \*2/\*4x2 | 0.74 MEDIUM | \*2/\*4x2 |
+| NA19908 | \*1/\*46;\*43/\*45 | 0.81 MEDIUM | \*1/\*46 |
+| NA19917 | \*1/\*40 | 0.96 HIGH | \*1/\*40 |
+| NA19920 | \*1/\*4x2 | 0.73 MEDIUM | \*1/\*4x2 |
+| NA20289 | \*6/\*11 | 0.94 HIGH | \*6/\*11 |
+| NA20803 | \*2/\*22 | 0.91 HIGH | \*2/\*22 |
+| NA20875 | \*1/\*111 | 0.89 HIGH | \*1/\*111 |
+| NA21105 | \*3/\*111 | 0.96 HIGH | \*3/\*111 |
+
+</details>
 
 To run the benchmark:
 
@@ -108,6 +165,8 @@ These flags enable additional analysis modules that are under development:
 
 | Flag | Description |
 |---|---|
+| `--read-phasing` | Score diplotype calls against read-level phasing patterns |
+| `--cn-classifier` | Run k-NN classifier on per-region CN profiles for CNV group validation |
 | `--quality-aware` | Weight variant calls by base quality scores |
 | `--clip-evidence` | Detect soft-clip clusters as structural breakpoint evidence |
 | `--hmm-cnv` | Use HMM-based CNV segmentation as fallback when consensus fails |
@@ -121,11 +180,13 @@ These flags enable additional analysis modules that are under development:
 Results are written as both JSON and TSV files. The TSV contains:
 
 ```
-Sample       Genotype   Filter   Activity score   Predicted phenotype
-sample123    *1/*4      PASS     1.0              Intermediate Metabolizer
+Sample       Genotype   Filter   Confidence     Activity score   Predicted phenotype
+sample123    *1/*4      PASS     0.96 (HIGH)    1.0              Intermediate Metabolizer
 ```
 
-The JSON output includes additional fields: total copy number, spacer copy number, raw depth values, CNV group, called variants, and the full variant count table.
+The confidence score (0–1) is a weighted combination of six quality signals: depth quality, CN rounding quality, match quality, variant completeness, variant specificity, and D6/D7 SNP ratio consistency. Labels: HIGH (≥0.85), MEDIUM (0.50–0.84), LOW (<0.50).
+
+The JSON output includes additional fields: total copy number, spacer copy number, raw depth values, CNV group, called variants, confidence score, and the full variant count table.
 
 ## Project Structure
 
@@ -147,10 +208,13 @@ cyrius-rs/src/
 │   ├── cnv_hybrid.rs        #   CNV group assignment from SNP ratios
 │   ├── match_star_allele.rs #   Star allele pattern matching
 │   ├── construct_star_table.rs # Star allele combination tables
+│   ├── confidence.rs        #   Multi-signal confidence scoring
 │   ├── fuzzy_match.rs       #   Edit-distance fallback matching
 │   ├── strand_bias_all.rs   #   Strand bias filtering
 │   ├── changepoint.rs       #   Changepoint-based CNV detection
 │   ├── het_check.rs         #   Hemizygosity detection
+│   ├── cn_classifier.rs     #   k-NN CN profile classifier
+│   ├── read_phasing.rs      #   Read-level phasing constraints
 │   ├── clip_evidence.rs     #   Soft-clip cluster detection
 │   ├── hmm_cnv.rs           #   HMM-based CNV segmentation
 │   ├── read_voting.rs       #   Read-level allele voting

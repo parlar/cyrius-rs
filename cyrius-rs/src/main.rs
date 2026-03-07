@@ -990,7 +990,7 @@ fn main() {
         log::warn!("Input file for sample {} does not exist.", sample_id);
         // Write empty output files (matching Python behavior)
         std::fs::write(&out_json, "{}").unwrap();
-        let header = "Sample\tGenotype\tFilter\tActivity score\tPredicted phenotype\n";
+        let header = "Sample\tGenotype\tFilter\tConfidence\tActivity score\tPredicted phenotype\n";
         std::fs::write(&out_tsv, header).unwrap();
         return;
     }
@@ -1055,6 +1055,30 @@ fn main() {
         );
     }
 
+    // Compute confidence score
+    let confidence = cyrius_rs::caller::confidence::compute_confidence(
+        &cyrius_rs::caller::confidence::ConfidenceInput {
+            coverage_mad: cyp2d6_call.coverage_mad,
+            median_depth: cyp2d6_call.median_depth,
+            total_cn_raw: cyp2d6_call.total_cn_raw.unwrap_or(0.0),
+            spacer_cn_raw: cyp2d6_call.spacer_cn_raw.unwrap_or(0.0),
+            call_info: cyp2d6_call.call_info.as_deref(),
+            filter: cyp2d6_call.filter.as_deref(),
+            genotype: cyp2d6_call.genotype.as_deref(),
+            cnv_group: cyp2d6_call.cnv_group.as_deref(),
+            d67_snp_raw: cyp2d6_call.d67_snp_raw.as_deref(),
+            variant_raw_count: cyp2d6_call.variant_raw_count.as_ref(),
+            star_combinations: &call_parameters.star_combinations,
+        },
+    );
+    let c = &confidence.components;
+    log::info!(
+        "confidence: {:.2} ({}) — depth={:.2} cn={:.2} match={:.2} completeness={:.2} specificity={:.2} snp={:.2}",
+        confidence.score, confidence.label,
+        c.depth_quality, c.cn_quality, c.match_quality,
+        c.variant_completeness, c.variant_specificity, c.snp_consistency,
+    );
+
     // Write JSON
     log::info!("Writing to json ({})", out_json);
     let sorted_json_genotype = cyp2d6_call.genotype.as_deref().map(|g| {
@@ -1075,6 +1099,8 @@ fn main() {
         "CNV_group": cyp2d6_call.cnv_group,
         "Genotype": sorted_json_genotype,
         "Filter": cyp2d6_call.filter,
+        "Confidence": format!("{:.2}", confidence.score),
+        "Confidence_label": confidence.label,
         "Raw_star_allele": cyp2d6_call.raw_star_allele,
         "Call_info": cyp2d6_call.call_info,
         "Exon9_CN": cyp2d6_call.exon9_cn,
@@ -1125,12 +1151,14 @@ fn main() {
     let genotype_str = sorted_genotype.as_deref().unwrap_or("None");
 
     let mut tsv_content = String::new();
-    tsv_content.push_str("Sample\tGenotype\tFilter\tActivity score\tPredicted phenotype\n");
+    tsv_content.push_str("Sample\tGenotype\tFilter\tConfidence\tActivity score\tPredicted phenotype\n");
     tsv_content.push_str(&format!(
-        "{}\t{}\t{}\t{}\t{}\n",
+        "{}\t{}\t{}\t{:.2} ({})\t{}\t{}\n",
         sample_id,
         genotype_str,
         cyp2d6_call.filter.as_deref().unwrap_or("None"),
+        confidence.score,
+        confidence.label,
         activity_scores,
         predicted_phenotypes,
     ));

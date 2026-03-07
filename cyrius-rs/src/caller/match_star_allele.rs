@@ -452,13 +452,13 @@ pub fn get_final_call_clean(
             // indistinguishable from short reads (*36 is a superset of *10).
             // Output both alternatives.
             if remaining == "*36" {
-                return Some(format!("*36/*36+*10;*10/*36+*36"));
+                return Some(format!("*36/*36+*10;*10/*36x2"));
             }
             return Some(format!("{}/*36+*10", remaining));
         }
         if split_call.iter().filter(|&&s| s == "*36").count() == 2 {
             let remain: Vec<&&str> = split_call.iter().filter(|&&s| s != "*36").collect();
-            return Some(format!("*36+*36/{}", remain[0]));
+            return Some(format!("*36x2/{}", remain[0]));
         }
     }
 
@@ -511,9 +511,9 @@ pub fn get_final_call_clean(
         }
         let specific_cases: Vec<(&str, &str)> = vec![
             ("*4_*4_*4.013_*4.013", "*4.013+*4/*4.013+*4"),
-            ("*10_*36_*36_*36", "*36+*10/*36+*36"),
-            ("*10_*10_*36_*36_*36", "*36+*10/*36+*36+*10"),
-            ("*10_*10_*36_*36_*36_*36", "*36+*36+*10/*36+*36+*10"),
+            ("*10_*36_*36_*36", "*36+*10/*36x2"),
+            ("*10_*10_*36_*36_*36", "*36+*10/*36x2+*10"),
+            ("*10_*10_*36_*36_*36_*36", "*36x2+*10/*36x2+*10"),
         ];
         for (pattern, result) in &specific_cases {
             if called_stars.as_str() == *pattern {
@@ -532,7 +532,7 @@ pub fn get_final_call_clean(
                 if let Some(pos) = sc.iter().position(|&s| s == "*36") { sc.remove(pos); }
                 if let Some(pos) = sc.iter().position(|&s| s == "*83") { sc.remove(pos); }
                 if sc.len() == 1 {
-                    return Some(format!("{}/*36+*36+*83+*10", sc[0]));
+                    return Some(format!("{}/*36x2+*83+*10", sc[0]));
                 }
             }
         }
