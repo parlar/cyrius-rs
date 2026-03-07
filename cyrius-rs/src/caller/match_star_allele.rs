@@ -447,7 +447,14 @@ pub fn get_final_call_clean(
             let idx_36 = split_call.iter().position(|&s| s == "*36").unwrap();
             let remain: Vec<usize> = (0..3).filter(|&n| n != idx_10 && n != idx_36).collect();
             assert_eq!(remain.len(), 1);
-            return Some(format!("{}/*36+*10", split_call[remain[0]]));
+            let remaining = split_call[remain[0]];
+            // When remaining is also *36, both tandem arrangements are
+            // indistinguishable from short reads (*36 is a superset of *10).
+            // Output both alternatives.
+            if remaining == "*36" {
+                return Some(format!("*36/*36+*10;*10/*36+*36"));
+            }
+            return Some(format!("{}/*36+*10", remaining));
         }
         if split_call.iter().filter(|&&s| s == "*36").count() == 2 {
             let remain: Vec<&&str> = split_call.iter().filter(|&&s| s != "*36").collect();

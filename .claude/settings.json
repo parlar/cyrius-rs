@@ -32,7 +32,11 @@
       "Bash(xargs -P 8 -I {} bash -c 'sample=$\\(basename {} | sed \"\"s/_pgx_regions.bam//\"\"\\); ./cyrius-rs/target/release/cyrius-rs --count-file benchmark/count_files/${sample}_count.txt --bam {} --reference /tmp/Homo_sapiens_assembly38.fasta --strand-bias-all --fuzzy-match --changepoint-hybrid --het-check --clip-evidence 2>&1 | grep -E \"\"\\(clip_evidence|Result\\)\"\" | sed \"\"s/^/${sample}: /\"\"')",
       "Bash(./cyrius-rs/target/release/cyrius-rs --help)",
       "Bash(./cyrius-rs/target/release/cyrius-rs -i \"benchmark/NA18565_pgx_regions.bam\" --countFilePath \"benchmark/count_files/NA18565_count.txt\" -o /tmp/clip_test --id NA18565 --reference /tmp/Homo_sapiens_assembly38.fasta --strand-bias-all --fuzzy-match --changepoint-hybrid --het-check --clip-evidence --print)",
-      "Bash(bash benchmark/run_benchmark.sh --strand-bias-all --fuzzy-match --changepoint-hybrid --het-check --clip-evidence)"
+      "Bash(bash benchmark/run_benchmark.sh --strand-bias-all --fuzzy-match --changepoint-hybrid --het-check --clip-evidence)",
+      "Bash(bash /tmp/run_pdx_benchmark.sh)",
+      "Bash(RUST_LOG=info ./cyrius-rs/target/release/cyrius-rs -i benchmark/NA18565_pgx_regions.bam -o /tmp/test_phasing --id NA18565 --strand-bias-all --fuzzy-match --changepoint-hybrid --het-check --read-phasing --cn-classifier)",
+      "Bash(bash benchmark/run_benchmark.sh --strand-bias-all --fuzzy-match --changepoint-hybrid --het-check --read-phasing --cn-classifier)",
+      "Bash(./cyrius-rs/target/release/cyrius-rs -i benchmark/NA18565_pgx_regions.bam -o /tmp/bench_test --id NA18565 --strand-bias-all --fuzzy-match --changepoint-hybrid --het-check --read-phasing --cn-classifier)"
     ],
     "additionalDirectories": [
       "/tmp",
