@@ -1,3 +1,4 @@
+pub mod align;
 pub mod caller;
 pub mod data;
 pub mod depth_calling;

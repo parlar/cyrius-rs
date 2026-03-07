@@ -492,9 +492,18 @@ pub fn get_final_call_clean(
 
     if cnvcall.contains("exon9hyb") && cnvcall != "exon9hyb" && !cnvcall.contains("star") && !cnvcall.contains("dup") {
         // Multiple exon9hyb
+        // Special case: *10_*10_*36_*36 with elevated spacer CN indicates
+        // a *5 deletion on one haplotype with tandem *36+*10 on the other.
+        // Expected spacer CN: *36+*10/*36+*10 = 4, *5/*36x2+*10x2 = 5.
+        if cnvcall == "exon9hyb_exon9hyb" && called_stars == "*10_*10_*36_*36" {
+            return if spacer_cn.map_or(false, |cn| cn > 4) {
+                Some("*5/*36x2+*10x2".to_string())
+            } else {
+                Some("*36+*10/*36+*10".to_string())
+            };
+        }
         let specific_cases: Vec<(&str, &str)> = vec![
             ("*4_*4_*4.013_*4.013", "*4.013+*4/*4.013+*4"),
-            ("*10_*10_*36_*36", "*36+*10/*36+*10"),
             ("*10_*36_*36_*36", "*36+*10/*36+*36"),
             ("*10_*10_*36_*36_*36", "*36+*10/*36+*36+*10"),
             ("*10_*10_*36_*36_*36_*36", "*36+*36+*10/*36+*36+*10"),

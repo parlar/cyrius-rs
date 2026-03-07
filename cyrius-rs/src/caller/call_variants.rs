@@ -315,9 +315,12 @@ pub fn call_exon9gc(
         let mean_c2 = stats::mean(
             &d7_count.iter().map(|&x| x as f64).collect::<Vec<_>>(),
         );
+        // Relaxed from 0.75 to 0.70 to handle *10D cases where the duplication
+        // breakpoint downstream of exon9 causes borderline D6/D7 ratios at exon9
+        // (e.g., HG00421: average probability 0.729 was failing the 0.75 cutoff).
         let ave_call = process_raw_call_gc(
             &[call_reg1_cn(Some(cn as u32), mean_c1, mean_c2, 3.0)[0].clone().into()],
-            0.75,
+            0.70,
             true,
         );
         if let Some(ave_cn) = ave_call[0] {

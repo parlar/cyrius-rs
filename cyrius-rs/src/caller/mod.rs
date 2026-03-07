@@ -1,10 +1,15 @@
 pub mod call_variants;
 pub mod changepoint;
+pub mod clip_evidence;
 pub mod cnv_hybrid;
 pub mod consistency;
 pub mod construct_star_table;
+pub mod diplotype_caller;
 pub mod fuzzy_match;
+pub mod haplotype_resolve;
 pub mod het_check;
+pub mod hmm_cnv;
 pub mod match_star_allele;
 pub mod phase_disambiguate;
+pub mod read_voting;
 pub mod strand_bias_all;

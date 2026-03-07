@@ -140,6 +140,18 @@ struct Cli {
 
     #[arg(long = "consistency-check", help = "Run post-hoc consistency checks (conversion map, mismatch rate, allele balance)")]
     consistency_check: bool,
+
+    #[arg(long = "read-voting", help = "Run read-level allele voting for independent QC")]
+    read_voting: bool,
+
+    #[arg(long = "hmm-cnv", help = "Use HMM-based CNV segmentation as fallback when consensus fails")]
+    hmm_cnv: bool,
+
+    #[arg(long = "diplotype-caller", help = "Run likelihood-based diplotype caller (D6+D7 mixture model)")]
+    diplotype_caller: bool,
+
+    #[arg(long = "clip-evidence", help = "Detect soft-clip clusters as structural breakpoint evidence")]
+    clip_evidence: bool,
 }
 
 /// Check if chromosome names contain "chr" prefix.
@@ -426,6 +438,37 @@ fn d6_star_caller(
         cnvtag
     };
 
+    // Feature: hmm_cnv — HMM-based segmentation as fallback when consensus fails
+    let cnvtag = if features.hmm_cnv && cnvtag.is_none() {
+        // Extract sd_per_copy from GMM parameters: sd_cn2 / sqrt(2)
+        let sd_cn2: f64 = params.gmm_parameter["d67"]["sd"][0].parse().unwrap();
+        let sd_per_copy = sd_cn2 / std::f64::consts::SQRT_2;
+        let hmm_params = cyrius_rs::caller::hmm_cnv::HmmParams::from_gmm_prior(total_cn, sd_per_copy);
+        let hmm_result = cyrius_rs::caller::hmm_cnv::hmm_segment(
+            &raw_d6_cn, &snp_d6, &snp_d7, total_cn, &hmm_params,
+        );
+        let hmm_tag = cyrius_rs::caller::hmm_cnv::classify_segments(
+            &hmm_result.segments, total_cn, raw_cn_call.spacer_cn,
+        );
+        log::info!(
+            "hmm_cnv: segmented into {} segments",
+            hmm_result.segments.len(),
+        );
+        for (i, seg) in hmm_result.segments.iter().enumerate() {
+            log::info!(
+                "  segment {}: idx {}..{}, cn={}, n_valid={}, mean_obs={:.2}",
+                i, seg.start_idx, seg.end_idx, seg.cn, seg.n_valid, seg.mean_obs,
+            );
+        }
+        match hmm_tag {
+            Some(ref tag) => log::info!("hmm_cnv: suggesting CNV tag '{}'", tag),
+            None => log::info!("hmm_cnv: segment pattern did not match any known CNV group"),
+        }
+        hmm_tag
+    } else {
+        cnvtag
+    };
+
     // Feature: het_check — detect hemizygosity (zero het sites = deletion)
     if features.het_check {
         let het_result = cyrius_rs::caller::het_check::check_hemizygosity(
@@ -442,6 +485,30 @@ fn d6_star_caller(
             if let Some(ref tag) = cnvtag {
                 let _ = cyrius_rs::caller::het_check::suggest_cnv_with_deletion(
                     &het_result, tag, total_cn,
+                );
+            }
+        }
+    }
+
+    // Feature: clip_evidence — detect soft-clip clusters as structural breakpoint evidence
+    if features.clip_evidence {
+        let chrom = &params.var_db.nchr;
+        let clip_ev = cyrius_rs::caller::clip_evidence::detect_clip_clusters(
+            bam_path, chrom, 42123000, 42146000, reference_fasta,
+        );
+        if let Some(ref ev) = clip_ev {
+            let signals = cyrius_rs::caller::clip_evidence::classify_clip_signals(ev);
+            log::info!(
+                "clip_evidence: {} clusters, {} total clipped reads, \
+                 d6_body={}, rep6_spacer={}, spacer={}, d7={}",
+                signals.n_clusters, ev.total_clipped_reads,
+                signals.d6_body_breakpoint, signals.rep6_spacer_breakpoint,
+                signals.spacer_breakpoint, signals.d7_breakpoint,
+            );
+            for cluster in &ev.clusters {
+                log::info!(
+                    "  cluster pos={}: left={} right={}",
+                    cluster.position, cluster.left_count, cluster.right_count,
                 );
             }
         }
@@ -694,6 +761,60 @@ fn d6_star_caller(
         }
     }
 
+    // Feature: read_voting — independent allele voting from read-level evidence
+    if features.read_voting {
+        if let Some(ref filter) = genotype_filter {
+            if filter == "PASS" || filter == "Fuzzy_match" {
+                let mut voting_reader =
+                    open_alignment_file_with_index(bam_path, reference_fasta, index_name).unwrap();
+                // CYP2D6 region on GRCh38: chr22:42123192-42132032
+                let d6_start: i64 = 42123192;
+                let d6_end: i64 = 42132032;
+                let voting_result = cyrius_rs::caller::read_voting::validate_call(
+                    &mut voting_reader,
+                    &params.snp_db.nchr,
+                    d6_start,
+                    d6_end,
+                    &params.var_list,
+                    &params.star_combinations,
+                    final_star_allele_call.as_deref(),
+                );
+                if let Some(ref flag) = voting_result.flag {
+                    genotype_filter = Some(flag.clone());
+                }
+            }
+        }
+    }
+
+    // Feature: diplotype_caller — likelihood-based diplotype calling with D6+D7 mixture model
+    if features.diplotype_caller {
+        let mut dc_reader =
+            open_alignment_file_with_index(bam_path, reference_fasta, index_name).unwrap();
+        let dc_result = cyrius_rs::caller::diplotype_caller::call_diplotype(
+            &mut dc_reader,
+            &params.snp_db.nchr,
+            &params.var_list,
+            data::SNP_FILE,
+            &params.star_combinations,
+            total_cn,
+            20,
+        );
+        if !dc_result.top_diplotypes.is_empty() {
+            let best = &dc_result.top_diplotypes[0];
+            log::info!(
+                "diplotype_caller: best={}/{} (posterior={:.4}, ll={:.1}), \
+                 pileup_call={:?}, reads={} (filtered={})",
+                best.allele_a,
+                best.allele_b,
+                best.posterior,
+                best.log10_likelihood,
+                final_star_allele_call,
+                dc_result.n_informative_reads,
+                dc_result.n_filtered_reads,
+            );
+        }
+    }
+
     D6Call {
         coverage_mad: normalized_depth.mad,
         median_depth: normalized_depth.mediandepth,
@@ -772,21 +893,28 @@ fn main() {
         het_check: cli.het_check,
         spacer_cn_check: cli.spacer_cn_check,
         consistency_check: cli.consistency_check,
+        read_voting: cli.read_voting,
+        hmm_cnv: cli.hmm_cnv,
+        diplotype_caller: cli.diplotype_caller,
+        clip_evidence: cli.clip_evidence,
     };
 
     if features.strand_bias_all || features.fuzzy_match || features.quality_aware
         || features.phase_disambiguate || features.phase_readpair
         || features.changepoint_hybrid || features.het_check || features.spacer_cn_check
-        || features.consistency_check
+        || features.consistency_check || features.read_voting || features.hmm_cnv
+        || features.diplotype_caller
     {
         log::info!(
             "Experimental features: strand_bias_all={}, fuzzy_match={}, quality_aware={}, \
              phase_disambiguate={}, phase_readpair={}, changepoint_hybrid={}, het_check={}, \
-             spacer_cn_check={}, consistency_check={}",
+             spacer_cn_check={}, consistency_check={}, read_voting={}, hmm_cnv={}, \
+             diplotype_caller={}",
             features.strand_bias_all, features.fuzzy_match, features.quality_aware,
             features.phase_disambiguate, features.phase_readpair,
             features.changepoint_hybrid, features.het_check, features.spacer_cn_check,
-            features.consistency_check
+            features.consistency_check, features.read_voting, features.hmm_cnv,
+            features.diplotype_caller
         );
     }
 

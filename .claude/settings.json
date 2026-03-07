@@ -7,7 +7,36 @@
       "Bash(RUST_LOG=debug cyrius-rs/target/release/cyrius-rs -i benchmark/HG01190_pgx_regions.bam -o /tmp/debug_1190 --id HG01190)",
       "Bash(rm -f /tmp/spacer_test/*.json)",
       "Bash(printf '%s\\\\n' HG00111 HG00421 NA18545 NA18565 NA19143 NA12878 HG03225 NA18617 HG00463 NA19317 NA11832 NA12154)",
-      "Read(//home/parlar_ai/dev/**)"
+      "Read(//home/parlar_ai/dev/**)",
+      "Read(//home/parlar_ai/dev/cyrius-rs/**)",
+      "Bash(RUST_LOG=info target/release/cyrius-rs -i /home/parlar_ai/dev/pdx_caller/data/benchmark/HG003_pgx_regions.bam -o /tmp/rv_test --read-voting)",
+      "Bash(mkdir -p /tmp/rv_baseline)",
+      "Bash(RUST_LOG=warn target/release/cyrius-rs -i \"$bam\" -o /tmp/rv_baseline)",
+      "Bash(ls /home/parlar_ai/dev/pdx_caller/data/benchmark/*_pgx_regions.bam)",
+      "Bash(xargs -P 16 -I{} /home/parlar_ai/dev/cyrius-rs/cyrius-rs/target/release/cyrius-rs --bam {} --read-voting --output /dev/null)",
+      "Bash(/home/parlar_ai/dev/cyrius-rs/cyrius-rs/target/release/cyrius-rs --bam /home/parlar_ai/dev/pdx_caller/data/benchmark/HG00096_pgx_regions.bam --read-voting --output /dev/stdout)",
+      "Bash(/home/parlar_ai/dev/cyrius-rs/cyrius-rs/target/release/cyrius-rs --bam /home/parlar_ai/dev/pdx_caller/data/benchmark/HG00096_pgx_regions.bam --read-voting --output /tmp/test_hg00096.json)",
+      "Bash(/home/parlar_ai/dev/cyrius-rs/cyrius-rs/target/release/cyrius-rs --help)",
+      "Bash(xargs -P 16 -I{} bash -c 'sample=$\\(basename {} _pgx_regions.bam\\); /home/parlar_ai/dev/cyrius-rs/cyrius-rs/target/release/cyrius-rs -i {} --outDir /tmp/bench_voting --id \"\"${sample}\"\" --strand-bias-all --fuzzy-match --quality-aware --phase-disambiguate --phase-readpair --changepoint-hybrid --het-check --spacer-cn-check --consistency-check --read-voting 2>/dev/null')",
+      "Bash(xargs -P 16 -I{} bash -c 'sample=$\\(basename {} _pgx_regions.bam\\); /home/parlar_ai/dev/cyrius-rs/cyrius-rs/target/release/cyrius-rs -i {} --outDir /tmp/bench_baseline --id \"\"${sample}\"\" --strand-bias-all --fuzzy-match --quality-aware --phase-disambiguate --phase-readpair --changepoint-hybrid --het-check --spacer-cn-check --consistency-check 2>/dev/null')",
+      "Bash(ls /home/parlar_ai/dev/cyrius-rs/benchmark/*.cram /home/parlar_ai/dev/cyrius-rs/benchmark/*.bam)",
+      "Bash(RUST_LOG=info target/release/cyrius-rs -i /home/parlar_ai/dev/cyrius-rs/benchmark/HG00421_pgx_regions.bam -g 38 -o /tmp/bench_hap)",
+      "Bash(RUST_LOG=info /home/parlar_ai/dev/cyrius-rs/cyrius-rs/target/release/cyrius-rs -i /home/parlar_ai/dev/cyrius-rs/benchmark/HG02373_pgx_regions.bam -o /tmp/bench_hap --id HG02373 --countFilePath /home/parlar_ai/dev/cyrius-rs/benchmark/count_files --strand-bias-all --fuzzy-match --changepoint-hybrid --het-check)",
+      "WebSearch",
+      "WebFetch(domain:pmc.ncbi.nlm.nih.gov)",
+      "WebFetch(domain:help.dragen.illumina.com)",
+      "Read(//dev/**)",
+      "Bash(bash benchmark/run_benchmark.sh --strand-bias-all --fuzzy-match --changepoint-hybrid --het-check)",
+      "Bash(samtools idxstats /tmp/fullwgs/NA18565_full_region.bam)",
+      "Bash(ls benchmark/count_files/*_count.txt)",
+      "Bash(xargs -P 8 -I {} bash -c 'sample=$\\(basename {} | sed \"\"s/_pgx_regions.bam//\"\"\\); ./cyrius-rs/target/release/cyrius-rs --count-file benchmark/count_files/${sample}_count.txt --bam {} --reference /tmp/Homo_sapiens_assembly38.fasta --strand-bias-all --fuzzy-match --changepoint-hybrid --het-check --clip-evidence 2>&1 | grep -E \"\"\\(clip_evidence|Result\\)\"\" | sed \"\"s/^/${sample}: /\"\"')",
+      "Bash(./cyrius-rs/target/release/cyrius-rs --help)",
+      "Bash(./cyrius-rs/target/release/cyrius-rs -i \"benchmark/NA18565_pgx_regions.bam\" --countFilePath \"benchmark/count_files/NA18565_count.txt\" -o /tmp/clip_test --id NA18565 --reference /tmp/Homo_sapiens_assembly38.fasta --strand-bias-all --fuzzy-match --changepoint-hybrid --het-check --clip-evidence --print)",
+      "Bash(bash benchmark/run_benchmark.sh --strand-bias-all --fuzzy-match --changepoint-hybrid --het-check --clip-evidence)"
+    ],
+    "additionalDirectories": [
+      "/tmp",
+      "/home/parlar_ai/dev/cyrius-rs/cyrius-rs/src"
     ]
   }
 }
