@@ -8,7 +8,15 @@ Evaluated on 53 GeT-RM samples with truth annotations from the 1000 Genomes high
 
 | Metric | Value |
 |---|---|
-| **Correct** | **53 / 53 (100%)** |
+| **Exact match** | **49 / 53 (92.5%)** |
+| Ambiguous (truth included) | 4 |
+| Wrong | 0 |
+
+The 4 ambiguous calls report multiple alternative diplotypes (separated by `;`) because the data does not uniquely determine a single answer. In each case, the correct diplotype is among the reported alternatives. In 3 of 4 cases, the alternatives have identical clinical effect (same activity score and metabolizer phenotype). One case (NA19908) has a clinically relevant difference:
+
+- **HG00589, NA18973**: `*1/*21;*2/*21` — cannot distinguish \*1 from \*2. **Same clinical effect** (activity 1.0, Intermediate Metabolizer)
+- **NA18565**: `*36/*36+*10;*10/*36x2` — tandem arrangement ambiguity. **Same clinical effect** (activity 0.25, Poor Metabolizer)
+- **NA19908**: `*1/*46;*43/*45` — two different diplotype interpretations. **Different clinical effect** (\*1/\*46 = activity 2.0, Normal Metabolizer vs \*43/\*45 = activity 1.0, Intermediate Metabolizer)
 
 Each call includes a confidence score (0–1) with a qualitative label (HIGH, MEDIUM, LOW). On the 53 truth samples: 40 HIGH, 13 MEDIUM, 0 LOW.
 
