@@ -188,13 +188,22 @@ These flags enable additional analysis modules that are under development:
 Results are written as both JSON and TSV files. The TSV contains:
 
 ```
-Sample       Genotype   Filter   Confidence     Activity score   Predicted phenotype
-sample123    *1/*4      PASS     0.96 (HIGH)    1.0              Intermediate Metabolizer
+Sample       Genotype   Filter   Confidence     Activity score   Predicted phenotype   Phasing_ambiguous   Long_read_recommended
+sample123    *1/*4      PASS     0.96 (HIGH)    1.0              Intermediate Metabolizer   false           false
 ```
 
 The confidence score (0–1) is a weighted combination of six quality signals: depth quality, CN rounding quality, match quality, variant completeness, variant specificity, and D6/D7 SNP ratio consistency. Labels: HIGH (≥0.85), MEDIUM (0.50–0.84), LOW (<0.50).
 
-The JSON output includes additional fields: total copy number, spacer copy number, raw depth values, CNV group, called variants, confidence score, and the full variant count table.
+### Phasing ambiguity and long-read reflex
+
+When the data does not uniquely determine a single diplotype, the output contains multiple alternatives separated by `;`. Two additional fields help clinical labs decide when orthogonal confirmation is needed:
+
+- **Phasing_ambiguous**: `true` when multiple alternative diplotypes are reported
+- **Long_read_recommended**: `true` only when the alternatives have **different clinical effects** (different activity score or metabolizer phenotype). When all alternatives are clinically equivalent, long-read confirmation would not change the clinical interpretation.
+
+The JSON output additionally includes `Clinical_equivalence` (`same_effect` or `different_effect`) for ambiguous calls.
+
+The JSON output also includes: total copy number, spacer copy number, raw depth values, CNV group, called variants, confidence score, and the full variant count table.
 
 ## Project Structure
 
@@ -235,6 +244,25 @@ cyrius-rs/src/
     ├── qgram_index.rs       #   Q-gram index
     └── sequence.rs          #   Base encoding, reverse complement
 ```
+
+## Future work: long-read reflex for phasing ambiguity
+
+Some CYP2D6 diplotype calls are inherently ambiguous from short-read WGS because the data cannot phase distant variants onto haplotypes. In our benchmark, 4 of 53 samples report multiple alternative diplotypes. In 3 cases the alternatives are clinically equivalent (same activity score and metabolizer phenotype). In 1 case (~2%) the ambiguity is clinically relevant and requires orthogonal confirmation.
+
+**Proposed strategy: nanopore amplicon sequencing as a targeted reflex test.**
+
+CYP2D6 is only ~4.4 kb, well within a single nanopore read. A long-range PCR amplicon with one primer anchored in a CYP2D6-unique flanking region ensures specificity against CYP2D7 (97% sequence homology) without requiring both primers to be paralog-specific. Each nanopore read then spans all exonic variants simultaneously, directly resolving haplotype phase.
+
+Practical considerations:
+
+- **Reflex criteria**: The `Long_read_recommended` output flag identifies samples where phasing ambiguity changes the clinical interpretation. Only these samples (~2%) need the amplicon assay.
+- **Throughput**: Barcoded nanopore library prep (24–96 samples per flow cell) keeps per-sample cost low at clinical volumes.
+- **Turnaround**: Same-day results are feasible (long-range PCR + 4-hour sequencing run + analysis).
+- **Duplications and tandems**: Each nanopore read represents a single molecule, so reads from different gene copies are naturally separated. Read count ratios reflect copy number directly.
+- **Deletions (*5)**: No amplicon is produced from the deleted allele, visible as reduced read count — consistent with the depth-based deletion call from WGS.
+- **Published primers**: CYP2D6-specific long-range PCR primers validated by the Gaedigk lab and the PharmVar consortium are available.
+
+This two-tier approach (WGS-based calling for all samples, nanopore reflex for the small fraction with clinically relevant ambiguity) balances accuracy and cost-effectiveness for high-throughput clinical pharmacogenomics.
 
 ## License
 

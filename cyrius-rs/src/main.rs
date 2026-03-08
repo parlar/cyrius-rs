@@ -990,7 +990,7 @@ fn main() {
         log::warn!("Input file for sample {} does not exist.", sample_id);
         // Write empty output files (matching Python behavior)
         std::fs::write(&out_json, "{}").unwrap();
-        let header = "Sample\tGenotype\tFilter\tConfidence\tActivity score\tPredicted phenotype\n";
+        let header = "Sample\tGenotype\tFilter\tConfidence\tActivity score\tPredicted phenotype\tPhasing_ambiguous\tLong_read_recommended\n";
         std::fs::write(&out_tsv, header).unwrap();
         return;
     }
@@ -1079,6 +1079,41 @@ fn main() {
         c.variant_completeness, c.variant_specificity, c.snp_consistency,
     );
 
+    // Compute phenotype predictions and phasing status (needed for both JSON and TSV)
+    let haplotype_functionality =
+        phenotype::load_haplotype_functionality(data::HAPLOTYPE_FUNC);
+    let sorted_genotype = phenotype::sort_genotype(cyp2d6_call.genotype.as_deref());
+    let predictions = phenotype::match_phenotype(
+        sorted_genotype.as_deref(),
+        &haplotype_functionality,
+    );
+
+    let count_of_diplotypes = predictions.len();
+
+    // Determine phasing ambiguity and clinical equivalence
+    let phasing_ambiguous = count_of_diplotypes > 1;
+    let (clinical_equivalence, long_read_recommended) = if phasing_ambiguous {
+        let phenotypes: Vec<&str> = predictions
+            .iter()
+            .map(|p| p.predicted_phenotype.as_str())
+            .collect();
+        let all_same = phenotypes.windows(2).all(|w| w[0] == w[1]);
+        if all_same {
+            ("same_effect".to_string(), false)
+        } else {
+            ("different_effect".to_string(), true)
+        }
+    } else {
+        ("n/a".to_string(), false)
+    };
+
+    if phasing_ambiguous {
+        log::info!(
+            "phasing_ambiguous=true clinical_equivalence={} long_read_recommended={}",
+            clinical_equivalence, long_read_recommended,
+        );
+    }
+
     // Write JSON
     log::info!("Writing to json ({})", out_json);
     let sorted_json_genotype = cyp2d6_call.genotype.as_deref().map(|g| {
@@ -1101,6 +1136,9 @@ fn main() {
         "Filter": cyp2d6_call.filter,
         "Confidence": format!("{:.2}", confidence.score),
         "Confidence_label": confidence.label,
+        "Phasing_ambiguous": phasing_ambiguous,
+        "Clinical_equivalence": if phasing_ambiguous { &clinical_equivalence } else { "n/a" },
+        "Long_read_recommended": long_read_recommended,
         "Raw_star_allele": cyp2d6_call.raw_star_allele,
         "Call_info": cyp2d6_call.call_info,
         "Exon9_CN": cyp2d6_call.exon9_cn,
@@ -1115,15 +1153,7 @@ fn main() {
 
     // Write TSV
     log::info!("Writing to tsv ({})", out_tsv);
-    let haplotype_functionality =
-        phenotype::load_haplotype_functionality(data::HAPLOTYPE_FUNC);
-    let sorted_genotype = phenotype::sort_genotype(cyp2d6_call.genotype.as_deref());
-    let predictions = phenotype::match_phenotype(
-        sorted_genotype.as_deref(),
-        &haplotype_functionality,
-    );
 
-    let count_of_diplotypes = predictions.len();
     let (activity_scores, predicted_phenotypes) = if !predictions.is_empty() {
         if count_of_diplotypes > 1 {
             (
@@ -1151,9 +1181,9 @@ fn main() {
     let genotype_str = sorted_genotype.as_deref().unwrap_or("None");
 
     let mut tsv_content = String::new();
-    tsv_content.push_str("Sample\tGenotype\tFilter\tConfidence\tActivity score\tPredicted phenotype\n");
+    tsv_content.push_str("Sample\tGenotype\tFilter\tConfidence\tActivity score\tPredicted phenotype\tPhasing_ambiguous\tLong_read_recommended\n");
     tsv_content.push_str(&format!(
-        "{}\t{}\t{}\t{:.2} ({})\t{}\t{}\n",
+        "{}\t{}\t{}\t{:.2} ({})\t{}\t{}\t{}\t{}\n",
         sample_id,
         genotype_str,
         cyp2d6_call.filter.as_deref().unwrap_or("None"),
@@ -1161,6 +1191,8 @@ fn main() {
         confidence.label,
         activity_scores,
         predicted_phenotypes,
+        phasing_ambiguous,
+        long_read_recommended,
     ));
 
     // Haplotype info
