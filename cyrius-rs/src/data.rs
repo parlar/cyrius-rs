@@ -12,3 +12,4 @@ pub const HAPLOTYPE_FILE: &str = include_str!("../data/CYP2D6_haplotype_38.txt")
 pub const HAPLOTYPE_FUNC: &str = include_str!("../data/CYP2D6_haplotypes_functionality.txt");
 pub const FREQ_HAP: &str = include_str!("../data/CYP2D6_frequency_table_haplotypes.txt");
 pub const FREQ_DIP: &str = include_str!("../data/CYP2D6_frequency_table_diplotypes.txt");
+pub const DIAGNOSTIC_PANEL: &str = include_str!("../data/CYP2D6_diagnostic_panel.json");

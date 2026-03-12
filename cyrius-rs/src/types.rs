@@ -213,4 +213,6 @@ pub struct FeatureFlags {
     pub read_phasing: bool,
     /// Use per-region CN profile classifier for structural configuration
     pub cn_classifier: bool,
+    /// Use k-mer-based paralog ratio validation
+    pub kmer_validation: bool,
 }

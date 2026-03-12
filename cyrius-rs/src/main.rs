@@ -164,6 +164,9 @@ struct Cli {
 
     #[arg(long = "cn-classifier", help = "Use per-region CN profile classifier for structural configuration")]
     cn_classifier: bool,
+
+    #[arg(long = "kmer-validation", help = "Use alignment-free k-mer paralog ratio validation")]
+    kmer_validation: bool,
 }
 
 /// Check if chromosome names contain "chr" prefix.
@@ -585,6 +588,44 @@ fn d6_star_caller(
                 cn_class.predicted_tag, cnvtag_str,
             );
         }
+    }
+
+    // Feature: kmer_validation — alignment-free k-mer paralog ratio validation
+    if features.kmer_validation {
+        let kv = cyrius_rs::caller::kmer_validation::validate_with_kmers(
+            bam_path,
+            &params.snp_db.nchr,
+            total_cn,
+            raw_cn_call.spacer_cn,
+            &cnvtag_str,
+            reference_fasta,
+            index_name,
+        );
+        if kv.agrees {
+            log::info!(
+                "kmer_validation: AGREE — depth={} kmer_cat={}, ratio={:.3}, \
+                 est_d6={:.2} est_d7={:.2}, hybrid={}, reads={}/{}, {}",
+                cnvtag_str, kv.kmer_category, kv.overall_ratio,
+                kv.estimated_d6_cn, kv.estimated_d7_cn, kv.hybrid_detected,
+                kv.matched_reads, kv.total_reads, kv.segments_summary,
+            );
+        } else {
+            log::warn!(
+                "kmer_validation: DISAGREE — depth={} kmer_cat={}, ratio={:.3}, \
+                 est_d6={:.2} est_d7={:.2}, hybrid={}, reads={}/{}, {}",
+                cnvtag_str, kv.kmer_category, kv.overall_ratio,
+                kv.estimated_d6_cn, kv.estimated_d7_cn, kv.hybrid_detected,
+                kv.matched_reads, kv.total_reads, kv.segments_summary,
+            );
+        }
+        // Log per-position ratio profile
+        let ratio_strs: Vec<String> = kv.position_ratios.iter().enumerate().map(|(i, r)| {
+            match r {
+                Some(v) => format!("{}:{:.2}({}/{})", i, v, kv.d6_counts[i], kv.d7_counts[i]),
+                None => format!("{}:-", i),
+            }
+        }).collect();
+        log::info!("kmer_validation profile: {}", ratio_strs.join(" "));
     }
 
     // 5. Call variants
@@ -1013,6 +1054,7 @@ fn main() {
         af_phasing: cli.af_phasing,
         read_phasing: cli.read_phasing,
         cn_classifier: cli.cn_classifier,
+        kmer_validation: cli.kmer_validation,
     };
 
     if features.strand_bias_all || features.fuzzy_match || features.quality_aware
@@ -1020,19 +1062,20 @@ fn main() {
         || features.changepoint_hybrid || features.het_check || features.spacer_cn_check
         || features.consistency_check || features.read_voting || features.hmm_cnv
         || features.diplotype_caller || features.d7_depth || features.af_phasing
-        || features.read_phasing || features.cn_classifier
+        || features.read_phasing || features.cn_classifier || features.kmer_validation
     {
         log::info!(
             "Experimental features: strand_bias_all={}, fuzzy_match={}, quality_aware={}, \
              phase_disambiguate={}, phase_readpair={}, changepoint_hybrid={}, het_check={}, \
              spacer_cn_check={}, consistency_check={}, read_voting={}, hmm_cnv={}, \
-             diplotype_caller={}, d7_depth={}, af_phasing={}, read_phasing={}, cn_classifier={}",
+             diplotype_caller={}, d7_depth={}, af_phasing={}, read_phasing={}, cn_classifier={}, \
+             kmer_validation={}",
             features.strand_bias_all, features.fuzzy_match, features.quality_aware,
             features.phase_disambiguate, features.phase_readpair,
             features.changepoint_hybrid, features.het_check, features.spacer_cn_check,
             features.consistency_check, features.read_voting, features.hmm_cnv,
             features.diplotype_caller, features.d7_depth, features.af_phasing,
-            features.read_phasing, features.cn_classifier
+            features.read_phasing, features.cn_classifier, features.kmer_validation
         );
     }
 
