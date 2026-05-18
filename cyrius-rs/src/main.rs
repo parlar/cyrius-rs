@@ -257,6 +257,7 @@ fn d6_star_caller(
             variants_called: None, cnv_group: None, genotype: None, filter: None,
             raw_star_allele: None, call_info: None, exon9_cn: None, cnv_consensus: None,
             d67_snp_call: None, d67_snp_raw: None, variant_raw_count: None,
+            kmer_validation: None,
         };
     }
 
@@ -374,6 +375,7 @@ fn d6_star_caller(
             variants_called: None, cnv_group: None, genotype: None, filter: None,
             raw_star_allele: None, call_info: None, exon9_cn: None, cnv_consensus: None,
             d67_snp_call: None, d67_snp_raw: None, variant_raw_count: Some(raw_count),
+            kmer_validation: None,
         };
     }
 
@@ -571,6 +573,7 @@ fn d6_star_caller(
             d67_snp_call: Some(cn_call_snp_str),
             d67_snp_raw: Some(raw_d6_cn_str),
             variant_raw_count: Some(raw_count),
+            kmer_validation: None,
         };
     }
 
@@ -592,43 +595,60 @@ fn d6_star_caller(
         }
     }
 
-    // Feature: kmer_validation — alignment-free k-mer paralog ratio validation
-    if features.kmer_validation {
-        let kv = cyrius_rs::caller::kmer_validation::validate_with_kmers(
-            bam_path,
-            &params.snp_db.nchr,
-            total_cn,
-            raw_cn_call.spacer_cn,
-            &cnvtag_str,
-            reference_fasta,
-            index_name,
-        );
-        if kv.agrees {
-            log::info!(
-                "kmer_validation: AGREE — depth={} kmer_cat={}, ratio={:.3}, \
-                 est_d6={:.2} est_d7={:.2}, hybrid={}, reads={}/{}, {}",
-                cnvtag_str, kv.kmer_category, kv.overall_ratio,
-                kv.estimated_d6_cn, kv.estimated_d7_cn, kv.hybrid_detected,
-                kv.matched_reads, kv.total_reads, kv.segments_summary,
+    // Feature: kmer_validation — alignment-free k-mer paralog ratio validation.
+    // Validation is decoupled from calling: the result is recorded for review
+    // but does NOT modify the genotype, filter, or confidence.
+    let kmer_validation_summary: Option<cyrius_rs::types::KmerValidationSummary> =
+        if features.kmer_validation {
+            let kv = cyrius_rs::caller::kmer_validation::validate_with_kmers(
+                bam_path,
+                &params.snp_db.nchr,
+                total_cn,
+                raw_cn_call.spacer_cn,
+                &cnvtag_str,
+                reference_fasta,
+                index_name,
             );
-        } else {
-            log::warn!(
-                "kmer_validation: DISAGREE — depth={} kmer_cat={}, ratio={:.3}, \
-                 est_d6={:.2} est_d7={:.2}, hybrid={}, reads={}/{}, {}",
-                cnvtag_str, kv.kmer_category, kv.overall_ratio,
-                kv.estimated_d6_cn, kv.estimated_d7_cn, kv.hybrid_detected,
-                kv.matched_reads, kv.total_reads, kv.segments_summary,
-            );
-        }
-        // Log per-position ratio profile
-        let ratio_strs: Vec<String> = kv.position_ratios.iter().enumerate().map(|(i, r)| {
-            match r {
-                Some(v) => format!("{}:{:.2}({}/{})", i, v, kv.d6_counts[i], kv.d7_counts[i]),
-                None => format!("{}:-", i),
+            if kv.agrees {
+                log::info!(
+                    "kmer_validation: AGREE — depth={} kmer_cat={}, ratio={:.3}, \
+                     est_d6={:.2} est_d7={:.2}, hybrid={}, reads={}/{}, {}",
+                    cnvtag_str, kv.kmer_category, kv.overall_ratio,
+                    kv.estimated_d6_cn, kv.estimated_d7_cn, kv.hybrid_detected,
+                    kv.matched_reads, kv.total_reads, kv.segments_summary,
+                );
+            } else {
+                log::warn!(
+                    "kmer_validation: DISAGREE — depth={} kmer_cat={}, ratio={:.3}, \
+                     est_d6={:.2} est_d7={:.2}, hybrid={}, reads={}/{}, {}",
+                    cnvtag_str, kv.kmer_category, kv.overall_ratio,
+                    kv.estimated_d6_cn, kv.estimated_d7_cn, kv.hybrid_detected,
+                    kv.matched_reads, kv.total_reads, kv.segments_summary,
+                );
             }
-        }).collect();
-        log::info!("kmer_validation profile: {}", ratio_strs.join(" "));
-    }
+            // Log per-position ratio profile
+            let ratio_strs: Vec<String> = kv.position_ratios.iter().enumerate().map(|(i, r)| {
+                match r {
+                    Some(v) => format!("{}:{:.2}({}/{})", i, v, kv.d6_counts[i], kv.d7_counts[i]),
+                    None => format!("{}:-", i),
+                }
+            }).collect();
+            log::info!("kmer_validation profile: {}", ratio_strs.join(" "));
+
+            Some(cyrius_rs::types::KmerValidationSummary {
+                agrees: kv.agrees,
+                kmer_category: kv.kmer_category,
+                overall_ratio: kv.overall_ratio,
+                estimated_d6_cn: kv.estimated_d6_cn,
+                estimated_d7_cn: kv.estimated_d7_cn,
+                hybrid_detected: kv.hybrid_detected,
+                total_reads: kv.total_reads,
+                matched_reads: kv.matched_reads,
+                segments_summary: kv.segments_summary,
+            })
+        } else {
+            None
+        };
 
     // 5. Call variants
     // Feature: strand_bias_all — filter additional sites before CN calling
@@ -991,6 +1011,7 @@ fn d6_star_caller(
         d67_snp_call: Some(cn_call_snp_str),
         d67_snp_raw: Some(raw_d6_cn_str),
         variant_raw_count: Some(raw_count),
+        kmer_validation: kmer_validation_summary,
     }
 }
 
@@ -1176,6 +1197,23 @@ fn main() {
             .collect::<Vec<_>>()
             .join(";")
     });
+    // K-mer validation summary (None unless --kmer-validation was passed and
+    // a depth-based CNV tag was produced). Surfaces the alignment-free QC
+    // verdict alongside the call; does not modify the call itself.
+    let kmer_validation_json = cyp2d6_call.kmer_validation.as_ref().map(|kv| {
+        serde_json::json!({
+            "agrees": kv.agrees,
+            "kmer_category": kv.kmer_category,
+            "overall_ratio": kv.overall_ratio,
+            "estimated_d6_cn": kv.estimated_d6_cn,
+            "estimated_d7_cn": kv.estimated_d7_cn,
+            "hybrid_detected": kv.hybrid_detected,
+            "matched_reads": kv.matched_reads,
+            "total_reads": kv.total_reads,
+            "segments_summary": kv.segments_summary,
+        })
+    });
+
     let mut json_map = serde_json::Map::new();
     let call_json = serde_json::json!({
         "Coverage_MAD": cyp2d6_call.coverage_mad,
@@ -1200,6 +1238,7 @@ fn main() {
         "d67_snp_call": cyp2d6_call.d67_snp_call,
         "d67_snp_raw": cyp2d6_call.d67_snp_raw,
         "Variant_raw_count": cyp2d6_call.variant_raw_count,
+        "Kmer_validation": kmer_validation_json,
     });
     json_map.insert(sample_id.clone(), call_json);
     let json_output = serde_json::to_string(&json_map).unwrap();

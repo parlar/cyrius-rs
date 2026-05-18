@@ -106,6 +106,25 @@ pub struct StarCall {
     pub clean_call: Option<String>,
 }
 
+/// Compact, serializable summary of k-mer validation for the output.
+///
+/// Validation is an orthogonal QC channel that records whether an
+/// alignment-free paralog ratio agrees with the depth-derived CNV tag.
+/// It does NOT influence the genotype, filter, or confidence — only
+/// records the verdict alongside them.
+#[derive(Debug, Clone)]
+pub struct KmerValidationSummary {
+    pub agrees: bool,
+    pub kmer_category: String,
+    pub overall_ratio: f64,
+    pub estimated_d6_cn: f64,
+    pub estimated_d7_cn: f64,
+    pub hybrid_detected: bool,
+    pub total_reads: u64,
+    pub matched_reads: u64,
+    pub segments_summary: String,
+}
+
 /// Full D6 call result (matches Python d6_call namedtuple)
 #[derive(Debug, Clone)]
 pub struct D6Call {
@@ -126,6 +145,7 @@ pub struct D6Call {
     pub d67_snp_call: Option<String>,
     pub d67_snp_raw: Option<String>,
     pub variant_raw_count: Option<IndexMap<String, String>>,
+    pub kmer_validation: Option<KmerValidationSummary>,
 }
 
 /// Haplotype functionality info

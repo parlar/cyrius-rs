@@ -111,6 +111,20 @@ The observed variant pattern is matched against a precomputed table of all possi
 
 Activity scores are assigned per CPIC guidelines, and the predicted metabolizer phenotype (Poor, Intermediate, Normal, Ultrarapid) is reported.
 
+## Improvements over bcyrius
+
+cyrius-rs is a faithful port of bcyrius — same module boundaries, same data resources, same depth/GMM/SNP/matching flow — with a small number of targeted changes that are active by default:
+
+- **Exon 9 GC threshold relaxed (0.75 → 0.70)** in `call_exon9gc` ([`call_variants.rs:323`](cyrius-rs/src/caller/call_variants.rs#L323)). bcyrius's stricter cutoff misses rare `*10D`-style duplication breakpoints downstream of exon 9 (e.g. HG00421, where the exon 9 conversion probability is 0.729). The relaxed threshold lets the exon 9 signal participate in CNV-tag correction.
+- **Spacer CN as a structural discriminator** in star allele matching ([`match_star_allele.rs`](cyrius-rs/src/caller/match_star_allele.rs)). bcyrius uses the spacer region only for depth normalization. cyrius-rs uses the spacer CN as a feature to discriminate tandem and deletion-plus-duplication configurations that produce indistinguishable gene-body signals (e.g. NA18545, `exon9hyb_star5` cases).
+- **Tandem notation normalized** (`*36+*36` → `*36x2`) to match Pratt 2019 truth conventions.
+- **Ambiguous calls reported, not hidden** — when short reads cannot uniquely determine phase or structure, alternatives are reported as `dip1;dip2` rather than picking one. New JSON fields `Phasing_ambiguous`, `Clinical_equivalence`, and `Long_read_recommended` distinguish clinically-equivalent ambiguity (no action) from clinically-different ambiguity (long-read reflex recommended).
+- **Confidence scoring** combines six signals (depth quality, CN rounding quality, match quality, variant completeness, variant specificity, D6/D7 SNP consistency) into a single score with HIGH/MEDIUM/LOW labels.
+- **Changepoint-based CNV-tag fallback** ([`changepoint.rs`](cyrius-rs/src/caller/changepoint.rs)). When the standard region-consensus rule cannot assign a CNV tag, CBS with Welch's t-statistic on the D6/(D6+D7) ratio profile is used as an alternative path. Enabled by `--changepoint-hybrid`, which is included in the recommended flag set.
+- **Several robustness fixes** layered on faithful port: underflow guard in `cnv_hybrid` (`total_cn − spacer_cn`), insertion-order preservation in `get_consensus` (matches Python `Counter` tie-break), missing-file handling that returns empty output instead of panicking on autodetect, and clinical-equivalence comparison that includes both activity score and phenotype.
+
+A larger collection of opt-in flags adds independent QC channels and prototype analyses — see [Feature flags](#feature-flags) below.
+
 ## Features
 
 - Genotypes CYP2D6 star alleles from BAM/CRAM files aligned to GRCh38
@@ -156,32 +170,58 @@ cyrius-rs -i sample.bam -o results/
 | `--population-info` | Include population frequencies in output |
 | `--haplotype-info` | Include haplotype functional annotations |
 
-### Recommended Flags
+<a id="feature-flags"></a>
+### Feature flags
 
-These flags are recommended for best accuracy and are used in the benchmark:
+Flags are grouped by how they affect the output. Pass them after the core options.
 
-| Flag | Description |
+#### Tier 1 — Recommended (affect the call)
+
+These flags change the genotype, filter, or CNV tag. They are the default benchmark configuration:
+
+```bash
+--strand-bias-all --fuzzy-match --changepoint-hybrid --het-check
+```
+
+| Flag | Effect on output |
 |---|---|
-| `--strand-bias-all` | Apply strand bias filtering to all variant sites, not just known noisy ones |
-| `--fuzzy-match` | Use edit-distance scoring when no exact star allele match is found |
-| `--changepoint-hybrid` | Use changepoint detection as a fallback for CNV group assignment |
-| `--het-check` | Detect hemizygosity (zero heterozygous sites indicates a deletion) |
+| `--strand-bias-all` | Strand-bias filtering on all variant sites (not just the small known-noisy set). Removes more variant-calling artifacts. |
+| `--fuzzy-match` | Edit-distance fallback when no exact star allele match is found. Recovers near-matches at the cost of a `Fuzzy_match` filter label. |
+| `--changepoint-hybrid` | Circular binary segmentation on the D6/(D6+D7) ratio profile, used as a CNV-tag fallback when the standard region-consensus rule produces no tag. |
+| `--het-check` | Diagnostic logging of D6/D7 hemizygosity (zero het sites). Currently QC-only — kept in the recommended set because it is a useful log signal during review. |
 
-### Experimental Flags
+#### Tier 2 — Additional call-affecting flags (off by default)
 
-These flags enable additional analysis modules that are under development:
+These also affect the genotype or filter, but are off by default because they are either situation-specific or have not yet been validated across the full benchmark:
 
-| Flag | Description |
+| Flag | Effect on output |
 |---|---|
-| `--read-phasing` | Score diplotype calls against read-level phasing patterns |
-| `--cn-classifier` | Run k-NN classifier on per-region CN profiles for CNV group validation |
-| `--quality-aware` | Weight variant calls by base quality scores |
-| `--clip-evidence` | Detect soft-clip clusters as structural breakpoint evidence |
-| `--hmm-cnv` | Use HMM-based CNV segmentation as fallback when consensus fails |
-| `--read-voting` | Run read-level allele voting for independent QC |
-| `--diplotype-caller` | Run likelihood-based diplotype caller (D6+D7 mixture model) |
-| `--spacer-cn-check` | Flag calls where spacer copy number is inconsistent with CNV group |
-| `--consistency-check` | Run post-hoc consistency checks (conversion map, mismatch rate, allele balance) |
+| `--hmm-cnv` | HMM segmentation on the per-position CN profile, used as a second CNV-tag fallback after changepoint detection. |
+| `--phase-disambiguate` | Use read-level phasing to resolve ambiguous CN=2 multi-match calls into a single diplotype. |
+| `--phase-readpair` | Extend phasing to mate-pair distance (requires `--phase-disambiguate`). |
+| `--spacer-cn-check` | Flag calls with `Spacer_CN_inconsistent` when the observed spacer-vs-total-CN difference does not match the CNV group. |
+| `--consistency-check` | Post-hoc validation; sets the filter to `Conversion_map_inconsistent`, `Mismatch_rate_high`, etc. if checks fail. |
+| `--read-voting` | Independent read-level allele voting; sets a filter flag if voting disagrees with the call. |
+
+#### Tier 3 — QC and validation (do not affect the call)
+
+These flags add **independent observations** to the output without modifying the genotype, filter, or confidence. Useful for review, audit, and downstream analytics:
+
+| Flag | What it adds |
+|---|---|
+| `--kmer-validation` | Alignment-free paralog-dosage check (189 diagnostic 31-mers). Emits a `Kmer_validation` JSON block with AGREE/DISAGREE. |
+| `--cn-classifier` | k-NN classifier on per-region CN profile, logged as agreement/disagreement with the consensus tag. |
+| `--clip-evidence` | Soft-clip cluster scan in the D6+D7+spacer region; flags candidate structural breakpoints. |
+| `--d7-depth` | Per-region CYP2D7 depth profile; logs elevation/depletion signals consistent with `*36` and `*13` hybrids. |
+| `--af-phasing` | Het variant AF-based per-allele copy-number estimation for CN ≥ 3. |
+| `--read-phasing` | Score the diplotype call against observed read-level variant patterns. |
+| `--diplotype-caller` | Run a likelihood-based D6+D7 mixture model and log its top diplotype for comparison. |
+
+#### Tier 4 — Not yet wired
+
+| Flag | Status |
+|---|---|
+| `--quality-aware` | CLI flag accepted; `quality_aware.rs` module exists; not yet routed into the calling path. Emits a warning when set. |
 
 ## Output
 
@@ -204,6 +244,24 @@ When the data does not uniquely determine a single diplotype, the output contain
 The JSON output additionally includes `Clinical_equivalence` (`same_effect` or `different_effect`) for ambiguous calls.
 
 The JSON output also includes: total copy number, spacer copy number, raw depth values, CNV group, called variants, confidence score, and the full variant count table.
+
+When `--kmer-validation` is enabled, the JSON additionally contains a `Kmer_validation` object summarizing an alignment-free paralog-dosage check:
+
+```json
+"Kmer_validation": {
+  "agrees": true,
+  "kmer_category": "normal",
+  "overall_ratio": 0.524,
+  "estimated_d6_cn": 2.09,
+  "estimated_d7_cn": 1.91,
+  "hybrid_detected": false,
+  "matched_reads": 2098,
+  "total_reads": 6055,
+  "segments_summary": "seg0[0..83]: ratio=0.485 n=80, ..."
+}
+```
+
+This is an **independent QC channel** — it does not modify the genotype, filter, or confidence. `agrees: false` means the D6 copy number estimated from 189 diagnostic 31-mers disagrees with the dosage expected from the depth-based CNV tag. See `cyrius-rs/src/caller/kmer_validation.rs` for the underlying method.
 
 ## Project Structure
 
