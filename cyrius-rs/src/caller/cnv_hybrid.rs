@@ -1,5 +1,4 @@
 use crate::types::CnConsensus;
-use std::collections::HashMap;
 
 const REP_END_POSITION: usize = 3;
 const EXON9_END_POSITION: usize = 9;
@@ -13,18 +12,27 @@ const EXON9REGION_SITES_MIN: usize = 4;
 const INTRON1_UPSTREAM_SITES_MIN_LOOSE: usize = 15;
 
 /// Get the consensus (mode) CN from a list of calls, requiring a minimum count.
+///
+/// Matches Python's `sorted(Counter(values).items(), key=count, reverse=True)`:
+/// `Counter` preserves first-insertion order and Python's `sorted` is stable,
+/// so on a tie the value seen first in `values` wins. We mirror that here by
+/// iterating `values` in order to build a first-seen-ordered (value, count)
+/// list, then stably sorting by count descending.
 fn get_consensus(values: &[u32], min_count: usize) -> Option<u32> {
     if values.is_empty() {
         return None;
     }
-    let mut counts: HashMap<u32, usize> = HashMap::new();
+    let mut counts: Vec<(u32, usize)> = Vec::new();
     for &v in values {
-        *counts.entry(v).or_insert(0) += 1;
+        if let Some(entry) = counts.iter_mut().find(|(k, _)| *k == v) {
+            entry.1 += 1;
+        } else {
+            counts.push((v, 1));
+        }
     }
-    let mut sorted: Vec<(u32, usize)> = counts.into_iter().collect();
-    sorted.sort_by(|a, b| b.1.cmp(&a.1));
-    if sorted[0].1 >= min_count {
-        Some(sorted[0].0)
+    counts.sort_by(|a, b| b.1.cmp(&a.1));
+    if counts[0].1 >= min_count {
+        Some(counts[0].0)
     } else {
         None
     }
@@ -86,12 +94,17 @@ pub fn get_cnvtag(
     }
 
     // Exon9 region consensus
+    // Python computes `total_cn - spacer_cn` as a signed int; an impossible
+    // spacer_cn > total_cn yields a negative which then fails the downstream
+    // intron1_upstream consistency check at line ~127. We mirror that by
+    // treating underflow as no-call here (which propagates the same way).
     let mut exon9region_sites_consensus = if let Some(sp_cn) = spacer_cn {
-        let mut consensus_val = Some(total_cn - sp_cn);
-        if exon9gc_call_stringent.is_some() && exon9_intron4_sites_consensus.is_some() {
-            let exon9gc = exon9gc_call_stringent.unwrap();
-            let exon9_intron4 = exon9_intron4_sites_consensus.unwrap();
-            let current = consensus_val.unwrap();
+        let mut consensus_val = total_cn.checked_sub(sp_cn);
+        if let (Some(exon9gc), Some(exon9_intron4), Some(current)) = (
+            exon9gc_call_stringent,
+            exon9_intron4_sites_consensus,
+            consensus_val,
+        ) {
             if current < exon9gc && exon9gc <= exon9_intron4 {
                 consensus_val = Some(exon9gc);
             } else if current > exon9gc && exon9gc >= exon9_intron4 {

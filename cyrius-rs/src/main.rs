@@ -172,7 +172,8 @@ struct Cli {
 /// Check if chromosome names contain "chr" prefix.
 fn is_chr_in_chromosome_names(input_file: &str) -> bool {
     use rust_htslib::bam::{self, Read as BamRead};
-    let reader = bam::IndexedReader::from_path(input_file).unwrap();
+    let reader = bam::IndexedReader::from_path(input_file)
+        .unwrap_or_else(|e| panic!("Cannot open {} for chromosome autodetect: {}", input_file, e));
     let header = reader.header().clone();
     for contig_id in 0..5u32.min(header.target_count()) {
         let name = String::from_utf8_lossy(header.tid2name(contig_id));
@@ -498,8 +499,9 @@ fn d6_star_caller(
         );
         if het_result.is_hemizygous {
             if let Some(ref tag) = cnvtag {
-                let _ = cyrius_rs::caller::het_check::suggest_cnv_with_deletion(
-                    &het_result, tag, total_cn,
+                log::info!(
+                    "het_check: hemizygous sample with CNV tag '{}' — possible deletion",
+                    tag
                 );
             }
         }
@@ -1008,10 +1010,6 @@ fn main() {
 
     std::fs::create_dir_all(&cli.out_dir).ok();
 
-    // Prepare data
-    log::info!("Starting {} v{}", TOOL_NAME, TOOL_VERSION);
-    let call_parameters = prepare_resource(&cli.genome, &cli.input);
-
     let out_json = format!("{}/{}.json", cli.out_dir, sample_id);
     let out_tsv = format!("{}/{}.tsv", cli.out_dir, sample_id);
 
@@ -1035,6 +1033,10 @@ fn main() {
         std::fs::write(&out_tsv, header).unwrap();
         return;
     }
+
+    // Prepare data (after existence check, with the BAM half of ##idx##)
+    log::info!("Starting {} v{}", TOOL_NAME, TOOL_VERSION);
+    let call_parameters = prepare_resource(&cli.genome, &bam_name);
 
     let features = FeatureFlags {
         strand_bias_all: cli.strand_bias_all,
@@ -1076,6 +1078,13 @@ fn main() {
             features.consistency_check, features.read_voting, features.hmm_cnv,
             features.diplotype_caller, features.d7_depth, features.af_phasing,
             features.read_phasing, features.cn_classifier, features.kmer_validation
+        );
+    }
+
+    if features.quality_aware {
+        log::warn!(
+            "--quality-aware: module is present but not yet wired into the calling path; \
+             outputs are identical to runs without this flag."
         );
     }
 
@@ -1133,14 +1142,16 @@ fn main() {
 
     let count_of_diplotypes = predictions.len();
 
-    // Determine phasing ambiguity and clinical equivalence
+    // Determine phasing ambiguity and clinical equivalence.
+    // Per README: long-read reflex fires when alternatives differ in
+    // activity score OR predicted phenotype — both axes matter.
     let phasing_ambiguous = count_of_diplotypes > 1;
     let (clinical_equivalence, long_read_recommended) = if phasing_ambiguous {
-        let phenotypes: Vec<&str> = predictions
+        let effects: Vec<(&str, &str)> = predictions
             .iter()
-            .map(|p| p.predicted_phenotype.as_str())
+            .map(|p| (p.total_activity.as_str(), p.predicted_phenotype.as_str()))
             .collect();
-        let all_same = phenotypes.windows(2).all(|w| w[0] == w[1]);
+        let all_same = effects.windows(2).all(|w| w[0] == w[1]);
         if all_same {
             ("same_effect".to_string(), false)
         } else {
