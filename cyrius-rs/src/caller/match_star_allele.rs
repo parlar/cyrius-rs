@@ -317,7 +317,11 @@ pub fn get_final_call_clean(
 
     if final_call.is_empty() || final_call.len() > 1 {
         if final_call == ["*10_*10_*4.013", "*10_*36_*4"] {
-            return Some("*4/*36+*10".to_string());
+            // Two structurally-consistent decompositions with DIFFERENT allele
+            // multisets ({*10,*36,*4} vs {*10,*10,*4.013}); emit both as proper
+            // diplotype arrangements and let the likelihood resolver pick (or
+            // report honest ambiguity). Was previously hardcoded to *4/*36+*10.
+            return Some("*4/*36+*10;*4.013/*10+*10".to_string());
         }
         return Some(final_call.join(";"));
     }
@@ -418,6 +422,9 @@ pub fn get_final_call_clean(
         return Some(call_set.join("_"));
     }
 
+    // exon9hyb_star5: the tandem arrangement is determined by spacer copy
+    // number (a depth signal). The likelihood resolver is blind to depth, so
+    // this structural rule is kept here rather than delegated to the resolver.
     if cnvcall == "exon9hyb_star5" {
         if split_call == ["*10", "*10"] {
             return if spacer_cn.map_or(false, |cn| cn > 2) {
@@ -573,6 +580,10 @@ pub fn get_final_call_clean(
                     genotype.push_str("*4");
                     return Some(genotype);
                 } else if split_call == ["*4", "*4"] {
+                    // Deterministic *68/*4 tandem-notation construction for the
+                    // given star68 copy number — formatting, not a tie-break.
+                    // The resolver is blind to *68 hybrid arrangement, so this
+                    // canonical notation stays here.
                     return match cn {
                         1 => Some("*4/*68+*4".to_string()),
                         2 => Some("*68+*4/*68+*4".to_string()),
@@ -859,6 +870,11 @@ pub fn match_star(
                 let re = regex::Regex::new(r"[;/]+").unwrap();
                 let mut parts: Vec<&str> = re.split(&fcc).collect();
                 parts.sort();
+                // These two cn2 ambiguities are resolved by targeted read-phase
+                // signals (var42126938 / var42127803 haplotype booleans), which
+                // are more specific than the general likelihood resolver for
+                // these exact allele sets. Kept here pending benchmark coverage
+                // that could validate delegating them to the resolver.
                 if parts == ["*1", "*27", "*32", "*41"] {
                     final_call_clean = if var42126938_g_haplotype {
                         Some("*1/*32".to_string())
