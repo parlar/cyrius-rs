@@ -146,6 +146,8 @@ pub struct D6Call {
     pub d67_snp_raw: Option<String>,
     pub variant_raw_count: Option<IndexMap<String, String>>,
     pub kmer_validation: Option<KmerValidationSummary>,
+    /// Top posterior from the likelihood resolver (None if it didn't run).
+    pub resolver_posterior: Option<f64>,
 }
 
 impl D6Call {
@@ -172,6 +174,7 @@ impl D6Call {
             d67_snp_raw: None,
             variant_raw_count: None,
             kmer_validation: None,
+            resolver_posterior: None,
         }
     }
 }

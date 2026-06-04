@@ -403,7 +403,7 @@ fn d6_star_caller(
             variants_called: None, cnv_group: None, genotype: None, filter: None,
             raw_star_allele: None, call_info: None, exon9_cn: None, cnv_consensus: None,
             d67_snp_call: None, d67_snp_raw: None, variant_raw_count: Some(raw_count),
-            kmer_validation: None,
+            kmer_validation: None, resolver_posterior: None,
         };
     }
 
@@ -607,7 +607,7 @@ fn d6_star_caller(
             d67_snp_call: Some(cn_call_snp_str),
             d67_snp_raw: Some(raw_d6_cn_str),
             variant_raw_count: Some(raw_count),
-            kmer_validation: None,
+            kmer_validation: None, resolver_posterior: None,
         };
     }
 
@@ -787,6 +787,7 @@ fn d6_star_caller(
 
     let mut genotype_filter = None;
     let mut final_star_allele_call = None;
+    let mut resolver_posterior: Option<f64> = None;
     let is_fuzzy = star_called
         .call_info
         .as_deref()
@@ -821,6 +822,38 @@ fn d6_star_caller(
                     ) {
                         log::info!("phase_disambiguate: {} -> {}", call, resolved);
                         final_star_allele_call = Some(resolved);
+                    }
+                }
+            }
+        }
+
+        // Feature: likelihood resolver — when the cascade leaves a ;-ambiguous
+        // candidate set, score each candidate's allele multiset and either pick
+        // confidently or report honest ambiguity. Falls back silently to the
+        // cascade's own choice if the BAM can't be scored.
+        if let Some(ref call) = final_star_allele_call {
+            if call.contains(';') {
+                let candidates: Vec<String> =
+                    call.split(';').map(|s| s.trim().to_string()).collect();
+                if let Ok(mut r) =
+                    open_alignment_file_with_index(bam_path, reference_fasta, index_name)
+                {
+                    let scores = cyrius_rs::caller::diplotype_caller::score_candidates(
+                        &mut r,
+                        &params.snp_db.nchr,
+                        &params.var_list,
+                        data::SNP_FILE,
+                        &params.star_combinations,
+                        total_cn,
+                        &candidates,
+                    );
+                    if let Some(outcome) = cyrius_rs::caller::resolver::resolve(&scores) {
+                        log::info!(
+                            "resolver: {} -> {} (ambiguous={}, top_posterior={:.4})",
+                            call, outcome.genotype, outcome.ambiguous, outcome.top_posterior
+                        );
+                        resolver_posterior = Some(outcome.top_posterior);
+                        final_star_allele_call = Some(outcome.genotype);
                     }
                 }
             }
@@ -1046,6 +1079,7 @@ fn d6_star_caller(
         d67_snp_raw: Some(raw_d6_cn_str),
         variant_raw_count: Some(raw_count),
         kmer_validation: kmer_validation_summary,
+        resolver_posterior,
     }
 }
 
@@ -1275,6 +1309,7 @@ fn main() {
         "d67_snp_raw": cyp2d6_call.d67_snp_raw,
         "Variant_raw_count": cyp2d6_call.variant_raw_count,
         "Kmer_validation": kmer_validation_json,
+        "Resolver_posterior": cyp2d6_call.resolver_posterior,
     });
     json_map.insert(sample_id.clone(), call_json);
     let json_output = serde_json::to_string(&json_map).unwrap();
