@@ -1,7 +1,7 @@
 # Design: Likelihood-based diplotype resolver, calibrated confidence, and scorer consolidation
 
 **Date:** 2026-06-04
-**Status:** Approved (pending spec review)
+**Status:** Implemented (see Migration outcomes)
 **Scope:** short-read only
 
 ## Problem
@@ -196,3 +196,43 @@ Each step ends green (builds, tests pass, benchmark ≥ target):
   setting (prefer ambiguity) and explicit documentation that it's GeT-RM-calibrated.
 - **Scorer can't reproduce a hardcode:** mitigated by reproduce-or-promote — the hardcode
   stays if the scorer would regress the call.
+
+## Migration outcomes (implemented 2026-06-04)
+
+**Status:** Implemented on branch `feat/diplotype-resolver`. Final benchmark: **53/53**
+GeT-RM (both the standard config and the full surviving-experimental config). 44 unit
+tests pass; clean build, zero new warnings.
+
+**Resolver:** `diplotype_caller::score_candidates` (explicit allele-multiset scoring,
+fail-closed) + `resolver::resolve` are live. The resolver runs on any `;`-ambiguous
+genotype the cascade produces (after `phase_disambiguate`), scoring each candidate's
+multiset and either picking confidently or keeping an honest ambiguous set. Its top
+posterior is surfaced as `Resolver_posterior` in JSON.
+
+**`RESOLVE_MARGIN` = 0.10** (near-tie posterior-gap epsilon, not the original "confidence
+gap"). During code review the gap-based rule was found to over-include non-competitive
+candidates for 3+ candidates; it was replaced with a single coherent near-tie rule: a
+candidate joins the reported set iff its posterior is within `RESOLVE_MARGIN` of the top,
+and the call is confident iff the top stands alone. Calibrated on GeT-RM only; left at 0.10
+because no benchmark sample required tuning it.
+
+**Hardcoded-case dispositions (Task 5).** The plan anticipated migrating several; the
+honest result is **1 migrated, 5 kept as documented rules** — most "hardcodes" encode
+signals the arrangement-blind multiset resolver genuinely cannot reproduce:
+
+| Site (match_star_allele.rs) | Signal it encodes | Disposition |
+|---|---|---|
+| `get_final_call_clean` ~319 (`*10_*10_*4.013` vs `*10_*36_*4`) | pick between two **different-multiset** decompositions | **Migrated** → emits `*4/*36+*10;*4.013/*10+*10`; resolver decides. Benchmark-neutral (not in GeT-RM), held 53/53. |
+| `exon9hyb_star5` ~422 / ~429 | **spacer copy number** (a depth signal) | **Kept**, documented — resolver is blind to depth. |
+| `star68` ~575 | deterministic `*68+*4` tandem **notation** per CN | **Kept**, documented — notation construction, not a tie-break. |
+| cn2 `more_than_one_match` ~862 / ~869 | targeted **read-phase booleans** (`var42126938`/`var42127803`) | **Kept**, documented — purpose-built phase signals; no benchmark coverage to validate delegating to the resolver. |
+
+**Consolidation (Task 6).** Deleted four logging-only scorer modules now subsumed by the
+single resolver path: `read_voting`, `read_phasing`, `af_phasing`, `cn_classifier` (~1800
+lines + their CLI flags + README docs). `diplotype_caller`, `resolver`, `phase_disambiguate`,
+`kmer_validation`, `clip_evidence`, `d7_depth` and the rest remain.
+
+**Honest limitations.** (1) The site-319 migration is benchmark-neutral, not
+benchmark-verified — no GeT-RM sample exercises it, so the resolver's pick there is
+principled but untested on real data. (2) `RESOLVE_MARGIN` is fit to 53 samples. (3) The
+five kept rules remain hardcoded; revisiting them needs targeted test data (or long reads).
