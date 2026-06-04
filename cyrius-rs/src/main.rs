@@ -141,9 +141,6 @@ struct Cli {
     #[arg(long = "consistency-check", help = "Run post-hoc consistency checks (conversion map, mismatch rate, allele balance)")]
     consistency_check: bool,
 
-    #[arg(long = "read-voting", help = "Run read-level allele voting for independent QC")]
-    read_voting: bool,
-
     #[arg(long = "hmm-cnv", help = "Use HMM-based CNV segmentation as fallback when consensus fails")]
     hmm_cnv: bool,
 
@@ -155,15 +152,6 @@ struct Cli {
 
     #[arg(long = "d7-depth", help = "Compute CYP2D7 sub-region depth profile for hybrid confirmation")]
     d7_depth: bool,
-
-    #[arg(long = "af-phasing", help = "Use het variant AF to estimate per-allele copy numbers in duplications")]
-    af_phasing: bool,
-
-    #[arg(long = "read-phasing", help = "Use read-level phasing constraints to validate/disambiguate diplotype calls")]
-    read_phasing: bool,
-
-    #[arg(long = "cn-classifier", help = "Use per-region CN profile classifier for structural configuration")]
-    cn_classifier: bool,
 
     #[arg(long = "kmer-validation", help = "Use alignment-free k-mer paralog ratio validation")]
     kmer_validation: bool,
@@ -613,22 +601,6 @@ fn d6_star_caller(
 
     let cnvtag_str = cnvtag.unwrap();
 
-    // Feature: cn_classifier — classify structural configuration from per-region CN profile
-    if features.cn_classifier {
-        let cn_class = cyrius_rs::caller::cn_classifier::classify_cn_profile(
-            total_cn,
-            raw_cn_call.spacer_cn,
-            &consensus,
-            Some(&cnvtag_str),
-        );
-        if !cn_class.agrees_with_consensus {
-            log::warn!(
-                "cn_classifier: disagrees with consensus! predicted={:?} vs consensus={}",
-                cn_class.predicted_tag, cnvtag_str,
-            );
-        }
-    }
-
     // Feature: kmer_validation — alignment-free k-mer paralog ratio validation.
     // Validation is decoupled from calling: the result is recorded for review
     // but does NOT modify the genotype, filter, or confidence.
@@ -954,87 +926,6 @@ fn d6_star_caller(
         }
     }
 
-    // Feature: read_voting — independent allele voting from read-level evidence
-    if features.read_voting {
-        if let Some(ref filter) = genotype_filter {
-            if filter == "PASS" || filter == "Fuzzy_match" {
-                let mut voting_reader =
-                    open_alignment_file_with_index(bam_path, reference_fasta, index_name).unwrap();
-                // CYP2D6 region on GRCh38: chr22:42123192-42132032
-                let d6_start: i64 = 42123192;
-                let d6_end: i64 = 42132032;
-                let voting_result = cyrius_rs::caller::read_voting::validate_call(
-                    &mut voting_reader,
-                    &params.snp_db.nchr,
-                    d6_start,
-                    d6_end,
-                    &params.var_list,
-                    &params.star_combinations,
-                    final_star_allele_call.as_deref(),
-                );
-                if let Some(ref flag) = voting_result.flag {
-                    genotype_filter = Some(flag.clone());
-                }
-            }
-        }
-    }
-
-    // Feature: af_phasing — het variant AF-based duplication phasing for CN≥3
-    if features.af_phasing && total_cn >= 3 {
-        let af_result = cyrius_rs::caller::af_phasing::estimate_allele_copies(
-            &var_alt, &var_ref, &params.var_list,
-            total_cn,
-            final_star_allele_call.as_deref(),
-            &params.star_combinations,
-        );
-        if !af_result.results.is_empty() {
-            let n_informative = af_result.results.iter()
-                .filter(|r| r.carrier_allele.is_some())
-                .count();
-            log::info!(
-                "af_phasing: {} het variants ({} with allele assignment), CN={}",
-                af_result.results.len(), n_informative, total_cn,
-            );
-            for r in &af_result.results {
-                if let Some(ref carrier) = r.carrier_allele {
-                    log::info!(
-                        "  {} AF={:.3} → {} x{}, other x{}",
-                        r.variant, r.af, carrier, r.carrier_copies, r.other_copies,
-                    );
-                }
-            }
-            if let Some(ref consensus) = af_result.consensus {
-                log::info!("af_phasing consensus: {}", consensus);
-            }
-        }
-    }
-
-    // Feature: read_phasing — validate diplotype call using read-level phasing constraints
-    if features.read_phasing {
-        if let Some(ref call) = final_star_allele_call {
-            let mut rp_reader =
-                open_alignment_file_with_index(bam_path, reference_fasta, index_name).unwrap();
-            let rp_result = cyrius_rs::caller::read_phasing::score_phasing(
-                &mut rp_reader,
-                &params.snp_db.nchr,
-                &params.var_list,
-                &params.star_combinations,
-                Some(call.as_str()),
-            );
-            if let Some(ref flag) = rp_result.flag {
-                log::info!("read_phasing: {}", flag);
-            }
-            if rp_result.n_modes > 0 {
-                log::info!(
-                    "read_phasing: {} modes, {} reads, best={:?}",
-                    rp_result.n_modes,
-                    rp_result.n_phasing_reads,
-                    rp_result.best_candidate,
-                );
-            }
-        }
-    }
-
     // Feature: diplotype_caller — likelihood-based diplotype calling with D6+D7 mixture model
     if features.diplotype_caller {
         let mut dc_reader =
@@ -1146,36 +1037,30 @@ fn main() {
         het_check: cli.het_check,
         spacer_cn_check: cli.spacer_cn_check,
         consistency_check: cli.consistency_check,
-        read_voting: cli.read_voting,
         hmm_cnv: cli.hmm_cnv,
         diplotype_caller: cli.diplotype_caller,
         clip_evidence: cli.clip_evidence,
         d7_depth: cli.d7_depth,
-        af_phasing: cli.af_phasing,
-        read_phasing: cli.read_phasing,
-        cn_classifier: cli.cn_classifier,
         kmer_validation: cli.kmer_validation,
     };
 
     if features.strand_bias_all || features.fuzzy_match || features.quality_aware
         || features.phase_disambiguate || features.phase_readpair
         || features.changepoint_hybrid || features.het_check || features.spacer_cn_check
-        || features.consistency_check || features.read_voting || features.hmm_cnv
-        || features.diplotype_caller || features.d7_depth || features.af_phasing
-        || features.read_phasing || features.cn_classifier || features.kmer_validation
+        || features.consistency_check || features.hmm_cnv
+        || features.diplotype_caller || features.d7_depth
+        || features.kmer_validation
     {
         log::info!(
             "Experimental features: strand_bias_all={}, fuzzy_match={}, quality_aware={}, \
              phase_disambiguate={}, phase_readpair={}, changepoint_hybrid={}, het_check={}, \
-             spacer_cn_check={}, consistency_check={}, read_voting={}, hmm_cnv={}, \
-             diplotype_caller={}, d7_depth={}, af_phasing={}, read_phasing={}, cn_classifier={}, \
-             kmer_validation={}",
+             spacer_cn_check={}, consistency_check={}, hmm_cnv={}, \
+             diplotype_caller={}, d7_depth={}, kmer_validation={}",
             features.strand_bias_all, features.fuzzy_match, features.quality_aware,
             features.phase_disambiguate, features.phase_readpair,
             features.changepoint_hybrid, features.het_check, features.spacer_cn_check,
-            features.consistency_check, features.read_voting, features.hmm_cnv,
-            features.diplotype_caller, features.d7_depth, features.af_phasing,
-            features.read_phasing, features.cn_classifier, features.kmer_validation
+            features.consistency_check, features.hmm_cnv,
+            features.diplotype_caller, features.d7_depth, features.kmer_validation
         );
     }
 

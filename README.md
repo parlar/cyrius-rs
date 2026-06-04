@@ -201,7 +201,6 @@ These also affect the genotype or filter, but are off by default because they ar
 | `--phase-readpair` | Extend phasing to mate-pair distance (requires `--phase-disambiguate`). |
 | `--spacer-cn-check` | Flag calls with `Spacer_CN_inconsistent` when the observed spacer-vs-total-CN difference does not match the CNV group. |
 | `--consistency-check` | Post-hoc validation; sets the filter to `Conversion_map_inconsistent`, `Mismatch_rate_high`, etc. if checks fail. |
-| `--read-voting` | Independent read-level allele voting; sets a filter flag if voting disagrees with the call. |
 
 #### Tier 3 — QC and validation (do not affect the call)
 
@@ -210,11 +209,8 @@ These flags add **independent observations** to the output without modifying the
 | Flag | What it adds |
 |---|---|
 | `--kmer-validation` | Alignment-free paralog-dosage check (189 diagnostic 31-mers). Emits a `Kmer_validation` JSON block with AGREE/DISAGREE. |
-| `--cn-classifier` | k-NN classifier on per-region CN profile, logged as agreement/disagreement with the consensus tag. |
 | `--clip-evidence` | Soft-clip cluster scan in the D6+D7+spacer region; flags candidate structural breakpoints. |
 | `--d7-depth` | Per-region CYP2D7 depth profile; logs elevation/depletion signals consistent with `*36` and `*13` hybrids. |
-| `--af-phasing` | Het variant AF-based per-allele copy-number estimation for CN ≥ 3. |
-| `--read-phasing` | Score the diplotype call against observed read-level variant patterns. |
 | `--diplotype-caller` | Run a likelihood-based D6+D7 mixture model and log its top diplotype for comparison. |
 
 #### Tier 4 — Not yet wired
@@ -288,11 +284,8 @@ cyrius-rs/src/
 │   ├── strand_bias_all.rs   #   Strand bias filtering
 │   ├── changepoint.rs       #   Changepoint-based CNV detection
 │   ├── het_check.rs         #   Hemizygosity detection
-│   ├── cn_classifier.rs     #   k-NN CN profile classifier
-│   ├── read_phasing.rs      #   Read-level phasing constraints
 │   ├── clip_evidence.rs     #   Soft-clip cluster detection
 │   ├── hmm_cnv.rs           #   HMM-based CNV segmentation
-│   ├── read_voting.rs       #   Read-level allele voting
 │   ├── diplotype_caller.rs  #   Likelihood-based diplotype caller
 │   └── phase_disambiguate.rs #  Phase-based disambiguation
 └── align/                   # Local sequence alignment engine

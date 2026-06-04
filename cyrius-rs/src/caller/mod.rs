@@ -1,8 +1,6 @@
-pub mod af_phasing;
 pub mod call_variants;
 pub mod changepoint;
 pub mod clip_evidence;
-pub mod cn_classifier;
 pub mod cnv_hybrid;
 pub mod confidence;
 pub mod consistency;
@@ -14,8 +12,6 @@ pub mod het_check;
 pub mod hmm_cnv;
 pub mod match_star_allele;
 pub mod phase_disambiguate;
-pub mod read_phasing;
-pub mod read_voting;
 pub mod resolver;
 pub mod kmer_validation;
 pub mod strand_bias_all;

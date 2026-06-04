@@ -248,8 +248,6 @@ pub struct FeatureFlags {
     pub spacer_cn_check: bool,
     /// Run post-hoc consistency checks (conversion map, mismatch rate, allele balance)
     pub consistency_check: bool,
-    /// Run read-level allele voting for independent QC
-    pub read_voting: bool,
     /// Use HMM-based CNV segmentation as fallback when consensus fails
     pub hmm_cnv: bool,
     /// Run likelihood-based diplotype caller (D6+D7 mixture model)
@@ -258,12 +256,6 @@ pub struct FeatureFlags {
     pub clip_evidence: bool,
     /// Compute CYP2D7 sub-region depth profile for hybrid confirmation
     pub d7_depth: bool,
-    /// Use het variant AF to estimate per-allele copy numbers in duplications
-    pub af_phasing: bool,
-    /// Use read-level phasing constraints to validate/disambiguate diplotype calls
-    pub read_phasing: bool,
-    /// Use per-region CN profile classifier for structural configuration
-    pub cn_classifier: bool,
     /// Use k-mer-based paralog ratio validation
     pub kmer_validation: bool,
 }
