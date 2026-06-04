@@ -63,6 +63,15 @@ impl QualLookup {
 // Public result types
 // ---------------------------------------------------------------------------
 
+/// One scored candidate diplotype (for the resolver).
+#[derive(Debug, Clone)]
+pub struct CandidateScore {
+    pub diplotype: String,
+    pub log10_likelihood: f64,
+    /// Posterior normalised over the candidate set only (0 for unscorable).
+    pub posterior: f64,
+}
+
 /// A scored diplotype candidate.
 #[derive(Debug, Clone)]
 pub struct ScoredDiplotype {
@@ -577,6 +586,38 @@ fn filter_mismapped(
 // Diplotype enumeration + scoring
 // ---------------------------------------------------------------------------
 
+/// Split "*36x2" -> ("*36", 2); "*36" -> ("*36", 1). Only strips a trailing
+/// 'x' followed by all ASCII digits (so "*4.013" and "*1x" are left intact).
+fn split_copy_suffix(s: &str) -> (String, usize) {
+    if let Some(pos) = s.rfind('x') {
+        let num = &s[pos + 1..];
+        if !num.is_empty() && num.chars().all(|c| c.is_ascii_digit()) {
+            if let Ok(n) = num.parse::<usize>() {
+                return (s[..pos].to_string(), n.max(1));
+            }
+        }
+    }
+    (s.to_string(), 1)
+}
+
+/// Parse a diplotype string into a base-allele -> copies multiset.
+/// e.g. "*36/*36+*10" -> [("*10",1),("*36",2)] (order by allele name).
+fn parse_multiset(diplotype: &str) -> Vec<(String, usize)> {
+    use std::collections::BTreeMap;
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for hap in diplotype.split('/') {
+        for comp in hap.split('+') {
+            let comp = comp.trim();
+            if comp.is_empty() {
+                continue;
+            }
+            let (name, mult) = split_copy_suffix(comp);
+            *counts.entry(name).or_insert(0) += mult;
+        }
+    }
+    counts.into_iter().collect()
+}
+
 /// Score all diplotype pairs and return the top_n.
 ///
 /// The mixture model includes one copy of D7 plus the D6 alleles:
@@ -724,6 +765,131 @@ fn score_diplotypes(
     }
 
     best
+}
+
+// ---------------------------------------------------------------------------
+// Explicit-multiset scoring (for the diplotype resolver)
+// ---------------------------------------------------------------------------
+
+/// Score one explicit diplotype given as (allele_index, copies) pairs summing
+/// to total_cn. General k-allele mixture: one D7 copy + the specified D6
+/// alleles, each weighted by copies/(cn+1). Returns log10-likelihood.
+fn score_explicit_multiset(
+    reads: &[ReadObs],
+    d6_alleles: &[AlleleDef],
+    sites: &[UnifiedSite],
+    total_cn: u32,
+    assignment: &[(usize, usize)],
+    lut: &QualLookup,
+) -> f64 {
+    let ln10 = std::f64::consts::LN_10;
+    let denom = (total_cn as usize + 1) as f64;
+    let ln_w_d7 = (1.0 / denom).ln();
+    let mut total = 0.0f64;
+    for obs in reads {
+        let s_d7 = ln_w_d7 + score_read_d7(obs, sites, lut) * ln10;
+        let mut terms: Vec<f64> = Vec::with_capacity(assignment.len() + 1);
+        terms.push(s_d7);
+        for &(idx, copies) in assignment {
+            if copies == 0 {
+                continue;
+            }
+            let ln_w = ((copies as f64) / denom).ln();
+            terms.push(ln_w + score_read_d6(obs, &d6_alleles[idx], sites, lut) * ln10);
+        }
+        let max_s = terms.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        if !max_s.is_finite() {
+            continue;
+        }
+        let lse = max_s + terms.iter().map(|t| (t - max_s).exp()).sum::<f64>().ln();
+        total += lse;
+    }
+    total / ln10
+}
+
+/// Map a parsed multiset to (allele_index, copies) pairs, or None if ANY
+/// allele is unknown to the scorer or the copy total != cn. Pure + testable.
+fn build_assignment(
+    multiset: &[(String, usize)],
+    name_to_idx: &std::collections::HashMap<&str, usize>,
+    cn: usize,
+) -> Option<Vec<(usize, usize)>> {
+    let mut assignment: Vec<(usize, usize)> = Vec::new();
+    let mut total_copies = 0usize;
+    for (name, copies) in multiset {
+        let idx = *name_to_idx.get(name.as_str())?;
+        assignment.push((idx, *copies));
+        total_copies += copies;
+    }
+    if total_copies != cn {
+        return None;
+    }
+    Some(assignment)
+}
+
+/// Score a set of candidate diplotype strings against per-read evidence.
+/// Returns one CandidateScore per input candidate, with posteriors normalised
+/// across the set. Returns an EMPTY vec to signal "cannot score" — no reads,
+/// no sites, OR (FAIL-CLOSED) ANY candidate that is unparseable, names an
+/// unknown allele, or whose copy total != cn — so the caller falls back to the
+/// cascade's own choice. Scoring only the representable subset is forbidden:
+/// it could make a confident wrong pick by dropping one side of the ambiguity.
+pub fn score_candidates(
+    reader: &mut bam::IndexedReader,
+    nchr: &str,
+    var_list: &[String],
+    snp_file: &str,
+    star_combinations: &StarCombinations,
+    total_cn: u32,
+    candidates: &[String],
+) -> Vec<CandidateScore> {
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    let lut = QualLookup::new();
+    let sites = build_unified_sites(var_list, snp_file);
+    if sites.is_empty() {
+        return Vec::new();
+    }
+    let d6_alleles = build_d6_allele_defs(&star_combinations.dstar, &sites);
+    let mut name_to_idx: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for (i, a) in d6_alleles.iter().enumerate() {
+        name_to_idx.insert(a.name.as_str(), i);
+    }
+    let all_reads = collect_reads_dual_region(
+        reader, nchr, &sites, D6_START, D6_END, D7_START, D7_END,
+    );
+    let (reads, _nf) = filter_mismapped(all_reads, &d6_alleles, &sites, -1.5, &lut);
+    if reads.is_empty() {
+        return Vec::new();
+    }
+
+    let cn = total_cn as usize;
+    let mut assignments: Vec<Vec<(usize, usize)>> = Vec::with_capacity(candidates.len());
+    for cand in candidates {
+        let multiset = parse_multiset(cand);
+        match build_assignment(&multiset, &name_to_idx, cn) {
+            Some(a) => assignments.push(a),
+            None => return Vec::new(),
+        }
+    }
+
+    let mut out: Vec<CandidateScore> = Vec::with_capacity(candidates.len());
+    for (cand, assignment) in candidates.iter().zip(assignments.iter()) {
+        let ll = score_explicit_multiset(&reads, &d6_alleles, &sites, total_cn, assignment, &lut);
+        out.push(CandidateScore { diplotype: cand.clone(), log10_likelihood: ll, posterior: 0.0 });
+    }
+
+    let max_ll = out.iter().map(|c| c.log10_likelihood).fold(f64::NEG_INFINITY, f64::max);
+    if !max_ll.is_finite() {
+        return Vec::new();
+    }
+    let sum: f64 = out.iter().map(|c| 10.0_f64.powf(c.log10_likelihood - max_ll)).sum();
+    let log10_sum = max_ll + sum.log10();
+    for c in &mut out {
+        c.posterior = 10.0_f64.powf(c.log10_likelihood - log10_sum);
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -911,5 +1077,60 @@ mod tests {
         let d7 = build_d7_allele(&sites);
         assert!(d7.alt_sites.is_empty());
         assert_eq!(d7.name, "CYP2D7");
+    }
+
+    fn test_site(name: &str, pos: i64, d6: u8, d7: u8) -> UnifiedSite {
+        UnifiedSite {
+            d6_pos: pos, d7_pos: Some(pos + 1000), d6_ref_base: d6, d7_base: Some(d7),
+            d6_alt_base: Some(d7), name: name.to_string(), is_deletion: false,
+        }
+    }
+
+    #[test]
+    fn test_score_explicit_multiset_prefers_matching_reads() {
+        let sites = vec![
+            test_site("g.1A>T", 1, b'A', b'T'),
+            test_site("g.2C>G", 2, b'C', b'G'),
+        ];
+        let allele_a = AlleleDef { name: "*A".into(), alt_sites: [0usize].into_iter().collect() };
+        let allele_b = AlleleDef { name: "*B".into(), alt_sites: [1usize].into_iter().collect() };
+        let alleles = vec![allele_a, allele_b];
+        let reads: Vec<ReadObs> = (0..10)
+            .map(|i| ReadObs { name: format!("r{i}"), observations: vec![(0, b'T', 40), (1, b'C', 40)] })
+            .collect();
+        let lut = QualLookup::new();
+        let s_a = score_explicit_multiset(&reads, &alleles, &sites, 2, &[(0usize, 2usize)], &lut);
+        let s_b = score_explicit_multiset(&reads, &alleles, &sites, 2, &[(1usize, 2usize)], &lut);
+        assert!(s_a > s_b, "reads favor *A: {s_a} !> {s_b}");
+    }
+
+    #[test]
+    fn test_build_assignment_fail_closed() {
+        let mut idx: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        idx.insert("*10", 0);
+        idx.insert("*36", 1);
+        let known = parse_multiset("*36/*36+*10");
+        assert!(build_assignment(&known, &idx, 3).is_some());
+        let mixed = parse_multiset("*4.013/*10+*36");
+        assert!(build_assignment(&mixed, &idx, 3).is_none());
+        assert!(build_assignment(&known, &idx, 2).is_none());
+    }
+
+    #[test]
+    fn test_split_copy_suffix() {
+        assert_eq!(split_copy_suffix("*36"), ("*36".to_string(), 1));
+        assert_eq!(split_copy_suffix("*36x2"), ("*36".to_string(), 2));
+        assert_eq!(split_copy_suffix("*4.013"), ("*4.013".to_string(), 1));
+        assert_eq!(split_copy_suffix("*1x"), ("*1x".to_string(), 1));
+    }
+
+    #[test]
+    fn test_parse_multiset() {
+        let m = parse_multiset("*36/*36+*10");
+        assert_eq!(m.iter().find(|(n, _)| n == "*36").map(|(_, c)| *c), Some(2));
+        assert_eq!(m.iter().find(|(n, _)| n == "*10").map(|(_, c)| *c), Some(1));
+        let m2 = parse_multiset("*10/*36x2");
+        assert_eq!(m2.iter().find(|(n, _)| n == "*36").map(|(_, c)| *c), Some(2));
+        assert_eq!(m2.iter().find(|(n, _)| n == "*10").map(|(_, c)| *c), Some(1));
     }
 }
