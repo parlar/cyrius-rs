@@ -204,11 +204,33 @@ fn score_explicit_multiset(
     total / ln10
 }
 
+/// Map a parsed multiset to (allele_index, copies) pairs, or None if ANY
+/// allele is unknown to the scorer or the copy total != cn. Pure + testable.
+fn build_assignment(
+    multiset: &[(String, usize)],
+    name_to_idx: &std::collections::HashMap<&str, usize>,
+    cn: usize,
+) -> Option<Vec<(usize, usize)>> {
+    let mut assignment: Vec<(usize, usize)> = Vec::new();
+    let mut total_copies = 0usize;
+    for (name, copies) in multiset {
+        let idx = *name_to_idx.get(name.as_str())?;
+        assignment.push((idx, *copies));
+        total_copies += copies;
+    }
+    if total_copies != cn {
+        return None;
+    }
+    Some(assignment)
+}
+
 /// Score a set of candidate diplotype strings against per-read evidence.
 /// Returns one CandidateScore per input candidate, with posteriors normalised
-/// across the (scorable) set. Returns an EMPTY vec to signal "cannot score"
-/// (no reads / no sites / every candidate unscorable) so the caller can fall
-/// back to the cascade's own choice.
+/// across the set. Returns an EMPTY vec to signal "cannot score" — no reads,
+/// no sites, OR (FAIL-CLOSED) ANY candidate that is unparseable, names an
+/// unknown allele, or whose copy total != cn — so the caller falls back to the
+/// cascade's own choice. Scoring only the representable subset is forbidden:
+/// it could make a confident wrong pick by dropping one side of the ambiguity.
 pub fn score_candidates(
     reader: &mut bam::IndexedReader,
     nchr: &str,
@@ -240,34 +262,22 @@ pub fn score_candidates(
     }
 
     let cn = total_cn as usize;
-    let mut out: Vec<CandidateScore> = Vec::with_capacity(candidates.len());
+    // First pass: validate ALL candidates (fail-closed). Bail out entirely if
+    // any candidate can't be represented.
+    let mut assignments: Vec<Vec<(usize, usize)>> = Vec::with_capacity(candidates.len());
     for cand in candidates {
         let multiset = parse_multiset(cand);
-        let mut assignment: Vec<(usize, usize)> = Vec::new();
-        let mut total_copies = 0usize;
-        let mut scorable = true;
-        for (name, copies) in &multiset {
-            match name_to_idx.get(name.as_str()) {
-                Some(&idx) => {
-                    assignment.push((idx, *copies));
-                    total_copies += copies;
-                }
-                None => {
-                    scorable = false;
-                    break;
-                }
-            }
+        match build_assignment(&multiset, &name_to_idx, cn) {
+            Some(a) => assignments.push(a),
+            None => return Vec::new(), // fail-closed -> caller falls back
         }
-        let ll = if scorable && total_copies == cn {
-            score_explicit_multiset(&reads, &d6_alleles, &sites, total_cn, &assignment, &lut)
-        } else {
-            f64::NEG_INFINITY
-        };
-        out.push(CandidateScore { diplotype: cand.clone(), log10_likelihood: ll, posterior: 0.0 });
     }
 
-    if out.iter().all(|c| !c.log10_likelihood.is_finite()) {
-        return Vec::new(); // nothing scorable -> signal fallback
+    // Second pass: score each validated candidate.
+    let mut out: Vec<CandidateScore> = Vec::with_capacity(candidates.len());
+    for (cand, assignment) in candidates.iter().zip(assignments.iter()) {
+        let ll = score_explicit_multiset(&reads, &d6_alleles, &sites, total_cn, assignment, &lut);
+        out.push(CandidateScore { diplotype: cand.clone(), log10_likelihood: ll, posterior: 0.0 });
     }
 
     // Normalise posteriors across the candidate set.
@@ -275,23 +285,44 @@ pub fn score_candidates(
         .iter()
         .map(|c| c.log10_likelihood)
         .fold(f64::NEG_INFINITY, f64::max);
+    if !max_ll.is_finite() {
+        return Vec::new();
+    }
     let sum: f64 = out
         .iter()
         .map(|c| 10.0_f64.powf(c.log10_likelihood - max_ll))
         .sum();
     let log10_sum = max_ll + sum.log10();
     for c in &mut out {
-        c.posterior = if c.log10_likelihood.is_finite() {
-            10.0_f64.powf(c.log10_likelihood - log10_sum)
-        } else {
-            0.0
-        };
+        c.posterior = 10.0_f64.powf(c.log10_likelihood - log10_sum);
     }
     out
 }
 ```
 
 Note: `ReadObs.name` is currently `#[allow(dead_code)]`; the test constructs it directly, which is fine.
+
+- [ ] **Step 7b: Add a fail-closed unit test for `build_assignment`**
+
+Add to the test module (verifies the FAIL-CLOSED rule: a mixed set with one
+unknown allele yields None, so `score_candidates` would return empty → fallback):
+
+```rust
+#[test]
+fn test_build_assignment_fail_closed() {
+    let mut idx: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    idx.insert("*10", 0);
+    idx.insert("*36", 1);
+    // Known alleles, copies sum to cn=3 -> Some.
+    let known = parse_multiset("*36/*36+*10");
+    assert!(build_assignment(&known, &idx, 3).is_some());
+    // One unknown allele (*4.013) -> None (fail-closed), even mixed with known.
+    let mixed = parse_multiset("*4.013/*10+*36");
+    assert!(build_assignment(&mixed, &idx, 3).is_none());
+    // Copy total mismatch (cn=2 but multiset has 3 copies) -> None.
+    assert!(build_assignment(&known, &idx, 2).is_none());
+}
+```
 
 - [ ] **Step 8: Run the scoring test + full module tests, verify pass**
 
@@ -482,7 +513,7 @@ And in `D6Call::no_call(...)`, add `resolver_posterior: None,` to the returned s
 - [ ] **Step 2: Build to find every D6Call construction site that now needs the field**
 
 Run: `cargo build --release 2>&1 | grep -E "missing field|error" | head`
-Expected: errors at each `D6Call { ... }` literal (around `main.rs:603` and `main.rs:1039`). Add `resolver_posterior: None,` to the `main.rs:603` no-call literal. (The `main.rs:1039` literal is updated in Step 4.)
+There are **three** `D6Call { ... }` literals: two no-call returns at `main.rs:398` and `main.rs:598`, and the success literal at `main.rs:1027`. Add `resolver_posterior: None,` to **both** no-call literals (398 and 598). (The success literal at 1027 gets the populated value in Step 5.) Re-run the build until only the success literal remains flagged (it's fixed in Step 5). Confirm exact lines with `grep -n "D6Call {" src/main.rs`.
 
 - [ ] **Step 3: Confirm the total-CN variable**
 
@@ -528,7 +559,7 @@ Locate the closing brace of the `phase_disambiguate` block (currently ends at `m
 
 - [ ] **Step 5: Thread `resolver_posterior` into the returned `D6Call`**
 
-At the `D6Call { ... }` literal at `main.rs:1039` (the success path), add:
+At the success-path `D6Call { ... }` literal (`main.rs:1027`, the one whose `genotype: final_star_allele_call,` field is set), add:
 
 ```rust
         resolver_posterior,
@@ -623,18 +654,20 @@ Add a test to `match_star_allele.rs`'s test module (or `resolver.rs`) asserting 
 
 - [ ] **Step D: Make the edit**
 
-Replace the hardcoded `return Some("<single>".to_string());` with the candidate set, e.g. for site 319:
+Replace the hardcoded `return Some("<single>".to_string());` with the candidate set. For site 319 the two `final_call` decompositions are the two candidate **multisets**: `["*10","*10","*4.013"]` = `{*10,*10,*4.013}` and `["*10","*36","*4"]` = `{*10,*36,*4}`. Each must become a diplotype string whose multiset matches exactly:
 
 ```rust
         if final_call == ["*10_*10_*4.013", "*10_*36_*4"] {
             // Expose both structurally-consistent arrangements; the resolver
             // (main.rs) scores them by read likelihood and picks or reports
             // honest ambiguity.
-            return Some("*4/*36+*10;*4.013/*4+*10".to_string());
+            //   {*10,*36,*4}     -> "*4/*36+*10"      (the old hardcoded pick)
+            //   {*10,*10,*4.013} -> "*10/*4.013+*10"
+            return Some("*4/*36+*10;*10/*4.013+*10".to_string());
         }
 ```
 
-(Use the actual two arrangement strings you identified in Step A. The exact second arrangement depends on the decomposition; derive it from the two `final_call` variants.)
+IMPORTANT: the exact arrangement notation must follow this codebase's conventions (e.g. `+` for tandem, `xN` for duplication). Verify in Step A that each string's multiset (via `parse_multiset`) equals its `final_call` decomposition; the example above is illustrative — do NOT introduce an allele (like `*4`) that isn't in the decomposition.
 
 - [ ] **Step E: Build + benchmark gate for THIS site**
 
@@ -644,7 +677,7 @@ From repo root: `bash benchmark/run_benchmark.sh --strand-bias-all --fuzzy-match
 Decision:
 - **53/53** → the resolver reproduced the call (or correctly resolved it). Keep the change. Commit.
 - **52/53 (or fewer) and the moved sample is now reported as `;`-ambiguous** → acceptable principled regression (the spec authorizes this). Update `benchmark/getrm_cyp2d6_truth.tsv` expectations ONLY if the benchmark harness treats the `;`-set as a miss AND the user has confirmed; otherwise record the sample in the plan's notes and keep the change. Commit.
-- **A sample moved to a *confidently wrong single* call** → REVERT this site's edit (`git checkout -- src/caller/match_star_allele.rs`), keep the hardcode, and log it as a scorer limitation. The hardcode stays.
+- **A sample moved to a *confidently wrong single* call** → REVERT only this site's edit, keeping any unrelated working-tree changes intact. Use `git restore -p src/caller/match_star_allele.rs` and unstage only this site's hunk (or manually re-apply the original hardcoded branch). Do NOT use `git checkout -- <file>` — it would discard unrelated edits. Keep the hardcode and log it as a scorer limitation.
 
 - [ ] **Step F: Commit this site**
 
@@ -666,6 +699,7 @@ Only after Task 5 confirms none of them was needed to reproduce a hardcoded case
 - Modify: `src/caller/mod.rs` (remove the 4 `pub mod` lines)
 - Modify: `src/main.rs` (remove the 4 CLI flag fields, their `FeatureFlags` fields/assignments, and the logging-only invocation blocks)
 - Modify: `src/types.rs` (remove the 4 `FeatureFlags` fields)
+- Modify: `../README.md` (remove the 4 flag rows and the 4 module-tree entries — they document deleted features)
 
 - [ ] **Step 1: Find every reference to the four modules**
 
@@ -685,6 +719,10 @@ Remove the 4 `pub mod ...;` lines from `src/caller/mod.rs`.
 - [ ] **Step 3: Remove CLI flags, FeatureFlags fields, and invocation blocks in main.rs**
 
 For each of the 4 features: delete the `#[arg(long = "...")]` field in `Cli`, the corresponding `FeatureFlags` field in `src/types.rs`, the `<feature>: cli.<feature>,` assignment, the experimental-features log-line references, and the `if features.<feature> { ... }` invocation block (each is logging-only; search `grep -n "features.read_voting\|features.read_phasing\|features.af_phasing\|features.cn_classifier" src/main.rs`).
+
+- [ ] **Step 3b: Remove the dead flags + modules from README.md**
+
+The four flags are documented in `README.md` (the option table rows at lines ~204 `--read-voting`, ~213 `--cn-classifier`, ~216 `--af-phasing`, ~217 `--read-phasing`) and the module tree (entries around lines ~291-295: `cn_classifier.rs`, `read_phasing.rs`, `read_voting.rs`, and the `af_phasing.rs` entry). Delete those rows/entries so users don't see dead flags. Confirm with `grep -n "read-voting\|read-phasing\|af-phasing\|cn-classifier\|read_voting\|read_phasing\|af_phasing\|cn_classifier" ../README.md` and remove every match that refers to a deleted module. (If Task 5 kept one module alive, leave that one's README entry.)
 
 - [ ] **Step 4: Build until clean**
 
@@ -721,16 +759,20 @@ bash benchmark/run_benchmark.sh --strand-bias-all --fuzzy-match --changepoint-hy
 ```
 Expected: clean build, all tests pass, final tally as documented.
 
-- [ ] **Step 2: Update project memory**
+- [ ] **Step 2: Record durable outcomes IN THE REPO**
 
-Update `/home/parlar_ai/.claude/projects/-home-parlar-ai-dev-cyrius-rs/memory/MEMORY.md`: note that `diplotype_caller` is now the active tie-breaking resolver (no longer logging-only), that `read_voting`/`read_phasing`/`af_phasing`/`cn_classifier` were deleted, and record `RESOLVE_MARGIN`'s calibrated value and any migration outcomes.
+Add a `## Migration outcomes` section to `docs/superpowers/specs/2026-06-04-diplotype-resolver-design.md` capturing: the final benchmark tally, each hardcoded-case decision (reproduced / promoted-to-ambiguous / kept), the calibrated `RESOLVE_MARGIN` value, and any module kept alive. This is the committed, durable record (the `.claude` memory file below is outside the repo and is NOT committed).
 
-- [ ] **Step 3: Final commit**
+- [ ] **Step 3: Final commit (repo files only)**
 
 ```bash
 git add -A
 git commit -m "docs: record resolver consolidation outcomes and calibration"
 ```
+
+- [ ] **Step 4: Update project memory (non-commit follow-up)**
+
+Separately (NOT part of any commit — this path is outside the git repo), update `/home/parlar_ai/.claude/projects/-home-parlar-ai-dev-cyrius-rs/memory/MEMORY.md`: note that `diplotype_caller` is now the active tie-breaking resolver (no longer logging-only), that `read_voting`/`read_phasing`/`af_phasing`/`cn_classifier` were deleted, and record `RESOLVE_MARGIN`'s value.
 
 ---
 
