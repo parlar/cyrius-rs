@@ -85,13 +85,12 @@ pub fn detect_clip_clusters(
     region_end: i64,
     reference: Option<&str>,
 ) -> Option<ClipEvidence> {
-    let mut reader = if let Some(ref_path) = reference {
-        let mut r = bam::IndexedReader::from_path(bam_path).ok()?;
-        r.set_reference(ref_path).ok()?;
-        r
-    } else {
-        bam::IndexedReader::from_path(bam_path).ok()?
-    };
+    let mut reader = crate::depth_calling::utilities::open_alignment_file_with_index(
+        bam_path,
+        reference,
+        None,
+    )
+    .ok()?;
 
     let header = reader.header().clone();
     let tid = header

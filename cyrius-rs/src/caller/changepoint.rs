@@ -53,7 +53,9 @@ fn cbs_recurse(
     let segment = &values[start..end];
     let valid: Vec<f64> = segment.iter().filter(|v| !v.is_nan()).copied().collect();
 
-    if valid.len() < 2 * min_bins {
+    // Guard on both valid count (enough non-NaN data to split) and raw segment
+    // length (so `segment.len() - min_bins` below can never underflow).
+    if valid.len() < 2 * min_bins || segment.len() < 2 * min_bins {
         let mean = if valid.is_empty() {
             f64::NAN
         } else {

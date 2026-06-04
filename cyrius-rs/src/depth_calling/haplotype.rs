@@ -64,19 +64,27 @@ fn get_bases_per_read(
                 continue;
             }
 
-            reader
+            // A fetch failure (bad region / corrupt index) means no reads
+            // here — skip rather than aborting the whole caller.
+            if reader
                 .fetch(bam::FetchDefinition::Region(
                     tid as i32,
                     snp_position - 1,
                     snp_position,
                 ))
-                .unwrap();
+                .is_err()
+            {
+                continue;
+            }
 
             let mut pileups = reader.pileup();
             pileups.set_max_depth(i32::MAX as u32);
 
             for pileup_result in pileups {
-                let pileup = pileup_result.unwrap();
+                let pileup = match pileup_result {
+                    Ok(p) => p,
+                    Err(_) => continue,
+                };
                 let site_position = pileup.pos() as i64 + 1;
                 if site_position != snp_position {
                     continue;

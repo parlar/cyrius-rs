@@ -92,6 +92,9 @@ fn build_phase_sites(var_list: &[String]) -> Vec<PhaseSite> {
     sites
 }
 
+// NOTE: module-local variant parser that intentionally differs from
+// `read_voting::parse_variant` and `phase_disambiguate`'s parser (this one only
+// handles single-base deletions). Not interchangeable — see read_voting.rs.
 fn parse_variant_for_phasing(name: &str) -> Option<PhaseSite> {
     let s = name.strip_prefix("g.")?;
     let digit_end = s.find(|c: char| !c.is_ascii_digit())?;
@@ -322,23 +325,15 @@ fn mode_consistent_with_diplotype(
         if *is_alt { on_h2 } else { !on_h2 }
     });
 
-    // A mode where all observations are REF is always consistent (uninformative)
+    // A mode where all observations are REF is always consistent (uninformative).
+    // (Once past this early return, any "all-REF == reference match" check would
+    // be vacuously false, so it is omitted.)
     let all_ref = mode.iter().all(|(_, is_alt)| !is_alt);
     if all_ref {
         return true;
     }
 
-    // Check if mode matches reference (no ALT matches any haplotype)
-    let matches_ref = mode.iter().all(|(var, is_alt)| {
-        if *is_alt {
-            // ALT must not be on either haplotype for a "reference" match
-            false
-        } else {
-            true
-        }
-    });
-
-    matches_h1 || matches_h2 || matches_ref
+    matches_h1 || matches_h2
 }
 
 /// Score a single candidate diplotype against all phasing modes.

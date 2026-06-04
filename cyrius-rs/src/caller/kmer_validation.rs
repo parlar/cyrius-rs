@@ -179,9 +179,18 @@ fn count_kmers_in_region(
         }
     };
 
-    reader
+    if reader
         .fetch(bam::FetchDefinition::Region(tid as i32, start, end))
-        .unwrap();
+        .is_err()
+    {
+        log::warn!("kmer_validation: failed to fetch region {}:{}-{}", chrom, start, end);
+        return KmerCounts {
+            d6_counts,
+            d7_counts,
+            total_reads: 0,
+            matched_reads: 0,
+        };
+    }
 
     let k = lookup.k;
 
@@ -329,6 +338,27 @@ pub struct KmerValidationResult {
     pub segments_summary: String,
 }
 
+impl KmerValidationResult {
+    /// A no-result placeholder used when validation can't run (e.g. the BAM
+    /// fails to open). Reports no agreement and no detection.
+    fn unavailable(reason: &str) -> Self {
+        KmerValidationResult {
+            kmer_category: format!("unavailable: {}", reason),
+            agrees: false,
+            overall_ratio: 0.0,
+            estimated_d6_cn: 0.0,
+            estimated_d7_cn: 0.0,
+            hybrid_detected: false,
+            total_reads: 0,
+            matched_reads: 0,
+            position_ratios: Vec::new(),
+            d6_counts: Vec::new(),
+            d7_counts: Vec::new(),
+            segments_summary: String::new(),
+        }
+    }
+}
+
 /// Compute expected k-mer D6 copy number for a given cnvtag and total_cn.
 ///
 /// K-mers count D6-like SEQUENCE, not gene copies. In normal configurations,
@@ -372,24 +402,29 @@ pub fn validate_with_kmers(
     bam_path: &str,
     chrom: &str,
     total_cn: u32,
-    spacer_cn: Option<u32>,
+    // Currently unused; retained for API symmetry with the depth-based caller.
+    _spacer_cn: Option<u32>,
     depth_cnvtag: &str,
     reference_fasta: Option<&str>,
     index_name: Option<&str>,
 ) -> KmerValidationResult {
     // Parse the embedded diagnostic panel
-    let panel: DiagnosticPanel =
-        serde_json::from_str(crate::data::DIAGNOSTIC_PANEL).expect("Failed to parse diagnostic panel JSON");
+    let panel: DiagnosticPanel = match serde_json::from_str(crate::data::DIAGNOSTIC_PANEL) {
+        Ok(p) => p,
+        Err(e) => return KmerValidationResult::unavailable(&format!("panel parse error: {}", e)),
+    };
     let lookup = build_lookup(&panel);
 
     // Open BAM and count k-mers across D6+D7 region
     // D6: chr22:42123000-42132000, D7: chr22:42135000-42146000
-    let mut reader = crate::depth_calling::utilities::open_alignment_file_with_index(
+    let mut reader = match crate::depth_calling::utilities::open_alignment_file_with_index(
         bam_path,
         reference_fasta,
         index_name,
-    )
-    .expect("Failed to open BAM for kmer_validation");
+    ) {
+        Ok(r) => r,
+        Err(_) => return KmerValidationResult::unavailable("failed to open BAM"),
+    };
 
     // Count in the D6 region
     let counts_d6 = count_kmers_in_region(

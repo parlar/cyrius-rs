@@ -148,6 +148,34 @@ pub struct D6Call {
     pub kmer_validation: Option<KmerValidationSummary>,
 }
 
+impl D6Call {
+    /// Build an all-`None` no-call result carrying only the coverage stats.
+    /// Used when the caller cannot proceed (e.g. depth normalization failed or
+    /// the alignment file could not be read).
+    pub fn no_call(coverage_mad: f64, median_depth: f64) -> Self {
+        D6Call {
+            coverage_mad,
+            median_depth,
+            total_cn: None,
+            spacer_cn: None,
+            total_cn_raw: None,
+            spacer_cn_raw: None,
+            variants_called: None,
+            cnv_group: None,
+            genotype: None,
+            filter: None,
+            raw_star_allele: None,
+            call_info: None,
+            exon9_cn: None,
+            cnv_consensus: None,
+            d67_snp_call: None,
+            d67_snp_raw: None,
+            variant_raw_count: None,
+            kmer_validation: None,
+        }
+    }
+}
+
 /// Haplotype functionality info
 #[derive(Debug, Clone)]
 pub struct HaplotypeFunctionality {

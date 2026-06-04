@@ -70,8 +70,19 @@ pub struct ScoredDiplotype {
     pub allele_b: String,
     /// Joint log10-likelihood across all reads.
     pub log10_likelihood: f64,
-    /// Posterior probability (normalised over all evaluated diplotypes).
+    /// Posterior probability, normalised over the retained top-N candidates
+    /// (an approximation of the full posterior when mass lies outside top-N).
     pub posterior: f64,
+}
+
+/// Order scored diplotypes best-first: descending log10-likelihood, NaN-safe,
+/// with a deterministic tiebreak on allele names so equal-likelihood
+/// candidates (which are common) resolve identically across runs/threads.
+fn sort_scored(a: &ScoredDiplotype, b: &ScoredDiplotype) -> std::cmp::Ordering {
+    b.log10_likelihood
+        .total_cmp(&a.log10_likelihood)
+        .then_with(|| a.allele_a.cmp(&b.allele_a))
+        .then_with(|| a.allele_b.cmp(&b.allele_b))
 }
 
 /// Full result from the diplotype caller.
@@ -626,6 +637,12 @@ fn score_diplotypes(
             let mut local_min = f64::NEG_INFINITY;
 
             for &(i, j) in chunk {
+                // A heterozygous pair needs at least one copy of each allele.
+                // When cn < 2 no such split exists, so skip it rather than
+                // leaving best_total at -inf (which would poison the posterior).
+                if i != j && cn < 2 {
+                    continue;
+                }
                 let splits: Vec<(usize, usize)> = if i == j {
                     vec![(cn, 0)]
                 } else {
@@ -677,11 +694,7 @@ fn score_diplotypes(
                         log10_likelihood: best_total_log10,
                         posterior: 0.0,
                     });
-                    local_best.sort_by(|a, b| {
-                        b.log10_likelihood
-                            .partial_cmp(&a.log10_likelihood)
-                            .unwrap()
-                    });
+                    local_best.sort_by(|a, b| sort_scored(a, b));
                     local_best.truncate(top_n);
                     local_min = local_best
                         .last()
@@ -694,11 +707,7 @@ fn score_diplotypes(
 
     // Merge thread-local results
     let mut best: Vec<ScoredDiplotype> = thread_results.into_iter().flatten().collect();
-    best.sort_by(|a, b| {
-        b.log10_likelihood
-            .partial_cmp(&a.log10_likelihood)
-            .unwrap()
-    });
+    best.sort_by(|a, b| sort_scored(a, b));
     best.truncate(top_n);
 
     // Normalise posteriors over the top-N (approximate)

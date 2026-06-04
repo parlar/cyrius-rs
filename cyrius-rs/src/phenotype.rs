@@ -99,20 +99,21 @@ pub fn determine_phenotype(activity_score: &str) -> String {
         return "Indeterminate".to_string();
     }
     match activity_score.parse::<f64>() {
-        Ok(score) => {
-            if score == 0.0 {
+        Ok(score) if score.is_finite() => {
+            // Contiguous thresholds (no gaps): identical classification to the
+            // CPIC 0.25-increment bands for valid scores, but fractional values
+            // that fall between increments still resolve sensibly.
+            if score <= 0.0 {
                 "Poor Metabolizer".to_string()
-            } else if (0.25..=1.0).contains(&score) {
+            } else if score <= 1.0 {
                 "Intermediate Metabolizer".to_string()
-            } else if (1.25..=2.25).contains(&score) {
+            } else if score <= 2.25 {
                 "Normal Metabolizer".to_string()
-            } else if score > 2.25 {
-                "Ultrarapid Metabolizer".to_string()
             } else {
-                "Unknown".to_string()
+                "Ultrarapid Metabolizer".to_string()
             }
         }
-        Err(_) => "Unknown".to_string(),
+        _ => "Unknown".to_string(),
     }
 }
 
@@ -264,7 +265,10 @@ pub fn diplotype_frequencies(
     }
 
     // Get biogeographic groups from first column
-    let first_col = column_data.values().next().unwrap();
+    let first_col = column_data
+        .values()
+        .next()
+        .ok_or_else(|| "No diplotype/haplotype frequency data available".to_string())?;
     let groups: Vec<String> = first_col.keys().cloned().collect();
 
     let mut rows = Vec::new();

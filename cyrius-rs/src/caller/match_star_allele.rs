@@ -438,15 +438,21 @@ pub fn get_final_call_clean(
         if split_call.contains(&"*4") && split_call.contains(&"*4.013") {
             let idx_4 = split_call.iter().position(|&s| s == "*4").unwrap();
             let idx_4013 = split_call.iter().position(|&s| s == "*4.013").unwrap();
-            let remain: Vec<usize> = (0..3).filter(|&n| n != idx_4 && n != idx_4013).collect();
-            assert_eq!(remain.len(), 1);
+            let remain: Vec<usize> =
+                (0..split_call.len()).filter(|&n| n != idx_4 && n != idx_4013).collect();
+            if remain.len() != 1 {
+                return None;
+            }
             return Some(format!("{}/*4.013+*4", split_call[remain[0]]));
         }
         if split_call.contains(&"*10") && split_call.contains(&"*36") {
             let idx_10 = split_call.iter().position(|&s| s == "*10").unwrap();
             let idx_36 = split_call.iter().position(|&s| s == "*36").unwrap();
-            let remain: Vec<usize> = (0..3).filter(|&n| n != idx_10 && n != idx_36).collect();
-            assert_eq!(remain.len(), 1);
+            let remain: Vec<usize> =
+                (0..split_call.len()).filter(|&n| n != idx_10 && n != idx_36).collect();
+            if remain.len() != 1 {
+                return None;
+            }
             let remaining = split_call[remain[0]];
             // When remaining is also *36, both tandem arrangements are
             // indistinguishable from short reads (*36 is a superset of *10).
@@ -555,8 +561,8 @@ pub fn get_final_call_clean(
         let cn = cnvcall.split('_').filter(|&s| s == "star68").count();
         let parts: std::collections::HashSet<&str> = cnvcall.split('_').collect();
 
-        if parts.len() == 1 || (parts.contains("star68") && parts.len() == 1) {
-            // All star68
+        if parts.len() == 1 {
+            // All star68 (single distinct component)
             if split_call.contains(&"*4") {
                 let var: Vec<&&str> = split_call.iter().filter(|&&s| s != "*4").collect();
                 if var.len() == 1 {
@@ -804,6 +810,8 @@ pub fn match_star(
             && matchtag.call_info.as_deref() == Some("no_match")
         {
             let cn_num: usize = cnvcall[2..].parse().unwrap_or(0);
+            // cn_num is always >= 2 for valid cnN tags; guard the subtraction.
+            let target_count = cn_num.saturating_sub(2);
             let mut variant_tried = Vec::new();
             let mut matched_calls = Vec::new();
             for variant_to_try in var_observed.iter().cloned().collect::<Vec<_>>() {
@@ -811,7 +819,7 @@ pub fn match_star(
                     .iter()
                     .filter(|v| **v == variant_to_try)
                     .count();
-                if count == cn_num - 2 && !variant_tried.contains(&variant_to_try) {
+                if count == target_count && !variant_tried.contains(&variant_to_try) {
                     variant_tried.push(variant_to_try.clone());
                     let mut var_new = var_observed.clone();
                     var_new.push(variant_to_try);

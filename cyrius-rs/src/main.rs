@@ -120,7 +120,7 @@ struct Cli {
     #[arg(long = "fuzzy-match", help = "Use fuzzy matching when exact star allele lookup fails")]
     fuzzy_match: bool,
 
-    #[arg(long = "quality-aware", help = "Use base-quality-aware likelihoods instead of fixed error rate")]
+    #[arg(long = "quality-aware", help = "[EXPERIMENTAL/INACTIVE] base-quality-aware likelihoods — module present but not yet wired into the calling path; output is unchanged")]
     quality_aware: bool,
 
     #[arg(long = "phase-disambiguate", help = "Use physical phasing to disambiguate multiple-match diplotypes")]
@@ -169,11 +169,29 @@ struct Cli {
     kmer_validation: bool,
 }
 
+/// Write a file, exiting with a clear error message on failure.
+fn write_file_or_exit(path: &str, content: &str) {
+    if let Err(e) = std::fs::write(path, content) {
+        eprintln!("Cannot write output file {}: {}", path, e);
+        std::process::exit(1);
+    }
+}
+
 /// Check if chromosome names contain "chr" prefix.
 fn is_chr_in_chromosome_names(input_file: &str) -> bool {
     use rust_htslib::bam::{self, Read as BamRead};
-    let reader = bam::IndexedReader::from_path(input_file)
-        .unwrap_or_else(|e| panic!("Cannot open {} for chromosome autodetect: {}", input_file, e));
+    let reader = match bam::IndexedReader::from_path(input_file) {
+        Ok(r) => r,
+        Err(e) => {
+            // Can't read the file/index here; the main pipeline will surface a
+            // proper no-call. Default to the non-"chr" genome build.
+            log::warn!(
+                "Could not open {} for chromosome autodetect ({}); assuming GRCh38 without 'chr' prefix",
+                input_file, e
+            );
+            return false;
+        }
+    };
     let header = reader.header().clone();
     for contig_id in 0..5u32.min(header.target_count()) {
         let name = String::from_utf8_lossy(header.tid2name(contig_id));
@@ -240,7 +258,13 @@ fn d6_star_caller(
 ) -> D6Call {
     // 1. Read counting and normalization
     let normalized_depth = if let Some(cf) = count_file {
-        let mut reader = open_alignment_file_with_index(bam_path, reference_fasta, index_name).unwrap();
+        let mut reader = match open_alignment_file_with_index(bam_path, reference_fasta, index_name) {
+            Ok(r) => r,
+            Err(e) => {
+                log::error!("Cannot open alignment file {}: {}", bam_path, e);
+                return D6Call::no_call(0.0, 0.0);
+            }
+        };
         let read_length =
             cyrius_rs::depth_calling::bin_count::get_read_length(&mut reader);
         get_normed_depth_from_count(cf, &params.region_dic, read_length)
@@ -250,15 +274,7 @@ fn d6_star_caller(
 
     // No-call after normalization
     if normalized_depth.normalized.get("d67").and_then(|v| *v).is_none() {
-        return D6Call {
-            coverage_mad: normalized_depth.mad,
-            median_depth: normalized_depth.mediandepth,
-            total_cn: None, spacer_cn: None, total_cn_raw: None, spacer_cn_raw: None,
-            variants_called: None, cnv_group: None, genotype: None, filter: None,
-            raw_star_allele: None, call_info: None, exon9_cn: None, cnv_consensus: None,
-            d67_snp_call: None, d67_snp_raw: None, variant_raw_count: None,
-            kmer_validation: None,
-        };
+        return D6Call::no_call(normalized_depth.mad, normalized_depth.mediandepth);
     }
 
     // 2. GMM and CN call
@@ -291,44 +307,56 @@ fn d6_star_caller(
         }
     };
 
-    // 3. Get allele counts (parallel when threads > 1)
-    let (snp_d6, snp_d7, snp_crossing, mut var_alt, mut var_ref, var_alt_forward, var_alt_reverse,
-     ref_read, long_ins_read, short_ins_read, var_homo_alt, var_homo_ref) = if threads > 1 {
+    // 3. Get allele counts (parallel when threads > 1). Each worker opens its
+    // own reader; a failed open yields `None` and a no-call rather than a panic.
+    let allele_counts = if threads > 1 {
         std::thread::scope(|s| {
             let h_snp = s.spawn(|| {
-                let mut r = open_alignment_file_with_index(bam_path, reference_fasta, index_name).unwrap();
-                get_supporting_reads(&mut r, &params.snp_db)
+                let mut r = open_alignment_file_with_index(bam_path, reference_fasta, index_name).ok()?;
+                Some(get_supporting_reads(&mut r, &params.snp_db))
             });
             let h_var = s.spawn(|| {
-                let mut r = open_alignment_file_with_index(bam_path, reference_fasta, index_name).unwrap();
-                get_supporting_reads_single_region(&mut r, &params.var_db, None)
+                let mut r = open_alignment_file_with_index(bam_path, reference_fasta, index_name).ok()?;
+                Some(get_supporting_reads_single_region(&mut r, &params.var_db, None))
             });
             let h_ins = s.spawn(|| {
-                let mut r = open_alignment_file_with_index(bam_path, reference_fasta, index_name).unwrap();
-                get_allele_counts_var42128936(&mut r, &params.genome)
+                let mut r = open_alignment_file_with_index(bam_path, reference_fasta, index_name).ok()?;
+                Some(get_allele_counts_var42128936(&mut r, &params.genome))
             });
             let h_homo = s.spawn(|| {
-                let mut r = open_alignment_file_with_index(bam_path, reference_fasta, index_name).unwrap();
-                get_supporting_reads(&mut r, &params.var_homo_db)
+                let mut r = open_alignment_file_with_index(bam_path, reference_fasta, index_name).ok()?;
+                Some(get_supporting_reads(&mut r, &params.var_homo_db))
             });
 
-            let (snp_d6, snp_d7, snp_crossing) = h_snp.join().unwrap();
-            let (var_alt, var_ref, var_alt_forward, var_alt_reverse) = h_var.join().unwrap();
-            let (ref_read, long_ins_read, short_ins_read) = h_ins.join().unwrap();
-            let (var_homo_alt, var_homo_ref, _) = h_homo.join().unwrap();
-            (snp_d6, snp_d7, snp_crossing, var_alt, var_ref, var_alt_forward, var_alt_reverse,
-             ref_read, long_ins_read, short_ins_read, var_homo_alt, var_homo_ref)
+            let (snp_d6, snp_d7, snp_crossing) = h_snp.join().unwrap()?;
+            let (var_alt, var_ref, var_alt_forward, var_alt_reverse) = h_var.join().unwrap()?;
+            let (ref_read, long_ins_read, short_ins_read) = h_ins.join().unwrap()?;
+            let (var_homo_alt, var_homo_ref, _) = h_homo.join().unwrap()?;
+            Some((snp_d6, snp_d7, snp_crossing, var_alt, var_ref, var_alt_forward, var_alt_reverse,
+             ref_read, long_ins_read, short_ins_read, var_homo_alt, var_homo_ref))
         })
     } else {
-        let mut reader = open_alignment_file_with_index(bam_path, reference_fasta, index_name).unwrap();
-        let (snp_d6, snp_d7, snp_crossing) = get_supporting_reads(&mut reader, &params.snp_db);
-        let (var_alt, var_ref, var_alt_forward, var_alt_reverse) =
-            get_supporting_reads_single_region(&mut reader, &params.var_db, None);
-        let (ref_read, long_ins_read, short_ins_read) =
-            get_allele_counts_var42128936(&mut reader, &params.genome);
-        let (var_homo_alt, var_homo_ref, _) = get_supporting_reads(&mut reader, &params.var_homo_db);
-        (snp_d6, snp_d7, snp_crossing, var_alt, var_ref, var_alt_forward, var_alt_reverse,
-         ref_read, long_ins_read, short_ins_read, var_homo_alt, var_homo_ref)
+        match open_alignment_file_with_index(bam_path, reference_fasta, index_name) {
+            Ok(mut reader) => {
+                let (snp_d6, snp_d7, snp_crossing) = get_supporting_reads(&mut reader, &params.snp_db);
+                let (var_alt, var_ref, var_alt_forward, var_alt_reverse) =
+                    get_supporting_reads_single_region(&mut reader, &params.var_db, None);
+                let (ref_read, long_ins_read, short_ins_read) =
+                    get_allele_counts_var42128936(&mut reader, &params.genome);
+                let (var_homo_alt, var_homo_ref, _) = get_supporting_reads(&mut reader, &params.var_homo_db);
+                Some((snp_d6, snp_d7, snp_crossing, var_alt, var_ref, var_alt_forward, var_alt_reverse,
+                 ref_read, long_ins_read, short_ins_read, var_homo_alt, var_homo_ref))
+            }
+            Err(e) => {
+                log::error!("Cannot open alignment file {}: {}", bam_path, e);
+                None
+            }
+        }
+    };
+    let (snp_d6, snp_d7, snp_crossing, mut var_alt, mut var_ref, var_alt_forward, var_alt_reverse,
+     ref_read, long_ins_read, short_ins_read, var_homo_alt, var_homo_ref) = match allele_counts {
+        Some(v) => v,
+        None => return D6Call::no_call(normalized_depth.mad, normalized_depth.mediandepth),
     };
 
     update_var42128936(
@@ -459,7 +487,13 @@ fn d6_star_caller(
     // Feature: hmm_cnv — HMM-based segmentation as fallback when consensus fails
     let cnvtag = if features.hmm_cnv && cnvtag.is_none() {
         // Extract sd_per_copy from GMM parameters: sd_cn2 / sqrt(2)
-        let sd_cn2: f64 = params.gmm_parameter["d67"]["sd"][0].parse().unwrap();
+        let sd_cn2: Option<f64> = params
+            .gmm_parameter
+            .get("d67")
+            .and_then(|m| m.get("sd"))
+            .and_then(|v| v.first())
+            .and_then(|s| s.parse().ok());
+        let sd_cn2 = sd_cn2.unwrap_or(0.0);
         let sd_per_copy = sd_cn2 / std::f64::consts::SQRT_2;
         let hmm_params = cyrius_rs::caller::hmm_cnv::HmmParams::from_gmm_prior(total_cn, sd_per_copy);
         let hmm_result = cyrius_rs::caller::hmm_cnv::hmm_segment(
@@ -1024,12 +1058,14 @@ fn main() {
     let sample_id = cli.id.unwrap_or_else(|| {
         Path::new(&cli.input)
             .file_stem()
-            .unwrap()
-            .to_string_lossy()
-            .to_string()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "sample".to_string())
     });
 
-    std::fs::create_dir_all(&cli.out_dir).ok();
+    if let Err(e) = std::fs::create_dir_all(&cli.out_dir) {
+        eprintln!("Cannot create output directory {}: {}", cli.out_dir, e);
+        std::process::exit(1);
+    }
 
     let out_json = format!("{}/{}.json", cli.out_dir, sample_id);
     let out_tsv = format!("{}/{}.tsv", cli.out_dir, sample_id);
@@ -1049,9 +1085,9 @@ fn main() {
     if !bam_name.contains("://") && !Path::new(&bam_name).exists() {
         log::warn!("Input file for sample {} does not exist.", sample_id);
         // Write empty output files (matching Python behavior)
-        std::fs::write(&out_json, "{}").unwrap();
+        write_file_or_exit(&out_json, "{}");
         let header = "Sample\tGenotype\tFilter\tConfidence\tActivity score\tPredicted phenotype\tPhasing_ambiguous\tLong_read_recommended\n";
-        std::fs::write(&out_tsv, header).unwrap();
+        write_file_or_exit(&out_tsv, header);
         return;
     }
 
@@ -1242,7 +1278,7 @@ fn main() {
     });
     json_map.insert(sample_id.clone(), call_json);
     let json_output = serde_json::to_string(&json_map).unwrap();
-    std::fs::write(&out_json, &json_output).unwrap();
+    write_file_or_exit(&out_json, &json_output);
 
     // Write TSV
     log::info!("Writing to tsv ({})", out_tsv);
@@ -1335,7 +1371,7 @@ fn main() {
         }
     }
 
-    std::fs::write(&out_tsv, &tsv_content).unwrap();
+    write_file_or_exit(&out_tsv, &tsv_content);
 
     // Print results
     if cli.print {

@@ -189,16 +189,28 @@ pub fn get_normed_depth(
             if region.3.contains("_hapcn") {
                 region_length = Some(region.2 - region.1);
                 gc_for_normalization.push(*gc);
-                let cn_str = region.3.split("hapcn").nth(1).unwrap();
-                hap_cn = Some(cn_str.parse::<f64>().unwrap());
+                let cn_str = region.3.split("hapcn").nth(1).unwrap_or("");
+                hap_cn = cn_str.parse::<f64>().ok();
             }
             last_region = Some(region.clone());
         }
 
-        let region_length = region_length.expect("Problem with region definition. Length not specified.");
-        let hap_cn = hap_cn.expect("Problem with region definition. Length not specified.");
+        let region_length = region_length
+            .expect("Problem with region definition: no '_hapcn' region length found.");
+        let hap_cn = hap_cn
+            .expect("Problem with region definition: '_hapcn' copy number missing or unparseable.");
         let count_sum: u64 = lcount.iter().sum();
-        counts_for_normalization.push(count_sum as f64 / (hap_cn * region_length as f64));
+        // Guard against a degenerate region (zero length or zero hap_cn) that
+        // would produce inf/NaN and silently corrupt downstream normalization.
+        let denom = hap_cn * region_length as f64;
+        if denom <= 0.0 {
+            panic!(
+                "Problem with region definition: non-positive normalization denominator \
+                 (hap_cn={}, region_length={}).",
+                hap_cn, region_length
+            );
+        }
+        counts_for_normalization.push(count_sum as f64 / denom);
         region_type_cn.insert(region_type.clone(), hap_cn);
     }
 

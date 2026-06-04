@@ -394,6 +394,12 @@ pub fn call_var42127526_var42127556(
     let (var_ref, var_alt, _var_ref_forward, _var_ref_reverse) =
         get_supporting_reads_single_region(reader, base_db, None);
 
+    // This caller expects exactly the two diagnostic sites (42127526, 42127556).
+    // If the panel returns fewer, bail out with no calls rather than panicking.
+    if var_ref.len() < 2 || var_alt.len() < 2 {
+        return (Vec::new(), Vec::new(), Vec::new());
+    }
+
     let var7526_count = vec![var_ref[0], var_alt[0]];
     let var7556_count = vec![var_ref[1], var_alt[1]];
 

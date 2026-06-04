@@ -58,8 +58,10 @@ impl Gmm {
             if i < prior_values.len() {
                 self.prior_state.push(prior_values[i]);
             } else {
-                let prior_value =
-                    (1.0 - sum_prior) / (self.nstate - prior_values.len()) as f64;
+                // Reached only when prior_values.len() < nstate, so the
+                // denominator is >= 1; `.max(1)` is defensive insurance.
+                let remaining = self.nstate.saturating_sub(prior_values.len()).max(1);
+                let prior_value = (1.0 - sum_prior) / remaining as f64;
                 self.prior_state.push(prior_value);
             }
         }
@@ -116,13 +118,24 @@ impl Gmm {
             prob.push(gauss_pmf * self.prior_state[i]);
         }
         let sum_prob: f64 = prob.iter().sum();
+        // If every weighted pmf underflowed to 0 (val far from all means), the
+        // posterior would be all-NaN. Bail out with a no-call instead.
+        if !sum_prob.is_finite() || sum_prob <= 0.0 {
+            return None;
+        }
         let post_prob: Vec<f64> = prob.iter().map(|&a| a / sum_prob).collect();
-        let max_prob = post_prob
-            .iter()
-            .cloned()
-            .fold(f64::NEG_INFINITY, f64::max);
+        // Track the argmax by index during the fold rather than relying on an
+        // exact float-equality `position` lookup (which can fail on ties/NaN).
+        let mut best_idx = 0usize;
+        let mut max_prob = f64::NEG_INFINITY;
+        for (i, &p) in post_prob.iter().enumerate() {
+            if p > max_prob {
+                max_prob = p;
+                best_idx = i;
+            }
+        }
         if max_prob >= post_cutoff {
-            post_prob.iter().position(|&p| p == max_prob)
+            Some(best_idx)
         } else {
             None
         }

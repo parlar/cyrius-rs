@@ -123,13 +123,12 @@ pub fn compute_d7_depth(
     chrom: &str,
     reference_fasta: Option<&str>,
 ) -> Option<D7DepthProfile> {
-    let mut reader = if let Some(ref_path) = reference_fasta {
-        let mut r = bam::IndexedReader::from_path(bam_path).ok()?;
-        r.set_reference(ref_path).ok()?;
-        r
-    } else {
-        bam::IndexedReader::from_path(bam_path).ok()?
-    };
+    let mut reader = crate::depth_calling::utilities::open_alignment_file_with_index(
+        bam_path,
+        reference_fasta,
+        None,
+    )
+    .ok()?;
 
     let tid = reader.header().tid(chrom.as_bytes())?;
 
@@ -208,8 +207,9 @@ pub fn classify_d7_signals(profile: &D7DepthProfile) -> D7HybridSignals {
     // Equivalent: 1.25 < ratio < 1.75
     let exon9_elevated = (1.25..1.75).contains(&exon9_body_ratio);
 
-    // *13 detection: D7 3' half depleted
-    // StellarPGx uses: 0.45 < ratio < 0.75
+    // *13 detection: D7 3' half depleted.
+    // StellarPGx cites 0.45 < ratio < 0.75; we deliberately widen to
+    // 0.40..0.80 to tolerate depth noise in this (logging-only) signal.
     let three_prime_depleted = (0.40..0.80).contains(&three_prime_five_prime_ratio);
 
     D7HybridSignals {

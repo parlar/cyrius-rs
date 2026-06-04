@@ -58,6 +58,11 @@ pub fn parse_variant_sites(var_list: &[String]) -> Vec<VariantSite> {
     sites
 }
 
+// NOTE: This is one of three module-local variant-name parsers (see also
+// `read_phasing::parse_variant_for_phasing` and
+// `phase_disambiguate::VariantLookup::from_target_file`). They intentionally
+// differ in detail (e.g. this one accepts multi-base deletions; the phasing
+// parser only single-base) — do NOT assume they are interchangeable.
 fn parse_variant(name: &str) -> Option<VariantSite> {
     let s = name.strip_prefix("g.")?;
 

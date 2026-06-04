@@ -57,8 +57,10 @@ pub fn fisher_exact(table: [[u64; 2]; 2]) -> (f64, f64) {
         let ci = col1 - ai;
         let di = n - ai - bi - ci;
         let p = hypergeom_pmf(ai, bi, ci, di);
-        if p <= p_observed + 1e-12 {
-            // small tolerance for floating point
+        // Relative tolerance matching scipy's fisher_exact, so the "as or less
+        // probable" comparison is robust across PMF magnitudes (a fixed
+        // absolute epsilon misclassifies near-ties when PMFs are very small).
+        if p <= p_observed * (1.0 + 1e-7) {
             p_value += p;
         }
     }

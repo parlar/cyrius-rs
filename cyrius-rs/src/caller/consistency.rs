@@ -304,9 +304,9 @@ pub fn check_allele_balance(
 
 // --- Read-Pair Crossing Fraction ---
 
-/// Expected crossing fractions (from pdx_caller calibration.py defaults)
-const CROSSING_NORMAL: f64 = 0.02;
-const CROSSING_HYBRID: f64 = 0.10;
+// Expected crossing fractions from pdx_caller calibration.py defaults were
+// ~0.02 (normal) / ~0.10 (hybrid), but in practice crossing is uninformative
+// here (see check_crossing_fraction docs), so only the min-reads gate remains.
 const CROSSING_MIN_READS: usize = 50;
 
 /// Check if read-pair crossing fraction is consistent with CNV group.

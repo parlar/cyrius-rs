@@ -19,6 +19,9 @@ pub struct VariantLookup {
 
 impl VariantLookup {
     /// Parse the target variant file content into a lookup table.
+    /// NOTE: module-local parsing that intentionally differs from
+    /// `read_voting::parse_variant` / `read_phasing::parse_variant_for_phasing`
+    /// — not interchangeable (see read_voting.rs).
     pub fn from_target_file(content: &str) -> Self {
         let mut entries = HashMap::new();
         for line in content.lines() {
@@ -103,10 +106,8 @@ fn get_star_variants(star: &str, dstar: &HashMap<String, String>) -> Vec<String>
         }
         return var_key.split('_').map(|s| s.to_string()).collect();
     }
-    // *1 has no defining variants (it's the reference)
-    if star == "*1" {
-        return vec![];
-    }
+    // Anything not in the table (including *1, the reference) has no defining
+    // variants for phasing purposes.
     vec![]
 }
 
@@ -151,13 +152,16 @@ fn check_phasing(
         // Fetch reads overlapping pos1. Use a wide window upstream because
         // reads starting up to ~150bp before pos1 can still cover it.
         let read_len = 150i64;
-        reader
+        if reader
             .fetch(bam::FetchDefinition::Region(
                 tid as i32,
                 (pos1 - read_len).max(0),
                 pos1 + 1,
             ))
-            .unwrap();
+            .is_err()
+        {
+            return (0, 0);
+        }
         for record_result in reader.records() {
             let record = match record_result {
                 Ok(r) => r,
@@ -183,13 +187,16 @@ fn check_phasing(
         }
 
         // Fetch reads overlapping pos2
-        reader
+        if reader
             .fetch(bam::FetchDefinition::Region(
                 tid as i32,
                 (pos2 - read_len).max(0),
                 pos2 + 1,
             ))
-            .unwrap();
+            .is_err()
+        {
+            return (0, 0);
+        }
         for record_result in reader.records() {
             let record = match record_result {
                 Ok(r) => r,
@@ -217,9 +224,12 @@ fn check_phasing(
         // Single fetch spanning both positions
         let start = pos1.min(pos2) - 1;
         let end = pos1.max(pos2);
-        reader
+        if reader
             .fetch(bam::FetchDefinition::Region(tid as i32, start, end))
-            .unwrap();
+            .is_err()
+        {
+            return (0, 0);
+        }
 
         for record_result in reader.records() {
             let record = match record_result {
