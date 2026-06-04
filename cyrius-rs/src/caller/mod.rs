@@ -16,5 +16,6 @@ pub mod match_star_allele;
 pub mod phase_disambiguate;
 pub mod read_phasing;
 pub mod read_voting;
+pub mod resolver;
 pub mod kmer_validation;
 pub mod strand_bias_all;
