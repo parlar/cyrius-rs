@@ -19,9 +19,8 @@ pub struct VariantLookup {
 
 impl VariantLookup {
     /// Parse the target variant file content into a lookup table.
-    /// NOTE: module-local parsing that intentionally differs from
-    /// `read_voting::parse_variant` / `read_phasing::parse_variant_for_phasing`
-    /// — not interchangeable (see read_voting.rs).
+    /// NOTE: this is a module-local variant-name parser with rules specific to
+    /// physical phasing; it is not a general-purpose parser.
     pub fn from_target_file(content: &str) -> Self {
         let mut entries = HashMap::new();
         for line in content.lines() {
