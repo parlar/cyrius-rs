@@ -854,7 +854,14 @@ fn d6_star_caller(
                         );
                         resolver_posterior = Some(outcome.top_posterior);
                         final_star_allele_call = Some(outcome.genotype);
+                    } else {
+                        log::info!(
+                            "resolver: {} -> not scorable ({} candidates), keeping cascade call",
+                            call, candidates.len()
+                        );
                     }
+                } else {
+                    log::debug!("resolver: BAM reopen failed for {}, keeping cascade call", bam_path);
                 }
             }
         }
