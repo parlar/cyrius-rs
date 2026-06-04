@@ -1,14 +1,16 @@
 //! Likelihood-based tie-breaker for ;-ambiguous diplotype candidate sets.
-//! Picks a single call when one candidate's posterior clearly dominates,
-//! otherwise reports the near-tied set as honest ambiguity.
+//! A candidate joins the reported set iff its posterior is within RESOLVE_MARGIN
+//! (near-tie epsilon) of the top candidate's posterior. The call is confident
+//! iff the top candidate stands alone — no rival within that gap.
 
 use crate::caller::diplotype_caller::CandidateScore;
 
-/// Minimum posterior gap between the top two candidates required for a
-/// confident single call. Calibrated on the GeT-RM benchmark ONLY and set
-/// conservatively: prefer declaring ambiguity over a confident wrong pick.
-/// (Starting value; re-confirm during the benchmark calibration step.)
-pub const RESOLVE_MARGIN: f64 = 0.90;
+/// A candidate joins the reported set iff its posterior is within this gap of
+/// the top candidate's posterior (a near-tie epsilon). The call is confident
+/// iff the top candidate stands alone (no rival within this gap). Calibrated on
+/// the GeT-RM benchmark ONLY; conservative — prefer reporting ambiguity over a
+/// confident wrong pick. (Starting value; re-confirm during benchmark calibration.)
+pub const RESOLVE_MARGIN: f64 = 0.10;
 
 #[derive(Debug, Clone)]
 pub struct ResolverOutcome {
@@ -33,29 +35,21 @@ pub fn resolve(scores: &[CandidateScore]) -> Option<ResolverOutcome> {
             .then_with(|| a.diplotype.cmp(&b.diplotype))
     });
     let top = finite[0];
-    if finite.len() == 1 {
-        return Some(ResolverOutcome {
-            genotype: top.diplotype.clone(),
-            ambiguous: false,
-            top_posterior: top.posterior,
-        });
-    }
-    let second = finite[1];
-    if top.posterior - second.posterior >= RESOLVE_MARGIN {
+    let kept: Vec<String> = finite
+        .iter()
+        .filter(|c| top.posterior - c.posterior <= RESOLVE_MARGIN)
+        .map(|c| c.diplotype.clone())
+        .collect();
+    if kept.len() == 1 {
         Some(ResolverOutcome {
             genotype: top.diplotype.clone(),
             ambiguous: false,
             top_posterior: top.posterior,
         })
     } else {
-        let kept: Vec<String> = finite
-            .iter()
-            .filter(|c| top.posterior - c.posterior < RESOLVE_MARGIN)
-            .map(|c| c.diplotype.clone())
-            .collect();
         Some(ResolverOutcome {
-            ambiguous: kept.len() > 1,
             genotype: kept.join(";"),
+            ambiguous: true,
             top_posterior: top.posterior,
         })
     }
@@ -93,8 +87,23 @@ mod tests {
 
     #[test]
     fn all_unscorable_returns_none() {
-        let mut a = cs("*1/*2", 0.0);
-        a.log10_likelihood = f64::NEG_INFINITY;
-        assert!(resolve(&[a]).is_none());
+        assert!(resolve(&[cs("*1/*2", 0.0)]).is_none());
+    }
+
+    #[test]
+    fn dominant_top_excludes_tail() {
+        // 0.89 dominates; 0.09 and 0.02 are NOT within 0.10 of the top -> confident single.
+        let out = resolve(&[cs("*1/*2", 0.89), cs("*1/*3", 0.09), cs("*1/*4", 0.02)]).unwrap();
+        assert_eq!(out.genotype, "*1/*2");
+        assert!(!out.ambiguous);
+    }
+
+    #[test]
+    fn near_tie_pair_excludes_distant_third() {
+        // top two within 0.10 of each other are kept; the 0.01 tail is excluded.
+        let out = resolve(&[cs("*1/*2", 0.50), cs("*1/*3", 0.49), cs("*1/*4", 0.01)]).unwrap();
+        assert!(out.ambiguous);
+        assert!(out.genotype.contains("*1/*2") && out.genotype.contains("*1/*3"));
+        assert!(!out.genotype.contains("*1/*4"));
     }
 }
