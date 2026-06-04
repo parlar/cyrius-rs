@@ -753,18 +753,35 @@ fn score_diplotypes(
 
     // Normalise posteriors over the top-N (approximate)
     if !best.is_empty() {
-        let max_ll = best[0].log10_likelihood;
-        let sum: f64 = best
-            .iter()
-            .map(|d| 10.0_f64.powf(d.log10_likelihood - max_ll))
-            .sum();
-        let log10_sum = max_ll + sum.log10();
-        for d in &mut best {
-            d.posterior = 10.0_f64.powf(d.log10_likelihood - log10_sum);
+        let lls: Vec<f64> = best.iter().map(|d| d.log10_likelihood).collect();
+        if let Some(posts) = posteriors_from_log10(&lls) {
+            for (d, p) in best.iter_mut().zip(posts) {
+                d.posterior = p;
+            }
         }
     }
 
     best
+}
+
+// ---------------------------------------------------------------------------
+// Shared posterior normalization helper
+// ---------------------------------------------------------------------------
+
+/// Convert a slice of log10-likelihoods into a `Vec<f64>` of posteriors,
+/// normalised using the numerically stable max-shift formula:
+///   posterior_i = 10^(ll_i - (max_ll + log10(Σ 10^(ll_j - max_ll))))
+///
+/// Returns `None` if `max_ll` is not finite (e.g. all entries are `-inf` or
+/// `NaN`); the caller is responsible for deciding what to do in that case.
+fn posteriors_from_log10(lls: &[f64]) -> Option<Vec<f64>> {
+    let max_ll = lls.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    if !max_ll.is_finite() {
+        return None;
+    }
+    let sum: f64 = lls.iter().map(|&ll| 10.0_f64.powf(ll - max_ll)).sum();
+    let log10_sum = max_ll + sum.log10();
+    Some(lls.iter().map(|&ll| 10.0_f64.powf(ll - log10_sum)).collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -788,10 +805,13 @@ fn score_explicit_multiset(
     let mut total = 0.0f64;
     for obs in reads {
         let s_d7 = ln_w_d7 + score_read_d7(obs, sites, lut) * ln10;
+        // Per-read Vec allocation is fine here: the resolver scores only a tiny
+        // explicit candidate set, not the full O(n^2) enumeration of score_diplotypes.
         let mut terms: Vec<f64> = Vec::with_capacity(assignment.len() + 1);
         terms.push(s_d7);
         for &(idx, copies) in assignment {
             if copies == 0 {
+                // parse_multiset never yields a zero count; purely defensive.
                 continue;
             }
             let ln_w = ((copies as f64) / denom).ln();
@@ -880,14 +900,14 @@ pub fn score_candidates(
         out.push(CandidateScore { diplotype: cand.clone(), log10_likelihood: ll, posterior: 0.0 });
     }
 
-    let max_ll = out.iter().map(|c| c.log10_likelihood).fold(f64::NEG_INFINITY, f64::max);
-    if !max_ll.is_finite() {
-        return Vec::new();
-    }
-    let sum: f64 = out.iter().map(|c| 10.0_f64.powf(c.log10_likelihood - max_ll)).sum();
-    let log10_sum = max_ll + sum.log10();
-    for c in &mut out {
-        c.posterior = 10.0_f64.powf(c.log10_likelihood - log10_sum);
+    let lls: Vec<f64> = out.iter().map(|c| c.log10_likelihood).collect();
+    match posteriors_from_log10(&lls) {
+        None => return Vec::new(), // no finite score — fail closed
+        Some(posts) => {
+            for (c, p) in out.iter_mut().zip(posts) {
+                c.posterior = p;
+            }
+        }
     }
     out
 }
