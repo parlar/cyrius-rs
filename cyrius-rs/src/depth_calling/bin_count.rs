@@ -161,6 +161,92 @@ pub fn normalize(
     }
 }
 
+/// A control region must have at least this fraction of the provisional
+/// median (computed over the strictly-positive control depths) to be kept.
+/// Zero-depth regions always fall below this (the provisional median is
+/// computed only from positive depths, so the threshold is strictly
+/// positive whenever any region has reads at all).
+const MIN_CONTROL_DEPTH_FRACTION_OF_MEDIAN: f64 = 0.10;
+
+/// At least this fraction of control regions must be usable (see
+/// [`select_usable_control_regions`]) or normalization is considered
+/// unreliable.
+const MIN_USABLE_CONTROL_FRACTION: f64 = 0.8;
+
+/// Exclude control ("norm") regions whose depth is zero or negligible
+/// (below 10% of the median of the strictly-positive control depths) from
+/// the values that feed the normalization median and GC fit.
+///
+/// A region with literally zero reads is always excluded: the provisional
+/// median is computed only over strictly-positive depths, so the 10%
+/// threshold derived from it is strictly positive whenever at least one
+/// region has reads, and a zero depth can never meet a positive threshold.
+/// If every control region is zero, nothing is usable.
+///
+/// Returns `Err` if fewer than [`MIN_USABLE_CONTROL_FRACTION`] of the
+/// control regions remain usable, since normalization on so few good
+/// regions is not reliable.
+///
+/// Shared by both [`get_normed_depth`] (BAM path) and
+/// [`get_normed_depth_from_count`] (count-file path) so the two cannot
+/// drift apart.
+pub fn select_usable_control_regions(
+    control_counts: &[f64],
+    control_gc: &[f64],
+) -> Result<(Vec<f64>, Vec<f64>), String> {
+    debug_assert_eq!(control_counts.len(), control_gc.len());
+    let total = control_counts.len();
+    if total == 0 {
+        return Ok((Vec::new(), Vec::new()));
+    }
+
+    let positive_depths: Vec<f64> = control_counts.iter().copied().filter(|&c| c > 0.0).collect();
+
+    let mut usable_counts = Vec::new();
+    let mut usable_gc = Vec::new();
+    if !positive_depths.is_empty() {
+        let threshold = MIN_CONTROL_DEPTH_FRACTION_OF_MEDIAN * stats::median(&positive_depths);
+        for (&c, &g) in control_counts.iter().zip(control_gc.iter()) {
+            if c >= threshold {
+                usable_counts.push(c);
+                usable_gc.push(g);
+            }
+        }
+    }
+    // else: every control region is zero; none are usable.
+
+    let usable_fraction = usable_counts.len() as f64 / total as f64;
+    if usable_fraction < MIN_USABLE_CONTROL_FRACTION {
+        return Err(format!(
+            "only {} of {} control regions usable ({:.1}% < {:.0}% required); \
+             depth normalization is unreliable",
+            usable_counts.len(),
+            total,
+            usable_fraction * 100.0,
+            MIN_USABLE_CONTROL_FRACTION * 100.0
+        ));
+    }
+
+    Ok((usable_counts, usable_gc))
+}
+
+/// If `coverage_mad` exceeds `threshold` and `filter` is a clean `"PASS"`,
+/// downgrade it to `"LowQ_coverage_MAD"` so the Filter field reflects the
+/// coverage-quality concern instead of only logging a warning. Any other
+/// filter value (ambiguous calls, fuzzy matches, no-calls, ...) is left
+/// untouched, since those already explain why the call is not a clean pass.
+pub fn downgrade_filter_for_high_mad(
+    filter: Option<String>,
+    coverage_mad: f64,
+    threshold: f64,
+) -> Option<String> {
+    if coverage_mad > threshold && filter.as_deref() == Some("PASS") {
+        Some("LowQ_coverage_MAD".to_string())
+    } else {
+        filter
+    }
+}
+
 /// Get normalized depth from a BAM file. Returns Err if the alignment file
 /// (or its index) cannot be opened.
 pub fn get_normed_depth(
@@ -233,13 +319,16 @@ pub fn get_normed_depth(
         None => Vec::new(),
     };
 
+    let mut control_counts = Vec::new();
+    let mut control_gc = Vec::new();
+
     if n_cores <= 1 {
         for (region, gc) in &norm_regions {
             let nreads = get_read_count(&mut reader, region, 0);
             let region_length = (region.2 - region.1) as f64;
             let norm_depth = nreads as f64 / region_length;
-            counts_for_normalization.push(norm_depth);
-            gc_for_normalization.push(*gc);
+            control_counts.push(norm_depth);
+            control_gc.push(*gc);
         }
     } else {
         // Parallel processing using rayon
@@ -254,10 +343,16 @@ pub fn get_normed_depth(
             })
             .collect();
         for (norm_depth, gc) in results? {
-            counts_for_normalization.push(norm_depth);
-            gc_for_normalization.push(gc);
+            control_counts.push(norm_depth);
+            control_gc.push(gc);
         }
     }
+
+    // Drop zero/negligible-depth control regions before they can pull the
+    // normalization median and GC fit off; Err if too few remain usable.
+    let (usable_counts, usable_gc) = select_usable_control_regions(&control_counts, &control_gc)?;
+    counts_for_normalization.extend(usable_counts);
+    gc_for_normalization.extend(usable_gc);
 
     Ok(normalize(
         &counts_for_normalization,
@@ -306,14 +401,23 @@ pub fn get_normed_depth_from_count(
         region_type_cn.insert(region_type.clone(), hap_cn);
     }
 
+    let mut control_counts = Vec::new();
+    let mut control_gc = Vec::new();
     if let Some(norm_regions) = region_dic.get("norm") {
         for (region, gc) in norm_regions {
             let region_length = (region.2 - region.1) as f64;
             let count = *count_dic.get(&region.3).unwrap_or(&0) as f64;
-            counts_for_normalization.push(count / region_length);
-            gc_for_normalization.push(*gc);
+            control_counts.push(count / region_length);
+            control_gc.push(*gc);
         }
     }
+
+    // Drop zero/negligible-depth control regions before they can pull the
+    // normalization median and GC fit off; Err if too few remain usable.
+    // Shared with get_normed_depth (BAM path) so the two cannot drift.
+    let (usable_counts, usable_gc) = select_usable_control_regions(&control_counts, &control_gc)?;
+    counts_for_normalization.extend(usable_counts);
+    gc_for_normalization.extend(usable_gc);
 
     Ok(normalize(
         &counts_for_normalization,
@@ -379,5 +483,93 @@ mod tests {
         let r = get_normed_depth(link.to_str().unwrap(), &regions, 1, None, bai.to_str());
         let _ = std::fs::remove_dir_all(&dir);
         assert!(r.is_ok(), "{:?}", r.err());
+    }
+
+    #[test]
+    fn select_usable_control_regions_excludes_zero_and_near_zero_depths() {
+        // 9 healthy regions at depth 20.0, one zeroed out and one at 1.0
+        // (below 10% of the median of 20.0, i.e. below 2.0). Both should be
+        // dropped; 9/11 = 81.8% usable clears the 80% floor.
+        let counts = vec![
+            20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 0.0, 1.0,
+        ];
+        let gc = vec![
+            0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.11, 0.12,
+        ];
+        let (kept_counts, kept_gc) = select_usable_control_regions(&counts, &gc).unwrap();
+        assert_eq!(kept_counts.len(), 9);
+        assert!(kept_counts.iter().all(|&c| c == 20.0));
+        assert_eq!(kept_gc.len(), 9);
+        // The zero and near-zero region's GC values must not survive.
+        assert!(!kept_gc.contains(&0.11));
+        assert!(!kept_gc.contains(&0.12));
+        // The zero/near-zero entries no longer drag the median down: the
+        // median of the kept values is unaffected by them.
+        assert_eq!(stats::median(&kept_counts), 20.0);
+    }
+
+    #[test]
+    fn select_usable_control_regions_all_zero_is_err() {
+        let counts = vec![0.0; 10];
+        let gc = vec![0.5; 10];
+        let r = select_usable_control_regions(&counts, &gc);
+        assert!(r.is_err(), "{:?}", r);
+    }
+
+    #[test]
+    fn select_usable_control_regions_below_80_percent_usable_is_err() {
+        // 7 usable of 10 = 70%, below the 80% floor.
+        let mut counts = vec![10.0; 7];
+        counts.extend(vec![0.0; 3]);
+        let gc = vec![0.5; 10];
+        let r = select_usable_control_regions(&counts, &gc);
+        assert!(r.is_err(), "{:?}", r);
+    }
+
+    #[test]
+    fn select_usable_control_regions_at_80_percent_is_ok() {
+        // 8 usable of 10 = exactly 80%, at the floor (not below it).
+        let mut counts = vec![10.0; 8];
+        counts.extend(vec![0.0; 2]);
+        let gc = vec![0.5; 10];
+        let (kept_counts, _) = select_usable_control_regions(&counts, &gc).unwrap();
+        assert_eq!(kept_counts.len(), 8);
+    }
+
+    #[test]
+    fn select_usable_control_regions_empty_input_is_ok() {
+        let (counts, gc) = select_usable_control_regions(&[], &[]).unwrap();
+        assert!(counts.is_empty());
+        assert!(gc.is_empty());
+    }
+
+    #[test]
+    fn downgrade_filter_for_high_mad_replaces_pass_above_threshold() {
+        let r = downgrade_filter_for_high_mad(Some("PASS".to_string()), 0.27, 0.11);
+        assert_eq!(r, Some("LowQ_coverage_MAD".to_string()));
+    }
+
+    #[test]
+    fn downgrade_filter_for_high_mad_leaves_pass_alone_below_threshold() {
+        let r = downgrade_filter_for_high_mad(Some("PASS".to_string()), 0.077, 0.11);
+        assert_eq!(r, Some("PASS".to_string()));
+    }
+
+    #[test]
+    fn downgrade_filter_for_high_mad_leaves_non_pass_filters_alone() {
+        // A sample already flagged for another reason keeps that reason;
+        // it is not clobbered by the MAD check.
+        let r = downgrade_filter_for_high_mad(
+            Some("Fuzzy_match".to_string()),
+            0.27,
+            0.11,
+        );
+        assert_eq!(r, Some("Fuzzy_match".to_string()));
+    }
+
+    #[test]
+    fn downgrade_filter_for_high_mad_leaves_none_alone() {
+        let r = downgrade_filter_for_high_mad(None, 0.27, 0.11);
+        assert_eq!(r, None);
     }
 }

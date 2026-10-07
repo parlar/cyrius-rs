@@ -1088,7 +1088,7 @@ fn main() {
 
     log::info!("Processing sample {}", sample_id);
 
-    let cyp2d6_call = d6_star_caller(
+    let mut cyp2d6_call = d6_star_caller(
         &bam_name,
         &call_parameters,
         cli.threads,
@@ -1102,6 +1102,11 @@ fn main() {
         log::warn!(
             "Sample {} has uneven coverage. CN calls may be unreliable.",
             sample_id
+        );
+        cyp2d6_call.filter = cyrius_rs::depth_calling::bin_count::downgrade_filter_for_high_mad(
+            cyp2d6_call.filter,
+            cyp2d6_call.coverage_mad,
+            MAD_THRESHOLD,
         );
     }
 
