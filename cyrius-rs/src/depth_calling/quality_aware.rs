@@ -163,13 +163,21 @@ pub fn collect_read_evidence(
         None => return evidence,
     };
 
-    reader
+    if reader
         .fetch(bam::FetchDefinition::Region(
             tid as i32,
             snp_position - 1,
             snp_position,
         ))
-        .unwrap();
+        .is_err()
+    {
+        log::warn!(
+            "collect_read_evidence: failed to fetch {}:{}",
+            nchr,
+            snp_position
+        );
+        return evidence;
+    }
 
     let mut pileups = reader.pileup();
     pileups.set_max_depth(i32::MAX as u32);

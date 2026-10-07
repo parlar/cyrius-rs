@@ -11,13 +11,22 @@ pub fn get_read_count(reader: &mut bam::IndexedReader, region: &Region, mapq_cut
         Some(t) => t,
         None => return 0,
     };
-    reader
+    if reader
         .fetch(bam::FetchDefinition::Region(
             tid as i32,
             region.1,
             region.2,
         ))
-        .unwrap();
+        .is_err()
+    {
+        log::warn!(
+            "get_read_count: failed to fetch region {}:{}-{}",
+            region.0,
+            region.1,
+            region.2
+        );
+        return 0;
+    }
 
     let mut nreads: u64 = 0;
     let mut record = bam::Record::new();
@@ -39,7 +48,13 @@ pub fn get_read_count(reader: &mut bam::IndexedReader, region: &Region, mapq_cut
 
 /// Return the median read length from a set of reads (fetches all reads).
 pub fn get_read_length(reader: &mut bam::IndexedReader) -> f64 {
-    reader.fetch(bam::FetchDefinition::All).unwrap();
+    // Unlike a region fetch, FetchDefinition::All cannot fail for a missing
+    // contig -- it has no contig to look up. It can still fail on a broken
+    // or stale index, so handle it the same way as the region fetches below.
+    if reader.fetch(bam::FetchDefinition::All).is_err() {
+        log::warn!("get_read_length: failed to fetch all reads");
+        return 150.0;
+    }
     get_read_length_from_fetched(reader)
 }
 
@@ -49,9 +64,18 @@ fn get_read_length_from_region(reader: &mut bam::IndexedReader, region: &Region)
         Some(t) => t,
         None => return 150.0,
     };
-    reader
+    if reader
         .fetch(bam::FetchDefinition::Region(tid as i32, region.1, region.2))
-        .unwrap();
+        .is_err()
+    {
+        log::warn!(
+            "get_read_length_from_region: failed to fetch region {}:{}-{}",
+            region.0,
+            region.1,
+            region.2
+        );
+        return 150.0;
+    }
     get_read_length_from_fetched(reader)
 }
 
@@ -708,5 +732,65 @@ mod tests {
         let _ = std::fs::remove_file(&missing_path);
         let _ = std::fs::remove_file(&no_zero_region_path);
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// Write a minimal, structurally-valid 2-reference BAI index (BAI magic,
+    /// n_ref=2, no bins/intervals for either ref, n_no_coor=0) to `path`.
+    /// Pairing it with a real multi-contig BAM (via an explicit index path)
+    /// reproduces a genuine stale/corrupt-index condition: the index loads
+    /// fine, but it covers far fewer references than the BAM's own header.
+    fn write_minimal_two_contig_bai(path: &std::path::Path) {
+        let bai_bytes: [u8; 32] = [
+            0x42, 0x41, 0x49, 0x01, // "BAI\1"
+            0x02, 0x00, 0x00, 0x00, // n_ref = 2
+            0x00, 0x00, 0x00, 0x00, // ref0 n_bin = 0
+            0x00, 0x00, 0x00, 0x00, // ref0 n_intv = 0
+            0x00, 0x00, 0x00, 0x00, // ref1 n_bin = 0
+            0x00, 0x00, 0x00, 0x00, // ref1 n_intv = 0
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // n_no_coor = 0
+        ];
+        std::fs::write(path, bai_bytes).unwrap();
+    }
+
+    #[test]
+    fn get_read_length_with_broken_index_warns_instead_of_panicking() {
+        // get_read_length() fetches FetchDefinition::All, not a region, so it
+        // cannot fail the way a missing-contig region fetch does. But a broken
+        // index can still make the underlying htslib fetch return Err: pairing
+        // a real multi-contig benchmark BAM with a minimal, mismatched
+        // 2-reference index (valid BAI, but covering far fewer references
+        // than the BAM's own header) makes sam_itr_querys(".") return NULL.
+        // Confirmed empirically before writing this test: calling
+        // reader.fetch(FetchDefinition::All) directly against this exact
+        // reader/index pairing returns Err(Fetch).
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let bam = root.join("benchmark/HG00096_pgx_regions.bam");
+        if !bam.exists() {
+            eprintln!("skipping: benchmark BAM not present");
+            return;
+        }
+        let dir =
+            std::env::temp_dir().join(format!("cyrius_broken_idx_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bai_path = dir.join("mismatched.bai");
+        write_minimal_two_contig_bai(&bai_path);
+
+        let mut reader = crate::depth_calling::utilities::open_alignment_file_with_index(
+            bam.to_str().unwrap(),
+            None,
+            Some(bai_path.to_str().unwrap()),
+        )
+        .expect("opening with an explicit (if mismatched) index path should succeed");
+
+        let read_len = get_read_length(&mut reader);
+
+        let _ = std::fs::remove_file(&bai_path);
+        let _ = std::fs::remove_dir(&dir);
+
+        assert_eq!(
+            read_len, 150.0,
+            "a fetch failure (broken/mismatched index) must degrade to the 150.0 \
+             fallback read length, not panic"
+        );
     }
 }

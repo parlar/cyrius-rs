@@ -231,9 +231,18 @@ pub fn get_allele_counts_var42128936(
         Some(t) => t,
         None => return (0, 0, 0),
     };
-    reader
+    if reader
         .fetch(bam::FetchDefinition::Region(tid as i32, start, end))
-        .unwrap();
+        .is_err()
+    {
+        log::warn!(
+            "get_allele_counts_var42128936: failed to fetch region {}:{}-{}",
+            chr,
+            start,
+            end
+        );
+        return (0, 0, 0);
+    }
 
     let mut record = bam::Record::new();
     while let Some(result) = reader.read(&mut record) {
