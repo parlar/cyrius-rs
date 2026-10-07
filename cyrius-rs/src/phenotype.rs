@@ -30,6 +30,59 @@ pub fn load_haplotype_functionality(content: &str) -> HashMap<String, HaplotypeF
     result
 }
 
+/// Format an activity value the way Python's str(float) does.
+fn format_activity(value: f64) -> String {
+    if value == value.floor() {
+        format!("{:.1}", value)
+    } else {
+        format!("{}", value)
+    }
+}
+
+/// Look up a haplotype's functionality. When there is no exact row:
+/// a sub-allele uses its main allele ("*4.013" -> "*4"); "*AxN" with N >= 3
+/// uses the table's "*Ax≥3" row (stored as "*Ax3"); otherwise "*AxN" gets
+/// N times the single-copy activity of "*A".
+fn lookup_functionality(
+    name: &str,
+    table: &HashMap<String, HaplotypeFunctionality>,
+) -> Option<HaplotypeFunctionality> {
+    if let Some(info) = table.get(name) {
+        return Some(info.clone());
+    }
+    let (base, copies) = match name.rsplit_once('x') {
+        Some((b, n)) if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) => {
+            (b, n.parse::<u32>().ok())
+        }
+        _ => (name, None),
+    };
+    let main = base.split('.').next().unwrap_or(base);
+    if main != base {
+        let alt = match copies {
+            Some(n) => format!("{}x{}", main, n),
+            None => main.to_string(),
+        };
+        return lookup_functionality(&alt, table);
+    }
+    let n = copies?;
+    if n >= 3 {
+        if let Some(info) = table.get(&format!("{}x3", base)) {
+            return Some(info.clone());
+        }
+    }
+    let single = table.get(base)?;
+    let activity: f64 = single.activity.parse().ok()?;
+    Some(HaplotypeFunctionality {
+        activity: format_activity(activity * n as f64),
+        function: single.function.clone(),
+        evidence_strength: "n/a".to_string(),
+        evidence_summary: format!(
+            "No table entry for {}; activity is {} x the {} value.",
+            name, n, base
+        ),
+    })
+}
+
 /// Match haplotype with activity value, functionality, evidence.
 pub fn compare_genotypes(
     query: &str,
@@ -46,7 +99,7 @@ pub fn compare_genotypes(
     let mut has_na = false;
 
     for haplotype in &haplotypes {
-        if let Some(info) = haplotype_functionality.get(haplotype) {
+        if let Some(info) = lookup_functionality(haplotype, haplotype_functionality) {
             if info.activity == "n/a" {
                 has_na = true;
             }
@@ -147,6 +200,34 @@ pub fn sort_genotype(genotype: Option<&str>) -> Option<String> {
     } else {
         Some(genotype.to_string())
     }
+}
+
+/// Compare the predicted effect of ';'-separated alternative diplotypes.
+/// Returns (clinical_equivalence, long_read_recommended). Any alternative
+/// whose activity is unknown makes the effect unknown, which also warrants
+/// long-read follow-up.
+pub fn clinical_equivalence(predictions: &[Prediction]) -> (String, bool) {
+    if predictions.iter().any(|p| p.total_activity == "n/a") {
+        return ("unknown_effect".to_string(), true);
+    }
+    let all_same = predictions.windows(2).all(|w| {
+        (w[0].total_activity.as_str(), w[0].predicted_phenotype.as_str())
+            == (w[1].total_activity.as_str(), w[1].predicted_phenotype.as_str())
+    });
+    if all_same {
+        ("same_effect".to_string(), false)
+    } else {
+        ("different_effect".to_string(), true)
+    }
+}
+
+/// Apply sort_genotype to each ';'-separated diplotype.
+pub fn sort_diplotypes(genotype: &str) -> String {
+    genotype
+        .split(';')
+        .map(|d| sort_genotype(Some(d.trim())).unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join(";")
 }
 
 /// Match phenotype for a genotype string (may contain multiple diplotypes separated by ;).
@@ -288,4 +369,56 @@ pub fn diplotype_frequencies(
     }
 
     Ok(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn table() -> HashMap<String, HaplotypeFunctionality> {
+        load_haplotype_functionality(crate::data::HAPLOTYPE_FUNC)
+    }
+
+    fn activity_of(query: &str, hap: &str) -> String {
+        let (details, _) = compare_genotypes(query, &table());
+        details.into_iter().find(|d| d.haplotype == hap).unwrap().activity
+    }
+
+    #[test]
+    fn duplication_without_its_own_row_multiplies_single_copy_activity() {
+        assert_eq!(activity_of("*1/*10x3", "*10x3"), "0.75");
+    }
+
+    #[test]
+    fn three_or_more_copies_use_the_x3_row() {
+        assert_eq!(activity_of("*1/*2x4", "*2x4"), "3.0");
+    }
+
+    #[test]
+    fn suballele_falls_back_to_its_main_allele() {
+        assert_eq!(activity_of("*4.013/*5", "*4.013"), "0.0");
+    }
+
+    fn pred(activity: &str, phenotype: &str) -> Prediction {
+        Prediction {
+            total_activity: activity.to_string(),
+            predicted_phenotype: phenotype.to_string(),
+            haplotype_details: vec![],
+        }
+    }
+
+    #[test]
+    fn unknown_alternatives_recommend_long_read() {
+        let p = [pred("n/a", "Indeterminate"), pred("n/a", "Indeterminate")];
+        assert_eq!(clinical_equivalence(&p), ("unknown_effect".to_string(), true));
+        let same = [pred("1.0", "Intermediate Metabolizer"), pred("1.0", "Intermediate Metabolizer")];
+        assert_eq!(clinical_equivalence(&same), ("same_effect".to_string(), false));
+        let diff = [pred("0.25", "Intermediate Metabolizer"), pred("0.5", "Intermediate Metabolizer")];
+        assert_eq!(clinical_equivalence(&diff), ("different_effect".to_string(), true));
+    }
+
+    #[test]
+    fn each_diplotype_is_sorted() {
+        assert_eq!(sort_diplotypes("*2/*1;*10/*4"), "*1/*2;*4/*10");
+    }
 }

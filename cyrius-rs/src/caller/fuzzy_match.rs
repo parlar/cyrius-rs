@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 
+use crate::caller::match_star_allele::convert_to_main_allele;
 use crate::types::RawStarCall;
 
 /// Minimum score threshold for a fuzzy match to be reported.
@@ -113,7 +114,7 @@ pub fn fuzzy_match_star(
             );
         }
 
-        let processed = convert_to_main_allele_simple(&best_stars);
+        let processed = convert_to_main_allele(&best_stars);
 
         Some(RawStarCall {
             call_info: Some(format!("fuzzy_match(score={:.1})", best_score)),
@@ -162,7 +163,7 @@ pub fn fuzzy_match_star_cn1(
             best_score, best_stars.join(";")
         );
 
-        let processed = convert_to_main_allele_simple(&best_stars);
+        let processed = convert_to_main_allele(&best_stars);
 
         Some(RawStarCall {
             call_info: Some(format!("fuzzy_match(score={:.1})", best_score)),
@@ -172,24 +173,6 @@ pub fn fuzzy_match_star_cn1(
     } else {
         None
     }
-}
-
-/// Simple main-allele conversion (strip suballele suffixes like .013).
-fn convert_to_main_allele_simple(stars: &[String]) -> Vec<String> {
-    let mut result_set = std::collections::HashSet::new();
-    for star_combo in stars {
-        let parts: Vec<&str> = star_combo.split('_').collect();
-        let converted: Vec<String> = parts
-            .iter()
-            .map(|s| s.split('.').next().unwrap().to_string())
-            .collect();
-        let mut sorted = converted;
-        sorted.sort();
-        result_set.insert(sorted.join("_"));
-    }
-    let mut out: Vec<String> = result_set.into_iter().collect();
-    out.sort();
-    out
 }
 
 #[cfg(test)]

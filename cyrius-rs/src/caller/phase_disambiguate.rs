@@ -4,6 +4,7 @@
 //! read-level phasing to pick the correct diplotype. It examines which defining
 //! variants co-occur on the same reads (cis) vs different reads (trans).
 
+use crate::caller::match_star_allele::main_allele_name;
 use crate::depth_calling::snp_count::passing_read;
 use crate::types::StarCombinations;
 use rust_htslib::bam::{self, Read as BamRead};
@@ -74,8 +75,8 @@ fn parse_diplotypes(raw_candidates: &[String], clean_call: &str) -> Vec<Diplotyp
         if raw_parts.len() != 2 {
             continue;
         }
-        let main1 = raw_parts[0].split('.').next().unwrap();
-        let main2 = raw_parts[1].split('.').next().unwrap();
+        let main1 = main_allele_name(raw_parts[0]);
+        let main2 = main_allele_name(raw_parts[1]);
         let mut raw_mains = [main1, main2];
         raw_mains.sort();
         let matched = clean_parts.iter().find_map(|part| {

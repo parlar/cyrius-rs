@@ -1132,7 +1132,7 @@ fn main() {
     // Compute phenotype predictions and phasing status (needed for both JSON and TSV)
     let haplotype_functionality =
         phenotype::load_haplotype_functionality(data::HAPLOTYPE_FUNC);
-    let sorted_genotype = phenotype::sort_genotype(cyp2d6_call.genotype.as_deref());
+    let sorted_genotype = cyp2d6_call.genotype.as_deref().map(phenotype::sort_diplotypes);
     let predictions = phenotype::match_phenotype(
         sorted_genotype.as_deref(),
         &haplotype_functionality,
@@ -1142,19 +1142,11 @@ fn main() {
 
     // Determine phasing ambiguity and clinical equivalence.
     // Per README: long-read reflex fires when alternatives differ in
-    // activity score OR predicted phenotype — both axes matter.
+    // activity score OR predicted phenotype — both axes matter — or when
+    // any alternative's effect is unknown.
     let phasing_ambiguous = count_of_diplotypes > 1;
     let (clinical_equivalence, long_read_recommended) = if phasing_ambiguous {
-        let effects: Vec<(&str, &str)> = predictions
-            .iter()
-            .map(|p| (p.total_activity.as_str(), p.predicted_phenotype.as_str()))
-            .collect();
-        let all_same = effects.windows(2).all(|w| w[0] == w[1]);
-        if all_same {
-            ("same_effect".to_string(), false)
-        } else {
-            ("different_effect".to_string(), true)
-        }
+        phenotype::clinical_equivalence(&predictions)
     } else {
         ("n/a".to_string(), false)
     };
@@ -1168,12 +1160,7 @@ fn main() {
 
     // Write JSON
     log::info!("Writing to json ({})", out_json);
-    let sorted_json_genotype = cyp2d6_call.genotype.as_deref().map(|g| {
-        g.split(';')
-            .map(|d| phenotype::sort_genotype(Some(d.trim())).unwrap_or_default())
-            .collect::<Vec<_>>()
-            .join(";")
-    });
+    let sorted_json_genotype = sorted_genotype.clone();
     // K-mer validation summary (None unless --kmer-validation was passed and
     // a depth-based CNV tag was produced). Surfaces the alignment-free QC
     // verdict alongside the call; does not modify the call itself.

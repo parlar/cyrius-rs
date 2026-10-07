@@ -12,8 +12,21 @@ fn cnvtag_to_genotype() -> HashMap<&'static str, &'static str> {
     m
 }
 
-const KEPT_SUBALLELES: &[&str] = &[];
+/// Sub-alleles reported under their own name instead of their main allele.
+/// *4.013 is *4 with the exon 9 gene conversion; the exon9hyb rules in
+/// get_final_call_clean build its tandem notation (e.g. "*1/*4.013+*4").
+const KEPT_SUBALLELES: &[&str] = &["*4.013"];
 const RARE_ALLELES: &[&str] = &["*34", "*39", "*4.009", "*139"];
+
+/// Main-allele name used in calls: strips the sub-allele suffix ("*2.001" ->
+/// "*2") unless the sub-allele is in KEPT_SUBALLELES.
+pub(crate) fn main_allele_name(star: &str) -> &str {
+    if KEPT_SUBALLELES.contains(&star) {
+        star
+    } else {
+        star.split('.').next().unwrap_or(star)
+    }
+}
 
 fn get_var_list(var_observed: &[String]) -> String {
     if var_observed.is_empty() {
@@ -23,19 +36,12 @@ fn get_var_list(var_observed: &[String]) -> String {
     }
 }
 
-fn convert_to_main_allele(list_of_star: &[String]) -> Vec<String> {
+pub(crate) fn convert_to_main_allele(list_of_star: &[String]) -> Vec<String> {
     let mut converted_set = std::collections::HashSet::new();
     for stars in list_of_star {
-        let star_split: Vec<&str> = stars.split('_').collect();
-        let converted: Vec<String> = star_split
-            .iter()
-            .map(|star| {
-                if !KEPT_SUBALLELES.contains(star) {
-                    star.split('.').next().unwrap().to_string()
-                } else {
-                    star.to_string()
-                }
-            })
+        let converted: Vec<String> = stars
+            .split('_')
+            .map(|star| main_allele_name(star).to_string())
             .collect();
         let mut sorted = converted;
         sorted.sort();
@@ -328,10 +334,9 @@ pub fn get_final_call_clean(
     let mut final_call = final_call.to_vec();
     final_call.sort();
 
-    if final_call.len() == 2 && cnvcall == "cn2" {
-        let d1: Vec<&str> = final_call[0].split('_').collect();
-        let d2: Vec<&str> = final_call[1].split('_').collect();
-        return Some(format!("{};{}", d1.join("/"), d2.join("/")));
+    if final_call.len() >= 2 && cnvcall == "cn2" {
+        let diplotypes: Vec<String> = final_call.iter().map(|c| c.replace('_', "/")).collect();
+        return Some(diplotypes.join(";"));
     }
 
     if final_call.is_empty() || final_call.len() > 1 {
@@ -760,6 +765,68 @@ pub fn update_variants(
     var_observed.retain(|v| v != "NA");
 }
 
+/// Targeted read-phase rules for two cn2 ambiguities. Each rule fires when
+/// both of its diplotypes are among the candidates and drops the one its
+/// haplotype boolean excludes; any other candidates are kept.
+fn apply_cn2_phase_rules(
+    clean_call: &str,
+    var42126938_g_haplotype: bool,
+    var42127803_diff_haplotype: bool,
+) -> String {
+    let mut diplotypes: Vec<&str> = clean_call.split(';').collect();
+    let rules = [
+        ("*1/*32", "*27/*41", var42126938_g_haplotype),
+        ("*119/*2", "*1/*41", var42127803_diff_haplotype),
+    ];
+    for (if_true, if_false, signal) in rules {
+        if diplotypes.contains(&if_true) && diplotypes.contains(&if_false) {
+            let excluded = if signal { if_false } else { if_true };
+            diplotypes.retain(|d| *d != excluded);
+        }
+    }
+    diplotypes.join(";")
+}
+
+/// For a cnN (N >= 3) no_match, try adding one more copy of each variant
+/// currently seen N-2 times. Returns the result if exactly one distinct
+/// main-allele call comes out of all retries that matched unambiguously
+/// (unique_match, or unique_star: several sub-allele candidates with the
+/// same main alleles).
+fn retry_add_one_copy(
+    var_observed: &[String],
+    cnvcall: &str,
+    dic: &HashMap<String, Vec<String>>,
+) -> Option<RawStarCall> {
+    let cn_num: usize = cnvcall[2..].parse().unwrap_or(0);
+    // cn_num is always >= 2 for valid cnN tags; guard the subtraction.
+    let target_count = cn_num.saturating_sub(2);
+    let mut variant_tried: Vec<&String> = Vec::new();
+    let mut matched_calls: Vec<RawStarCall> = Vec::new();
+    for variant_to_try in var_observed {
+        let count = var_observed.iter().filter(|v| *v == variant_to_try).count();
+        if count == target_count && !variant_tried.contains(&variant_to_try) {
+            variant_tried.push(variant_to_try);
+            let mut var_new = var_observed.to_vec();
+            var_new.push(variant_to_try.clone());
+            let matchtag_new = get_star(&var_new, dic);
+            let unambiguous = matches!(
+                matchtag_new.call_info.as_deref(),
+                Some("unique_match") | Some("unique_star")
+            );
+            if unambiguous
+                && !matched_calls.iter().any(|m| m.star_call == matchtag_new.star_call)
+            {
+                matched_calls.push(matchtag_new);
+            }
+        }
+    }
+    if matched_calls.len() == 1 {
+        matched_calls.pop()
+    } else {
+        None
+    }
+}
+
 /// Main star allele matching function.
 pub fn match_star(
     var_observed: &mut Vec<String>,
@@ -839,34 +906,13 @@ pub fn match_star(
             && cnvcall.len() <= 3
             && matchtag.call_info.as_deref() == Some("no_match")
         {
-            let cn_num: usize = cnvcall[2..].parse().unwrap_or(0);
-            // cn_num is always >= 2 for valid cnN tags; guard the subtraction.
-            let target_count = cn_num.saturating_sub(2);
-            let mut variant_tried = Vec::new();
-            let mut matched_calls = Vec::new();
-            for variant_to_try in var_observed.iter().cloned().collect::<Vec<_>>() {
-                let count = var_observed
-                    .iter()
-                    .filter(|v| **v == variant_to_try)
-                    .count();
-                if count == target_count && !variant_tried.contains(&variant_to_try) {
-                    variant_tried.push(variant_to_try.clone());
-                    let mut var_new = var_observed.clone();
-                    var_new.push(variant_to_try);
-                    let matchtag_new = get_star(&var_new, dic);
-                    if matchtag_new.call_info.as_deref() == Some("unique_match") {
-                        matched_calls.push(matchtag_new);
-                    }
-                }
-            }
-            if matched_calls.len() == 1 {
-                let mt = &matched_calls[0];
+            if let Some(mt) = retry_add_one_copy(var_observed, cnvcall, dic) {
                 let final_call_clean =
                     get_final_call_clean(&mt.star_call, cnvcall, spacer_cn);
                 return StarCall {
-                    call_info: mt.call_info.clone(),
+                    call_info: mt.call_info,
                     variants_called: Some(var_observed.join(" ")),
-                    raw_call: Some(mt.candidate.clone()),
+                    raw_call: Some(mt.candidate),
                     clean_call: final_call_clean,
                 };
             }
@@ -884,30 +930,18 @@ pub fn match_star(
         let call_info = matchtag.call_info.clone();
 
         // Resolve ambiguous cn2 cases with haplotype info
+        // These two cn2 ambiguities are resolved by targeted read-phase
+        // signals (var42126938 / var42127803 haplotype booleans), which are
+        // more specific than the general likelihood resolver for these exact
+        // allele sets. Kept here pending benchmark coverage that could
+        // validate delegating them to the resolver.
         if call_info.as_deref() == Some("more_than_one_match") && cnvcall == "cn2" {
-            if let Some(fcc) = final_call_clean.clone() {
-                let re = regex::Regex::new(r"[;/]+").unwrap();
-                let mut parts: Vec<&str> = re.split(&fcc).collect();
-                parts.sort();
-                // These two cn2 ambiguities are resolved by targeted read-phase
-                // signals (var42126938 / var42127803 haplotype booleans), which
-                // are more specific than the general likelihood resolver for
-                // these exact allele sets. Kept here pending benchmark coverage
-                // that could validate delegating them to the resolver.
-                if parts == ["*1", "*27", "*32", "*41"] {
-                    final_call_clean = if var42126938_g_haplotype {
-                        Some("*1/*32".to_string())
-                    } else {
-                        Some("*27/*41".to_string())
-                    };
-                }
-                if parts == ["*1", "*119", "*2", "*41"] {
-                    final_call_clean = if var42127803_diff_haplotype {
-                        Some("*119/*2".to_string())
-                    } else {
-                        Some("*1/*41".to_string())
-                    };
-                }
+            if let Some(fcc) = final_call_clean.as_deref() {
+                final_call_clean = Some(apply_cn2_phase_rules(
+                    fcc,
+                    var42126938_g_haplotype,
+                    var42127803_diff_haplotype,
+                ));
             }
         }
 
@@ -950,6 +984,43 @@ mod tests {
         let out = get_star(&["g.X".to_string()], &d);
         assert_eq!(out.call_info.as_deref(), Some("more_than_one_match"));
         assert_eq!(out.star_call, vec!["*1_*34".to_string(), "*1_*39".to_string()]);
+    }
+
+    #[test]
+    fn star_4_013_keeps_its_name() {
+        let d = dic(&[("g.X", &["*1_*4.013"])]);
+        let out = get_star(&["g.X".to_string()], &d);
+        assert_eq!(out.star_call, vec!["*1_*4.013".to_string()]);
+    }
+
+    #[test]
+    fn cn2_with_three_candidates_reports_diplotypes() {
+        let calls: Vec<String> =
+            ["*1_*32", "*119_*162", "*27_*41"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(
+            get_final_call_clean(&calls, "cn2", None).as_deref(),
+            Some("*119/*162;*1/*32;*27/*41")
+        );
+    }
+
+    #[test]
+    fn cn2_phase_rules_drop_only_the_excluded_diplotype() {
+        assert_eq!(
+            apply_cn2_phase_rules("*119/*162;*1/*32;*27/*41", true, false),
+            "*119/*162;*1/*32"
+        );
+        assert_eq!(apply_cn2_phase_rules("*1/*32;*27/*41", false, false), "*27/*41");
+        assert_eq!(apply_cn2_phase_rules("*119/*2;*1/*41", false, true), "*119/*2");
+        assert_eq!(apply_cn2_phase_rules("*1/*2;*1/*3", true, true), "*1/*2;*1/*3");
+    }
+
+    #[test]
+    fn cn3_retry_accepts_a_single_main_allele_result() {
+        // Adding a second copy of g.A gives two raw candidates with the same
+        // main alleles (unique_star); that is an unambiguous answer.
+        let d = dic(&[("g.A_g.A_g.B", &["*1_*2.001_*2", "*1_*2_*2.002"])]);
+        let out = retry_add_one_copy(&["g.A".to_string(), "g.B".to_string()], "cn3", &d).unwrap();
+        assert_eq!(out.star_call, vec!["*1_*2_*2".to_string()]);
     }
 
     #[test]

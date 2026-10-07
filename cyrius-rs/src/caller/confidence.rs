@@ -157,8 +157,12 @@ fn score_cn(total_cn_raw: f64, spacer_cn_raw: f64) -> f64 {
 
 /// Score match quality from call_info and filter.
 fn score_match(call_info: Option<&str>, filter: Option<&str>) -> f64 {
+    // unique_star: several sub-allele candidates, one main-allele call.
+    // pick_common_allele: one call after setting aside rare-allele candidates.
+    // Ambiguity left in the final genotype is penalised via the filter below.
     let base = match call_info {
-        Some("unique_match") => 1.0,
+        Some("unique_match") | Some("unique_star") => 1.0,
+        Some("pick_common_allele") => 0.85,
         Some("more_than_one_match") => 0.7,
         Some(s) if s.starts_with("fuzzy_match") => 0.4,
         Some("no_match") | None => 0.1,
@@ -354,6 +358,13 @@ fn parse_ref_count(s: &str) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unambiguous_call_infos_outrank_more_than_one_match() {
+        let ambiguous = score_match(Some("more_than_one_match"), Some("PASS"));
+        assert!(score_match(Some("unique_star"), Some("PASS")) > ambiguous);
+        assert!(score_match(Some("pick_common_allele"), Some("PASS")) > ambiguous);
+    }
 
     #[test]
     fn test_depth_scoring() {
