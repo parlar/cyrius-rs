@@ -827,6 +827,12 @@ fn d6_star_caller(
                         &candidates,
                         &raw_candidates,
                     );
+                    for s in &scores {
+                        log::info!(
+                            "resolver: candidate {} log10_lik={:.2} posterior={:.4} decisive_reads={}",
+                            s.diplotype, s.log10_likelihood, s.posterior, s.decisive_reads
+                        );
+                    }
                     if let Some(outcome) = cyrius_rs::caller::resolver::resolve(&scores) {
                         log::info!(
                             "resolver: {} -> {} (ambiguous={}, top_posterior={:.4})",
@@ -841,7 +847,7 @@ fn d6_star_caller(
                         );
                     }
                 } else {
-                    log::debug!("resolver: BAM reopen failed for {}, keeping cascade call", bam_path);
+                    log::warn!("resolver: BAM reopen failed for {}, keeping cascade call", bam_path);
                 }
             }
         }

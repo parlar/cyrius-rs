@@ -70,6 +70,9 @@ pub struct CandidateScore {
     pub log10_likelihood: f64,
     /// Posterior normalised over the candidate set only (0 for unscorable).
     pub posterior: f64,
+    /// Reads whose likelihood under this candidate beats every other
+    /// candidate by more than DECISIVE_LOG10_LR.
+    pub decisive_reads: usize,
 }
 
 /// A scored diplotype candidate.
@@ -771,21 +774,23 @@ fn posteriors_from_log10(lls: &[f64]) -> Option<Vec<f64>> {
 // Explicit-multiset scoring (for the diplotype resolver)
 // ---------------------------------------------------------------------------
 
-/// Score one explicit diplotype given as (allele_index, copies) pairs summing
-/// to total_cn. General k-allele mixture: one D7 copy + the specified D6
-/// alleles, each weighted by copies/(cn+1). Returns log10-likelihood.
-fn score_explicit_multiset(
+/// Per-read log10-likelihoods under one explicit diplotype given as
+/// (allele_index, copies) pairs summing to total_cn. General k-allele mixture:
+/// one D7 copy + the specified D6 alleles, each weighted by copies/(cn+1).
+/// Their sum is the diplotype's log10-likelihood. A read with no finite
+/// score contributes 0.
+fn read_log10_likelihoods(
     reads: &[ReadObs],
     d6_alleles: &[AlleleDef],
     sites: &[UnifiedSite],
     total_cn: u32,
     assignment: &[(usize, usize)],
     lut: &QualLookup,
-) -> f64 {
+) -> Vec<f64> {
     let ln10 = std::f64::consts::LN_10;
     let denom = (total_cn as usize + 1) as f64;
     let ln_w_d7 = (1.0 / denom).ln();
-    let mut total = 0.0f64;
+    let mut out = Vec::with_capacity(reads.len());
     for obs in reads {
         let s_d7 = ln_w_d7 + score_read_d7(obs, sites, lut) * ln10;
         // Per-read Vec allocation is fine here: the resolver scores only a tiny
@@ -802,12 +807,41 @@ fn score_explicit_multiset(
         }
         let max_s = terms.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         if !max_s.is_finite() {
+            out.push(0.0);
             continue;
         }
         let lse = max_s + terms.iter().map(|t| (t - max_s).exp()).sum::<f64>().ln();
-        total += lse;
+        out.push(lse / ln10);
     }
-    total / ln10
+    out
+}
+
+/// Per-read log10 likelihood ratio a read needs over every other candidate
+/// to count as clear evidence for one candidate (10:1).
+const DECISIVE_LOG10_LR: f64 = 1.0;
+
+/// For each candidate, the number of reads that favour it over every other
+/// candidate by more than DECISIVE_LOG10_LR. `per_candidate[c][r]` is read
+/// r's log10-likelihood under candidate c.
+fn count_decisive_reads(per_candidate: &[Vec<f64>]) -> Vec<usize> {
+    let mut counts = vec![0usize; per_candidate.len()];
+    let n_reads = per_candidate.first().map_or(0, |v| v.len());
+    for r in 0..n_reads {
+        let mut best = 0usize;
+        for c in 1..per_candidate.len() {
+            if per_candidate[c][r] > per_candidate[best][r] {
+                best = c;
+            }
+        }
+        let runner_up = (0..per_candidate.len())
+            .filter(|&c| c != best)
+            .map(|c| per_candidate[c][r])
+            .fold(f64::NEG_INFINITY, f64::max);
+        if per_candidate[best][r] - runner_up > DECISIVE_LOG10_LR {
+            counts[best] += 1;
+        }
+    }
+    counts
 }
 
 /// Map a parsed multiset to (allele_index, copies) pairs, or None if ANY
@@ -938,8 +972,9 @@ pub fn score_candidates(
     for (i, a) in d6_alleles.iter().enumerate() {
         name_to_idx.insert(a.name.as_str(), i);
     }
+    let ((d6_start, d6_end), (d7_start, d7_end)) = fetch_windows(&sites);
     let all_reads = collect_reads_dual_region(
-        reader, nchr, &sites, D6_START, D6_END, D7_START, D7_END,
+        reader, nchr, &sites, d6_start, d6_end, d7_start, d7_end,
     );
     let (reads, _nf) = filter_mismapped(all_reads, &d6_alleles, &sites, -1.5, &lut);
     if reads.is_empty() {
@@ -958,13 +993,30 @@ pub fn score_candidates(
         assignments.push(cand_assignments);
     }
 
+    // Each candidate takes its best-scoring raw realization; keep that
+    // realization's per-read scores for the decisive-read count.
     let mut out: Vec<CandidateScore> = Vec::with_capacity(candidates.len());
+    let mut per_read: Vec<Vec<f64>> = Vec::with_capacity(candidates.len());
     for (cand, cand_assignments) in candidates.iter().zip(assignments.iter()) {
-        let ll = cand_assignments
-            .iter()
-            .map(|a| score_explicit_multiset(&reads, &d6_alleles, &sites, cn as u32, a, &lut))
-            .fold(f64::NEG_INFINITY, f64::max);
-        out.push(CandidateScore { diplotype: cand.clone(), log10_likelihood: ll, posterior: 0.0 });
+        let mut best: Option<(f64, Vec<f64>)> = None;
+        for a in cand_assignments {
+            let reads_ll = read_log10_likelihoods(&reads, &d6_alleles, &sites, cn as u32, a, &lut);
+            let ll: f64 = reads_ll.iter().sum();
+            if best.as_ref().map_or(true, |(b, _)| ll > *b) {
+                best = Some((ll, reads_ll));
+            }
+        }
+        let (ll, reads_ll) = best.unwrap_or((f64::NEG_INFINITY, vec![0.0; reads.len()]));
+        out.push(CandidateScore {
+            diplotype: cand.clone(),
+            log10_likelihood: ll,
+            posterior: 0.0,
+            decisive_reads: 0,
+        });
+        per_read.push(reads_ll);
+    }
+    for (c, n) in out.iter_mut().zip(count_decisive_reads(&per_read)) {
+        c.decisive_reads = n;
     }
 
     let lls: Vec<f64> = out.iter().map(|c| c.log10_likelihood).collect();
@@ -988,6 +1040,21 @@ const D6_START: i64 = 42123192;
 const D6_END: i64 = 42132032;
 const D7_START: i64 = 42139676;
 const D7_END: i64 = 42145745;
+
+/// Fetch windows (0-based, half-open) for the D6 and D7 regions, widened
+/// from the gene windows above to cover every site's coordinate (some
+/// downstream-exon9 D7 positions lie outside D7_START..D7_END).
+fn fetch_windows(sites: &[UnifiedSite]) -> ((i64, i64), (i64, i64)) {
+    let mut d6 = (D6_START, D6_END);
+    let mut d7 = (D7_START, D7_END);
+    for s in sites {
+        d6 = (d6.0.min(s.d6_pos - 1), d6.1.max(s.d6_pos));
+        if let Some(p) = s.d7_pos {
+            d7 = (d7.0.min(p - 1), d7.1.max(p));
+        }
+    }
+    (d6, d7)
+}
 
 /// Run the likelihood-based diplotype caller.
 ///
@@ -1174,7 +1241,7 @@ mod tests {
     }
 
     #[test]
-    fn test_score_explicit_multiset_prefers_matching_reads() {
+    fn test_read_log10_likelihoods_prefer_matching_reads() {
         let sites = vec![
             test_site("g.1A>T", 1, b'A', b'T'),
             test_site("g.2C>G", 2, b'C', b'G'),
@@ -1186,8 +1253,8 @@ mod tests {
             .map(|i| ReadObs { name: format!("r{i}"), observations: vec![(0, b'T', 40), (1, b'C', 40)] })
             .collect();
         let lut = QualLookup::new();
-        let s_a = score_explicit_multiset(&reads, &alleles, &sites, 2, &[(0usize, 2usize)], &lut);
-        let s_b = score_explicit_multiset(&reads, &alleles, &sites, 2, &[(1usize, 2usize)], &lut);
+        let s_a: f64 = read_log10_likelihoods(&reads, &alleles, &sites, 2, &[(0usize, 2usize)], &lut).iter().sum();
+        let s_b: f64 = read_log10_likelihoods(&reads, &alleles, &sites, 2, &[(1usize, 2usize)], &lut).iter().sum();
         assert!(s_a > s_b, "reads favor *A: {s_a} !> {s_b}");
     }
 
@@ -1217,6 +1284,32 @@ mod tests {
 
     fn strs(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn fetch_windows_cover_every_site() {
+        use crate::depth_calling::utilities::get_var_names;
+        let mut var_list = get_var_names(crate::data::TARGET_VARIANT);
+        var_list.extend(get_var_names(crate::data::TARGET_VARIANT_HOMO));
+        let sites = build_unified_sites(&var_list, crate::data::SNP_FILE);
+        let ((d6s, d6e), (d7s, d7e)) = fetch_windows(&sites);
+        for s in &sites {
+            assert!(d6s < s.d6_pos && s.d6_pos <= d6e, "{} D6 {}", s.name, s.d6_pos);
+            if let Some(p) = s.d7_pos {
+                assert!(d7s < p && p <= d7e, "{} D7 {}", s.name, p);
+            }
+        }
+    }
+
+    #[test]
+    fn decisive_reads_counts_reads_clearly_favoring_each_candidate() {
+        // Per-candidate, per-read log10-likelihoods. A read counts for a
+        // candidate only if it beats every other candidate by > 1 (10:1).
+        let per_read = vec![
+            vec![0.0, 0.0, 0.0, -0.5, -3.0],
+            vec![-2.0, -1.5, 0.0, 0.0, 0.0],
+        ];
+        assert_eq!(count_decisive_reads(&per_read), vec![2, 1]);
     }
 
     #[test]

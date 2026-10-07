@@ -1,16 +1,22 @@
 //! Likelihood-based tie-breaker for ;-ambiguous diplotype candidate sets.
-//! A candidate joins the reported set iff its posterior is within RESOLVE_MARGIN
-//! (near-tie epsilon) of the top candidate's posterior. The call is confident
-//! iff the top candidate stands alone — no rival within that gap.
+//! The top candidate is picked only if its posterior leads every rival by more
+//! than RESOLVE_MARGIN AND enough individual reads clearly favour it (the same
+//! evidence rule phase_disambiguate uses). Otherwise every candidate is kept:
+//! the per-read-independent posterior is too overconfident to narrow the set
+//! on its own.
 
 use crate::caller::diplotype_caller::CandidateScore;
 
-/// A candidate joins the reported set iff its posterior is within this gap of
-/// the top candidate's posterior (a near-tie epsilon). The call is confident
-/// iff the top candidate stands alone (no rival within this gap). Calibrated on
-/// the GeT-RM benchmark ONLY; conservative — prefer reporting ambiguity over a
-/// confident wrong pick. (Starting value; re-confirm during benchmark calibration.)
+/// The top candidate's posterior must lead every rival by more than this.
 pub const RESOLVE_MARGIN: f64 = 0.10;
+
+/// Minimum number of decisive reads (reads that clearly favour one candidate)
+/// the top candidate needs.
+pub const MIN_DECISIVE_READS: usize = 3;
+
+/// The top candidate needs at least this many times as many decisive reads
+/// as any rival.
+pub const DECISIVE_RATIO: usize = 3;
 
 #[derive(Debug, Clone)]
 pub struct ResolverOutcome {
@@ -35,18 +41,19 @@ pub fn resolve(scores: &[CandidateScore]) -> Option<ResolverOutcome> {
             .then_with(|| a.diplotype.cmp(&b.diplotype))
     });
     let top = finite[0];
-    let kept: Vec<String> = finite
-        .iter()
-        .filter(|c| top.posterior - c.posterior <= RESOLVE_MARGIN)
-        .map(|c| c.diplotype.clone())
-        .collect();
-    if kept.len() == 1 {
+    let rivals = &finite[1..];
+    let leads = rivals.iter().all(|c| top.posterior - c.posterior > RESOLVE_MARGIN);
+    let rival_reads = rivals.iter().map(|c| c.decisive_reads).max().unwrap_or(0);
+    let supported = top.decisive_reads >= MIN_DECISIVE_READS
+        && top.decisive_reads >= DECISIVE_RATIO * rival_reads;
+    if rivals.is_empty() || (leads && supported) {
         Some(ResolverOutcome {
             genotype: top.diplotype.clone(),
             ambiguous: false,
             top_posterior: top.posterior,
         })
     } else {
+        let kept: Vec<String> = finite.iter().map(|c| c.diplotype.clone()).collect();
         Some(ResolverOutcome {
             genotype: kept.join(";"),
             ambiguous: true,
@@ -59,8 +66,39 @@ pub fn resolve(scores: &[CandidateScore]) -> Option<ResolverOutcome> {
 mod tests {
     use super::*;
 
+    /// Candidate whose decisive-read count follows its posterior (plenty of
+    /// evidence for a clear winner).
     fn cs(name: &str, post: f64) -> CandidateScore {
-        CandidateScore { diplotype: name.into(), log10_likelihood: post.ln(), posterior: post }
+        csd(name, post, (post * 100.0) as usize)
+    }
+
+    fn csd(name: &str, post: f64, decisive_reads: usize) -> CandidateScore {
+        CandidateScore {
+            diplotype: name.into(),
+            log10_likelihood: post.ln(),
+            posterior: post,
+            decisive_reads,
+        }
+    }
+
+    #[test]
+    fn too_few_decisive_reads_keeps_every_candidate() {
+        let out = resolve(&[csd("*1/*21", 0.999, 2), csd("*2/*21", 0.001, 0)]).unwrap();
+        assert!(out.ambiguous);
+        assert!(out.genotype.contains("*1/*21") && out.genotype.contains("*2/*21"));
+    }
+
+    #[test]
+    fn lead_under_three_to_one_keeps_every_candidate() {
+        let out = resolve(&[csd("*1/*21", 0.99, 5), csd("*2/*21", 0.01, 2)]).unwrap();
+        assert!(out.ambiguous);
+    }
+
+    #[test]
+    fn enough_decisive_reads_picks_top() {
+        let out = resolve(&[csd("*1/*21", 0.99, 6), csd("*2/*21", 0.01, 2)]).unwrap();
+        assert_eq!(out.genotype, "*1/*21");
+        assert!(!out.ambiguous);
     }
 
     #[test]
@@ -99,11 +137,12 @@ mod tests {
     }
 
     #[test]
-    fn near_tie_pair_excludes_distant_third() {
-        // top two within 0.10 of each other are kept; the 0.01 tail is excluded.
+    fn near_tie_keeps_every_candidate() {
+        // Without a decided winner nothing is narrowed: the posterior alone is
+        // too overconfident to drop the 0.01 tail.
         let out = resolve(&[cs("*1/*2", 0.50), cs("*1/*3", 0.49), cs("*1/*4", 0.01)]).unwrap();
         assert!(out.ambiguous);
         assert!(out.genotype.contains("*1/*2") && out.genotype.contains("*1/*3"));
-        assert!(!out.genotype.contains("*1/*4"));
+        assert!(out.genotype.contains("*1/*4"));
     }
 }
