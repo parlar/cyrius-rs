@@ -123,13 +123,23 @@ impl KmerCounts {
     ///
     /// The guard is on the *counts*, not on `total_reads`: the ratio is
     /// undefined exactly when its denominator (D6+D7) is zero, whatever the
-    /// cause -- a chromosome missing from the BAM header, a failed region
-    /// fetch, records without SEQ, or reads that simply carry no diagnostic
-    /// k-mer. `total_reads > 0` with no matches is just as unmeasurable as
-    /// no reads at all, and `matched_reads == 0` is equivalent to this test
-    /// (a matched read always increments one of the two counters). Returning
+    /// cause -- a chromosome missing from the BAM header, *both* region
+    /// fetches failing, records without SEQ, or reads that simply carry no
+    /// diagnostic k-mer. `matched_reads == 0` is equivalent to this test (a
+    /// matched read always increments one of the two counters). Returning
     /// `None` keeps "no data" in the type, so it cannot be mistaken for a
     /// measured 50/50 ratio.
+    ///
+    /// A *single* failed fetch is deliberately not covered: `validate_with_kmers`
+    /// merges a D6-region count and a D7-region count, so if only one fetch
+    /// fails the other region's counts survive, the denominator is non-zero
+    /// and validation proceeds on half the data behind a `log::warn` alone.
+    ///
+    /// The *ratio* is equally unmeasurable whether nothing was scanned or many
+    /// reads were scanned without a single diagnostic match -- but those two
+    /// states are not equally informative, so a caller that gives up here must
+    /// still report the real `total_reads`/`matched_reads` rather than zeroing
+    /// them (see the zero-count path in `validate_with_kmers`).
     pub fn overall_ratio(&self) -> Option<f64> {
         let total_d6: u64 = self.d6_counts.iter().map(|&c| c as u64).sum();
         let total_d7: u64 = self.d7_counts.iter().map(|&c| c as u64).sum();
@@ -278,9 +288,15 @@ pub struct KmerStructuralClass {
 /// changepoint detection on regional BAMs.
 ///
 /// `overall` must be a *measured* ratio: it is taken as an argument rather
-/// than read back off `counts` so that this function cannot invent a
-/// category out of a default ratio when nothing was counted. The caller
-/// handles the no-data case (see `KmerCounts::overall_ratio`).
+/// than read back off `counts` so that this function no longer invents a
+/// category out of a default ratio when nothing was counted.
+///
+/// Nothing here *enforces* that, though -- the parameter is a bare `f64`
+/// carrying a prose-only contract, so a caller that passes a fabricated ratio
+/// would still get a full category and copy-number estimate back. The
+/// obligation is on the caller: `validate_with_kmers` returns early when
+/// `KmerCounts::overall_ratio()` is `None`, so this function is never reached
+/// with a default ratio on the live path (see `KmerCounts::overall_ratio`).
 fn classify_from_ratios(
     counts: &KmerCounts,
     total_cn: u32,
@@ -354,9 +370,12 @@ pub struct KmerValidationResult {
 }
 
 impl KmerValidationResult {
-    /// A no-result placeholder used when validation can't run (e.g. the BAM
-    /// fails to open, or not a single diagnostic k-mer was counted). Reports
-    /// no agreement and no detection.
+    /// A no-result placeholder used when validation can't run (e.g. the panel
+    /// fails to parse, or the BAM fails to open). Reports no agreement and no
+    /// detection, with zero read counts -- which is only truthful when nothing
+    /// was scanned. A caller that already scanned reads before giving up must
+    /// put the real counts back over this constructor (see the zero-k-mer path
+    /// in `validate_with_kmers`).
     fn unavailable(reason: &str) -> Self {
         KmerValidationResult {
             kmer_category: format!("unavailable: {}", reason),
@@ -472,20 +491,31 @@ pub fn validate_with_kmers(
         merged.d7_counts[i] = counts_d6.d7_counts[i] + counts_d7.d7_counts[i];
     }
 
-    let position_ratios = merged.ratios(5);
-
     // No diagnostic k-mers at all means there is nothing to validate against:
     // report it as unavailable rather than letting a default ratio fabricate
     // an estimate that happens to "agree" with the depth call.
+    //
+    // The scanned/matched read counts are real even here, so they are carried
+    // through over `unavailable()`'s zeroes: "80,000 reads scanned, none
+    // diagnostic" (wrong reference build, SEQ-less records, a panel/BAM
+    // mismatch) must stay distinguishable from "the BAM never opened" without
+    // parsing the category prose, since `main` emits both fields verbatim.
     let overall_ratio = match merged.overall_ratio() {
         Some(r) => r,
         None => {
-            return KmerValidationResult::unavailable(&format!(
+            let reason = format!(
                 "no diagnostic k-mers counted ({} reads scanned, {} matched)",
                 merged.total_reads, merged.matched_reads
-            ))
+            );
+            return KmerValidationResult {
+                total_reads: merged.total_reads,
+                matched_reads: merged.matched_reads,
+                ..KmerValidationResult::unavailable(&reason)
+            };
         }
     };
+
+    let position_ratios = merged.ratios(5);
 
     // Classify structural type using D6 copy number
     let classification = classify_from_ratios(&merged, total_cn, overall_ratio);
@@ -557,6 +587,57 @@ mod tests {
         path
     }
 
+    /// How many unmatchable reads `write_unmatchable_indexed_bam` writes.
+    const N_UNMATCHABLE_READS: u64 = 12;
+
+    /// Write an indexed BAM whose reads all land inside the D6 region that
+    /// `validate_with_kmers` fetches but whose sequence (poly-A) carries no
+    /// diagnostic k-mer. Those reads are therefore *scanned* but never
+    /// *matched* -- the state a wrong reference build, a panel/BAM mismatch or
+    /// SEQ-less records leave behind, and the one where zeroing `total_reads`
+    /// would destroy the only evidence that anything was read at all.
+    fn write_unmatchable_indexed_bam(dir: &std::path::Path) -> std::path::PathBuf {
+        let mut header = bam::header::Header::new();
+        let mut sq = bam::header::HeaderRecord::new(b"SQ");
+        sq.push_tag(b"SN", "chr22");
+        sq.push_tag(b"LN", 50_818_468);
+        header.push_record(&sq);
+        let path = dir.join("unmatchable.bam");
+        {
+            let mut writer = bam::Writer::from_path(&path, &header, bam::Format::Bam).unwrap();
+            let seq = vec![b'A'; 150];
+            let qual = vec![30u8; 150];
+            let cigar = bam::record::CigarString(vec![bam::record::Cigar::Match(150)]);
+            for i in 0..N_UNMATCHABLE_READS {
+                let mut rec = bam::Record::new();
+                rec.set(format!("read{}", i).as_bytes(), Some(&cigar), &seq, &qual);
+                rec.set_tid(0);
+                // Inside the D6 window validate_with_kmers fetches
+                // (chr22:42123000-42132000), ascending so the BAM is sorted.
+                rec.set_pos(42_124_000 + i as i64);
+                rec.set_mapq(60);
+                writer.write(&rec).unwrap();
+            }
+        }
+        bam::index::build(
+            &path,
+            None::<&std::path::PathBuf>,
+            bam::index::Type::Bai,
+            1,
+        )
+        .unwrap();
+        path
+    }
+
+    /// A scratch directory unique to this process *and* the given tag, so the
+    /// tests in this module never collide on it.
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("cyrius_kmer_{}_{}", tag, std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     fn counts(d6: Vec<u32>, d7: Vec<u32>) -> KmerCounts {
         let matched = d6.iter().chain(d7.iter()).map(|&c| c as u64).sum();
         KmerCounts {
@@ -593,9 +674,7 @@ mod tests {
         // (total_cn = 4) the estimate came out at exactly 4 * 0.5 = 2.0,
         // which is precisely expected_d6_cn("cn2", 4) -- a validation that
         // "agreed" on no data at all, and called the category "normal".
-        let dir =
-            std::env::temp_dir().join(format!("cyrius_kmer_zero_test_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = scratch_dir("zero_test");
         let bam_path = write_empty_indexed_bam(&dir);
 
         let result = validate_with_kmers(
@@ -611,6 +690,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
 
         assert_eq!(
+            result.total_reads, 0,
+            "an empty BAM has no reads to scan"
+        );
+        assert_eq!(
             result.matched_reads, 0,
             "an empty BAM must yield no k-mer-matched reads"
         );
@@ -625,6 +708,15 @@ mod tests {
             "zero counts must report an 'unavailable' category, got {:?}",
             result.kmer_category
         );
+        // Pin the *specific* arm. Every other assertion in this test is also
+        // satisfied by the "failed to open BAM" arm, so without this the test
+        // is one htslib behaviour change away from passing for the wrong
+        // reason.
+        assert!(
+            result.kmer_category.contains("no diagnostic k-mers counted"),
+            "must be the zero-k-mer arm, not some other 'unavailable' reason, got {:?}",
+            result.kmer_category
+        );
         assert_eq!(
             result.overall_ratio, 0.0,
             "zero counts must not report a measured ratio"
@@ -633,5 +725,85 @@ mod tests {
             result.estimated_d6_cn, 0.0,
             "zero counts must not report an estimated D6 copy number"
         );
+    }
+
+    #[test]
+    fn scanned_but_unmatched_reads_are_still_reported_as_scanned() {
+        // The zero-k-mer guard must not destroy the read counts on its way
+        // out. "N reads scanned, none diagnostic" (wrong reference build,
+        // panel/BAM mismatch, SEQ-less records) and "the BAM never opened"
+        // are different failures, and main.rs emits total_reads/matched_reads
+        // into the JSON verbatim -- so zeroing them here would leave a machine
+        // consumer unable to tell the two apart without parsing the category
+        // prose.
+        let dir = scratch_dir("unmatched_test");
+        let bam_path = write_unmatchable_indexed_bam(&dir);
+
+        let result = validate_with_kmers(
+            bam_path.to_str().unwrap(),
+            "chr22",
+            4,
+            None,
+            "cn2",
+            None,
+            None,
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(
+            result.matched_reads, 0,
+            "poly-A reads must not match any diagnostic k-mer, got {} matches",
+            result.matched_reads
+        );
+        assert_eq!(
+            result.total_reads, N_UNMATCHABLE_READS,
+            "all {} scanned reads must be reported as scanned, got total_reads={}",
+            N_UNMATCHABLE_READS, result.total_reads
+        );
+        // Still no fabricated agreement, and still the zero-k-mer arm.
+        assert!(!result.agrees, "nothing was measured, so nothing can agree");
+        assert!(
+            result.kmer_category.contains("no diagnostic k-mers counted"),
+            "expected the zero-k-mer arm, got {:?}",
+            result.kmer_category
+        );
+    }
+
+    #[test]
+    fn classify_from_ratios_estimates_copy_number_from_the_ratio_it_is_given() {
+        // The non-zero path: real counts, a real ratio, a real category.
+        // 30 D6 hits against 10 D7 hits is a measured ratio of 0.75.
+        let c = counts(vec![10, 10, 10, 0], vec![5, 5, 0, 0]);
+        assert_eq!(c.overall_ratio(), Some(0.75));
+
+        // (a) the live arrangement: the caller passes the measured ratio.
+        let cls = classify_from_ratios(&c, 4, 0.75);
+        assert_eq!(cls.estimated_d6_cn, 3.0);
+        assert_eq!(cls.estimated_d7_cn, 1.0);
+        assert_eq!(cls.category, "duplication");
+
+        // (b) and (c): same counts, a different ratio. The estimate must track
+        // the argument -- a body that re-derived the ratio off `counts`, or
+        // that hardcoded `total_cn * 0.5`, would return (a)'s answer or 2.0
+        // here instead.
+        let cls = classify_from_ratios(&c, 4, 0.25);
+        assert_eq!(cls.estimated_d6_cn, 1.0);
+        assert_eq!(cls.estimated_d7_cn, 3.0);
+        assert_eq!(cls.category, "deletion");
+
+        let cls = classify_from_ratios(&c, 2, 0.0);
+        assert_eq!(cls.estimated_d6_cn, 0.0);
+        assert_eq!(cls.estimated_d7_cn, 2.0);
+        assert_eq!(cls.category, "deletion_homozygous");
+
+        // (d) the ratio that used to be fabricated from no data is a perfectly
+        // ordinary measurement when it really is measured.
+        let balanced = counts(vec![8, 8], vec![8, 8]);
+        assert_eq!(balanced.overall_ratio(), Some(0.5));
+        let cls = classify_from_ratios(&balanced, 4, 0.5);
+        assert_eq!(cls.estimated_d6_cn, 2.0);
+        assert_eq!(cls.estimated_d7_cn, 2.0);
+        assert_eq!(cls.category, "normal");
     }
 }
