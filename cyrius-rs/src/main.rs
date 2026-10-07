@@ -160,6 +160,48 @@ fn is_chr_in_chromosome_names(input_file: &str, index_name: Option<&str>) -> boo
     false
 }
 
+/// All contig names in an alignment file header, in header order.
+fn header_contig_names(
+    input_file: &str,
+    index_name: Option<&str>,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    use rust_htslib::bam::Read as BamRead;
+    let reader = open_alignment_file_with_index(input_file, None, index_name)?;
+    let header = reader.header().clone();
+    Ok((0..header.target_count())
+        .map(|contig_id| String::from_utf8_lossy(header.tid2name(contig_id)).to_string())
+        .collect())
+}
+
+/// Build the message to log when the CYP2D6 contig for the chosen genome build
+/// is absent from the alignment header; `None` when the contig is present.
+///
+/// Names must match exactly, the way every contig lookup in the pipeline
+/// matches them: with `-g 38` the target is `22`, which a `chr22`-named header
+/// does not provide.
+fn missing_contig_error(target: &str, header_contigs: &[String]) -> Option<String> {
+    if header_contigs.iter().any(|contig| contig == target) {
+        return None;
+    }
+    const PREVIEW: usize = 5;
+    let preview: Vec<&str> = header_contigs
+        .iter()
+        .take(PREVIEW)
+        .map(|contig| contig.as_str())
+        .collect();
+    let more = if header_contigs.len() > PREVIEW { ", ..." } else { "" };
+    Some(format!(
+        "CYP2D6 contig '{}' is not in the alignment header ({} contig(s), first: [{}{}]). \
+         Every region and SNP lookup will return no reads, so the result will be an \
+         uninformative no-call; check that -g/--genome matches the reference the reads \
+         were aligned to.",
+        target,
+        header_contigs.len(),
+        preview.join(", "),
+        more
+    ))
+}
+
 /// Prepare all resources from embedded data files.
 fn prepare_resource(genome_arg: &str, input_file: &str, index_name: Option<&str>) -> ResourceInfo {
     let genome = if genome_arg == "autodetect" {
@@ -998,7 +1040,7 @@ fn main() {
         .map(|p| format!("{}/{}_count.txt", p, sample_id));
 
     if !bam_name.contains("://") && !Path::new(&bam_name).exists() {
-        log::warn!("Input file for sample {} does not exist.", sample_id);
+        log::error!("Input file for sample {} does not exist.", sample_id);
         // Write empty output files (matching Python behavior)
         write_file_or_exit(&out_json, "{}");
         let header = "Sample\tGenotype\tFilter\tConfidence\tActivity score\tPredicted phenotype\tPhasing_ambiguous\tLong_read_recommended\n";
@@ -1009,6 +1051,35 @@ fn main() {
     // Prepare data (after existence check, with the BAM half of ##idx##)
     log::info!("Starting {} v{}", TOOL_NAME, TOOL_VERSION);
     let call_parameters = prepare_resource(&cli.genome, &bam_name, index_name.as_deref());
+
+    // Every region and SNP lookup addresses the reference by contig name. If
+    // that contig is absent from the header -- typically a `-g` that does not
+    // match the reference the reads were aligned to -- each lookup silently
+    // yields nothing and the run ends in a no-call that cannot be told apart
+    // from a genuine low-quality one. Say so loudly; the no-call itself stays.
+    // This opens the file again just to read its header: the pipeline's own
+    // opens all live inside `d6_star_caller`, so there is nothing to reuse
+    // here, and a header-only open is cheap. It runs for `--countFilePath`
+    // runs too, where the BAM is still read for SNP counting.
+    match header_contig_names(&bam_name, index_name.as_deref()) {
+        Ok(contigs) => {
+            let mut targets = vec![
+                call_parameters.snp_db.nchr.as_str(),
+                call_parameters.var_db.nchr.as_str(),
+            ];
+            targets.dedup();
+            for target in targets {
+                if let Some(message) = missing_contig_error(target, &contigs) {
+                    log::error!("{}", message);
+                }
+            }
+        }
+        Err(e) => log::warn!(
+            "Could not read the header of {} to check for the CYP2D6 contig: {}",
+            bam_name,
+            e
+        ),
+    }
 
     let features = FeatureFlags {
         strand_bias_all: cli.strand_bias_all,
@@ -1365,5 +1436,66 @@ fn main() {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::missing_contig_error;
+
+    fn contigs(names: &[&str]) -> Vec<String> {
+        names.iter().map(|n| n.to_string()).collect()
+    }
+
+    #[test]
+    fn present_contig_is_not_an_error() {
+        assert_eq!(
+            missing_contig_error("chr22", &contigs(&["chr1", "chr2", "chr22"])),
+            None
+        );
+    }
+
+    #[test]
+    fn absent_contig_message_names_the_target_and_the_header_contigs() {
+        let header = contigs(&["chr1", "chr2", "chr3", "chr4", "chr5", "chr22"]);
+        let message = missing_contig_error("22", &header)
+            .expect("a target missing from the header must produce an error message");
+        // The target has to be named, or the message does not say what to fix.
+        assert!(
+            message.contains("'22'"),
+            "message must name the missing target: {}",
+            message
+        );
+        // Listing what the header does hold is what makes the message useful.
+        for name in ["chr1", "chr2", "chr3", "chr4", "chr5"] {
+            assert!(
+                message.contains(name),
+                "message must list header contig {}: {}",
+                name,
+                message
+            );
+        }
+        assert!(
+            message.contains("6 contig"),
+            "message must report the header contig count: {}",
+            message
+        );
+    }
+
+    #[test]
+    fn a_chr_prefixed_header_does_not_satisfy_the_stripped_target() {
+        // `-g 38` strips the "chr" prefix, so "22" must not match "chr22":
+        // this is exactly the wrong-build case the error exists to report.
+        assert!(missing_contig_error("22", &contigs(&["chr22"])).is_some());
+        // Nor may a longer contig name satisfy a shorter target by substring.
+        assert!(missing_contig_error("chr22", &contigs(&["chr22_KI270879v1"])).is_some());
+    }
+
+    #[test]
+    fn an_empty_header_is_an_error_and_lists_nothing() {
+        let message = missing_contig_error("chr22", &[])
+            .expect("an empty header cannot hold the target contig");
+        assert!(message.contains("'chr22'"), "{}", message);
+        assert!(message.contains("0 contig"), "{}", message);
     }
 }
