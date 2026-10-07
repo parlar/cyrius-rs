@@ -600,23 +600,6 @@ fn split_copy_suffix(s: &str) -> (String, usize) {
     (s.to_string(), 1)
 }
 
-/// Parse a diplotype string into a base-allele -> copies multiset.
-/// e.g. "*36/*36+*10" -> [("*10",1),("*36",2)] (order by allele name).
-fn parse_multiset(diplotype: &str) -> Vec<(String, usize)> {
-    use std::collections::BTreeMap;
-    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-    for hap in diplotype.split('/') {
-        for comp in hap.split('+') {
-            let comp = comp.trim();
-            if comp.is_empty() {
-                continue;
-            }
-            let (name, mult) = split_copy_suffix(comp);
-            *counts.entry(name).or_insert(0) += mult;
-        }
-    }
-    counts.into_iter().collect()
-}
 
 /// Score all diplotype pairs and return the top_n.
 ///
@@ -811,7 +794,7 @@ fn score_explicit_multiset(
         terms.push(s_d7);
         for &(idx, copies) in assignment {
             if copies == 0 {
-                // parse_multiset never yields a zero count; purely defensive.
+                // map_candidates_to_raw never yields a zero count; purely defensive.
                 continue;
             }
             let ln_w = ((copies as f64) / denom).ln();
@@ -847,11 +830,86 @@ fn build_assignment(
     Some(assignment)
 }
 
+/// Allele name -> copy count, sorted by name.
+type Multiset = Vec<(String, usize)>;
+
+/// Main-allele name: strip any sub-allele suffix ("*4.013" -> "*4").
+fn main_allele(name: &str) -> &str {
+    name.split('.').next().unwrap_or(name)
+}
+
+/// Main-allele multiset of a candidate label. Accepts "/"-diplotypes with
+/// "+"-tandems and "xN" copies, and "_"-joined allele lists.
+fn label_main_multiset(label: &str) -> Multiset {
+    use std::collections::BTreeMap;
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for comp in label.split(['/', '+', '_']) {
+        let comp = comp.trim();
+        if comp.is_empty() {
+            continue;
+        }
+        let (name, mult) = split_copy_suffix(comp);
+        *counts.entry(main_allele(&name).to_string()).or_insert(0) += mult;
+    }
+    counts.into_iter().collect()
+}
+
+/// Sub-allele multiset of a raw "_"-joined matcher candidate, plus its
+/// main-allele form.
+fn raw_multisets(raw: &str) -> (Multiset, Multiset) {
+    use std::collections::BTreeMap;
+    let mut sub: BTreeMap<String, usize> = BTreeMap::new();
+    let mut main: BTreeMap<String, usize> = BTreeMap::new();
+    for name in raw.split('_').filter(|n| !n.is_empty()) {
+        *sub.entry(name.to_string()).or_insert(0) += 1;
+        *main.entry(main_allele(name).to_string()).or_insert(0) += 1;
+    }
+    (sub.into_iter().collect(), main.into_iter().collect())
+}
+
+/// For each candidate label, the raw sub-allele multisets (from the matcher's
+/// raw candidates) whose main alleles equal the label's, plus the D6 copy
+/// count they share. None (fail closed) if any label has no matching raw
+/// candidate or the matched raw candidates disagree on copy count.
+fn map_candidates_to_raw(
+    candidates: &[String],
+    raw_candidates: &[String],
+) -> Option<(Vec<Vec<Multiset>>, usize)> {
+    let raws: Vec<_> = raw_candidates.iter().map(|r| raw_multisets(r)).collect();
+    let mut cn: Option<usize> = None;
+    let mut out = Vec::with_capacity(candidates.len());
+    for cand in candidates {
+        let want = label_main_multiset(cand);
+        let matched: Vec<Multiset> = raws
+            .iter()
+            .filter(|(_, main)| *main == want)
+            .map(|(sub, _)| sub.clone())
+            .collect();
+        if matched.is_empty() {
+            return None;
+        }
+        for m in &matched {
+            let copies: usize = m.iter().map(|(_, c)| c).sum();
+            match cn {
+                None => cn = Some(copies),
+                Some(c) if c != copies => return None,
+                _ => {}
+            }
+        }
+        out.push(matched);
+    }
+    Some((out, cn?))
+}
+
 /// Score a set of candidate diplotype strings against per-read evidence.
+/// Each candidate is scored through the exact sub-alleles the matcher found
+/// for it (`raw_candidates`), not the main-allele definitions, so candidates
+/// that explain the same variants differ only by how reads phase them. A
+/// candidate with several raw realizations takes the best-scoring one.
 /// Returns one CandidateScore per input candidate, with posteriors normalised
 /// across the set. Returns an EMPTY vec to signal "cannot score" — no reads,
-/// no sites, OR (FAIL-CLOSED) ANY candidate that is unparseable, names an
-/// unknown allele, or whose copy total != cn — so the caller falls back to the
+/// no sites, OR (FAIL-CLOSED) ANY candidate that has no matching raw
+/// candidate or names an unknown allele — so the caller falls back to the
 /// cascade's own choice. Scoring only the representable subset is forbidden:
 /// it could make a confident wrong pick by dropping one side of the ambiguity.
 pub fn score_candidates(
@@ -860,12 +918,16 @@ pub fn score_candidates(
     var_list: &[String],
     snp_file: &str,
     star_combinations: &StarCombinations,
-    total_cn: u32,
     candidates: &[String],
+    raw_candidates: &[String],
 ) -> Vec<CandidateScore> {
     if candidates.is_empty() {
         return Vec::new();
     }
+    let (per_candidate, cn) = match map_candidates_to_raw(candidates, raw_candidates) {
+        Some(m) => m,
+        None => return Vec::new(),
+    };
     let lut = QualLookup::new();
     let sites = build_unified_sites(var_list, snp_file);
     if sites.is_empty() {
@@ -884,19 +946,24 @@ pub fn score_candidates(
         return Vec::new();
     }
 
-    let cn = total_cn as usize;
-    let mut assignments: Vec<Vec<(usize, usize)>> = Vec::with_capacity(candidates.len());
-    for cand in candidates {
-        let multiset = parse_multiset(cand);
-        match build_assignment(&multiset, &name_to_idx, cn) {
-            Some(a) => assignments.push(a),
-            None => return Vec::new(),
+    let mut assignments: Vec<Vec<Vec<(usize, usize)>>> = Vec::with_capacity(candidates.len());
+    for raws in &per_candidate {
+        let mut cand_assignments = Vec::with_capacity(raws.len());
+        for multiset in raws {
+            match build_assignment(multiset, &name_to_idx, cn) {
+                Some(a) => cand_assignments.push(a),
+                None => return Vec::new(),
+            }
         }
+        assignments.push(cand_assignments);
     }
 
     let mut out: Vec<CandidateScore> = Vec::with_capacity(candidates.len());
-    for (cand, assignment) in candidates.iter().zip(assignments.iter()) {
-        let ll = score_explicit_multiset(&reads, &d6_alleles, &sites, total_cn, assignment, &lut);
+    for (cand, cand_assignments) in candidates.iter().zip(assignments.iter()) {
+        let ll = cand_assignments
+            .iter()
+            .map(|a| score_explicit_multiset(&reads, &d6_alleles, &sites, cn as u32, a, &lut))
+            .fold(f64::NEG_INFINITY, f64::max);
         out.push(CandidateScore { diplotype: cand.clone(), log10_likelihood: ll, posterior: 0.0 });
     }
 
@@ -1129,11 +1196,74 @@ mod tests {
         let mut idx: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
         idx.insert("*10", 0);
         idx.insert("*36", 1);
-        let known = parse_multiset("*36/*36+*10");
+        let known = ms(&[("*10", 1), ("*36", 2)]);
         assert!(build_assignment(&known, &idx, 3).is_some());
-        let mixed = parse_multiset("*4.013/*10+*36");
+        let mixed = ms(&[("*10", 1), ("*36", 1), ("*4.013", 1)]);
         assert!(build_assignment(&mixed, &idx, 3).is_none());
         assert!(build_assignment(&known, &idx, 2).is_none());
+    }
+
+    fn ms(v: &[(&str, usize)]) -> Vec<(String, usize)> {
+        v.iter().map(|(n, c)| (n.to_string(), *c)).collect()
+    }
+
+    #[test]
+    fn test_label_main_multiset() {
+        let expected = ms(&[("*10", 1), ("*36", 2)]);
+        assert_eq!(label_main_multiset("*36/*36+*10"), expected);
+        assert_eq!(label_main_multiset("*10/*36x2"), expected);
+        assert_eq!(label_main_multiset("*10.002_*36_*36"), expected);
+    }
+
+    fn strs(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn candidates_map_to_their_matched_suballeles_with_d6_copy_count() {
+        let (per_cand, cn) = map_candidates_to_raw(
+            &strs(&["*1/*21", "*2/*21"]),
+            &strs(&["*1_*21.002", "*2.001_*21"]),
+        )
+        .unwrap();
+        assert_eq!(cn, 2, "D6 copies, not the D6+D7 total");
+        assert_eq!(per_cand[0], vec![ms(&[("*1", 1), ("*21.002", 1)])]);
+        assert_eq!(per_cand[1], vec![ms(&[("*2.001", 1), ("*21", 1)])]);
+    }
+
+    #[test]
+    fn arrangements_of_one_multiset_share_the_same_raw_candidate() {
+        let (per_cand, cn) = map_candidates_to_raw(
+            &strs(&["*36/*36+*10", "*10/*36x2"]),
+            &strs(&["*10.002_*36_*36"]),
+        )
+        .unwrap();
+        assert_eq!(cn, 3);
+        let expected = vec![ms(&[("*10.002", 1), ("*36", 2)])];
+        assert_eq!(per_cand[0], expected);
+        assert_eq!(per_cand[1], expected);
+    }
+
+    #[test]
+    fn underscore_joined_candidates_are_mapped() {
+        let (per_cand, cn) = map_candidates_to_raw(
+            &strs(&["*10_*10_*4", "*10_*36_*4"]),
+            &strs(&["*10_*10.002_*4.013", "*10_*36_*4"]),
+        )
+        .unwrap();
+        assert_eq!(cn, 3);
+        assert_eq!(per_cand[0], vec![ms(&[("*10", 1), ("*10.002", 1), ("*4.013", 1)])]);
+        assert_eq!(per_cand[1], vec![ms(&[("*10", 1), ("*36", 1), ("*4", 1)])]);
+    }
+
+    #[test]
+    fn candidate_without_a_matching_raw_fails_closed() {
+        // *68 is part of the label but not of any raw candidate.
+        assert!(map_candidates_to_raw(
+            &strs(&["*68+*4/*2", "*68+*4/*1"]),
+            &strs(&["*2_*4", "*1_*4"]),
+        )
+        .is_none());
     }
 
     #[test]
@@ -1142,15 +1272,5 @@ mod tests {
         assert_eq!(split_copy_suffix("*36x2"), ("*36".to_string(), 2));
         assert_eq!(split_copy_suffix("*4.013"), ("*4.013".to_string(), 1));
         assert_eq!(split_copy_suffix("*1x"), ("*1x".to_string(), 1));
-    }
-
-    #[test]
-    fn test_parse_multiset() {
-        let m = parse_multiset("*36/*36+*10");
-        assert_eq!(m.iter().find(|(n, _)| n == "*36").map(|(_, c)| *c), Some(2));
-        assert_eq!(m.iter().find(|(n, _)| n == "*10").map(|(_, c)| *c), Some(1));
-        let m2 = parse_multiset("*10/*36x2");
-        assert_eq!(m2.iter().find(|(n, _)| n == "*36").map(|(_, c)| *c), Some(2));
-        assert_eq!(m2.iter().find(|(n, _)| n == "*10").map(|(_, c)| *c), Some(1));
     }
 }

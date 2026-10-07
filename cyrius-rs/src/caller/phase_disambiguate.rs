@@ -65,27 +65,31 @@ struct Diplotype {
 fn parse_diplotypes(raw_candidates: &[String], clean_call: &str) -> Vec<Diplotype> {
     let clean_parts: Vec<&str> = clean_call.split(';').collect();
 
-    // Build diplotypes from raw candidates, matching with clean counterparts
+    // Build diplotypes from raw candidates, matching each with the clean
+    // counterpart that has the same main alleles. The two lists are sorted
+    // differently, so pairing by position would mislabel them.
     let mut diplotypes = Vec::new();
-    for (i, raw) in raw_candidates.iter().enumerate() {
+    for raw in raw_candidates {
         let raw_parts: Vec<&str> = raw.split('_').collect();
         if raw_parts.len() != 2 {
             continue;
         }
-        let (clean_h1, clean_h2) = if i < clean_parts.len() {
-            let cp: Vec<&str> = clean_parts[i].split('/').collect();
-            if cp.len() == 2 {
-                (cp[0].to_string(), cp[1].to_string())
-            } else {
-                continue;
+        let main1 = raw_parts[0].split('.').next().unwrap();
+        let main2 = raw_parts[1].split('.').next().unwrap();
+        let mut raw_mains = [main1, main2];
+        raw_mains.sort();
+        let matched = clean_parts.iter().find_map(|part| {
+            let cp: Vec<&str> = part.split('/').collect();
+            if cp.len() != 2 {
+                return None;
             }
-        } else {
-            // Fallback: strip suballele suffix
-            (
-                raw_parts[0].split('.').next().unwrap().to_string(),
-                raw_parts[1].split('.').next().unwrap().to_string(),
-            )
-        };
+            let mut clean_mains = [cp[0], cp[1]];
+            clean_mains.sort();
+            (clean_mains == raw_mains).then(|| (cp[0].to_string(), cp[1].to_string()))
+        });
+        // Fallback: the stripped suballele names
+        let (clean_h1, clean_h2) =
+            matched.unwrap_or_else(|| (main1.to_string(), main2.to_string()));
         diplotypes.push(Diplotype {
             raw_hap1: raw_parts[0].to_string(),
             raw_hap2: raw_parts[1].to_string(),
@@ -573,5 +577,25 @@ fn are_cis_in_diplotype(
         (true, false, false, true) => Some(false), // a on hap1, b on hap2
         (false, true, true, false) => Some(false), // a on hap2, b on hap1
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_diplotypes_labels_each_raw_candidate_with_its_own_clean_form() {
+        // Raw order (*1 before *10) differs from clean order ("*10_" sorts
+        // before "*1_"), so pairing by position would swap the labels.
+        let raw = vec!["*1_*4.004".to_string(), "*10_*4.012".to_string()];
+        let dts = parse_diplotypes(&raw, "*10/*4;*1/*4");
+        assert_eq!(dts.len(), 2);
+        let by_raw: HashMap<&str, (&str, &str)> = dts
+            .iter()
+            .map(|d| (d.raw_hap1.as_str(), (d.clean_hap1.as_str(), d.clean_hap2.as_str())))
+            .collect();
+        assert_eq!(by_raw["*1"], ("*1", "*4"));
+        assert_eq!(by_raw["*10"], ("*10", "*4"));
     }
 }

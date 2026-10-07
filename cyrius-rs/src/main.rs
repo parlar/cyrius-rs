@@ -166,9 +166,9 @@ fn write_file_or_exit(path: &str, content: &str) {
 }
 
 /// Check if chromosome names contain "chr" prefix.
-fn is_chr_in_chromosome_names(input_file: &str) -> bool {
-    use rust_htslib::bam::{self, Read as BamRead};
-    let reader = match bam::IndexedReader::from_path(input_file) {
+fn is_chr_in_chromosome_names(input_file: &str, index_name: Option<&str>) -> bool {
+    use rust_htslib::bam::Read as BamRead;
+    let reader = match open_alignment_file_with_index(input_file, None, index_name) {
         Ok(r) => r,
         Err(e) => {
             // Can't read the file/index here; the main pipeline will surface a
@@ -191,9 +191,9 @@ fn is_chr_in_chromosome_names(input_file: &str) -> bool {
 }
 
 /// Prepare all resources from embedded data files.
-fn prepare_resource(genome_arg: &str, input_file: &str) -> ResourceInfo {
+fn prepare_resource(genome_arg: &str, input_file: &str, index_name: Option<&str>) -> ResourceInfo {
     let genome = if genome_arg == "autodetect" {
-        if is_chr_in_chromosome_names(input_file) {
+        if is_chr_in_chromosome_names(input_file, index_name) {
             "chr38".to_string()
         } else {
             "38".to_string()
@@ -257,7 +257,14 @@ fn d6_star_caller(
             cyrius_rs::depth_calling::bin_count::get_read_length(&mut reader);
         get_normed_depth_from_count(cf, &params.region_dic, read_length)
     } else {
-        get_normed_depth(bam_path, &params.region_dic, threads, reference_fasta)
+        get_normed_depth(bam_path, &params.region_dic, threads, reference_fasta, index_name)
+    };
+    let normalized_depth = match normalized_depth {
+        Ok(d) => d,
+        Err(e) => {
+            log::error!("Depth normalization failed: {}", e);
+            return D6Call::no_call(0.0, 0.0);
+        }
     };
 
     // No-call after normalization
@@ -807,6 +814,7 @@ fn d6_star_caller(
             if call.contains(';') {
                 let candidates: Vec<String> =
                     call.split(';').map(|s| s.trim().to_string()).collect();
+                let raw_candidates = star_called.raw_call.clone().unwrap_or_default();
                 if let Ok(mut r) =
                     open_alignment_file_with_index(bam_path, reference_fasta, index_name)
                 {
@@ -816,8 +824,8 @@ fn d6_star_caller(
                         &params.var_list,
                         data::SNP_FILE,
                         &params.star_combinations,
-                        total_cn,
                         &candidates,
+                        &raw_candidates,
                     );
                     if let Some(outcome) = cyrius_rs::caller::resolver::resolve(&scores) {
                         log::info!(
@@ -987,8 +995,16 @@ fn main() {
 
     let cli = Cli::parse();
 
+    let (bam_name, index_name) = if cli.input.contains("##idx##") {
+        let parts: Vec<&str> = cli.input.splitn(2, "##idx##").collect();
+        (parts[0].to_string(), Some(parts[1].to_string()))
+    } else {
+        (cli.input.clone(), None)
+    };
+
+    // Derive the default sample id from the BAM half of "input##idx##index".
     let sample_id = cli.id.unwrap_or_else(|| {
-        Path::new(&cli.input)
+        Path::new(&bam_name)
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "sample".to_string())
@@ -1001,13 +1017,6 @@ fn main() {
 
     let out_json = format!("{}/{}.json", cli.out_dir, sample_id);
     let out_tsv = format!("{}/{}.tsv", cli.out_dir, sample_id);
-
-    let (bam_name, index_name) = if cli.input.contains("##idx##") {
-        let parts: Vec<&str> = cli.input.splitn(2, "##idx##").collect();
-        (parts[0].to_string(), Some(parts[1].to_string()))
-    } else {
-        (cli.input.clone(), None)
-    };
 
     let count_file = cli
         .count_file_path
@@ -1025,7 +1034,7 @@ fn main() {
 
     // Prepare data (after existence check, with the BAM half of ##idx##)
     log::info!("Starting {} v{}", TOOL_NAME, TOOL_VERSION);
-    let call_parameters = prepare_resource(&cli.genome, &bam_name);
+    let call_parameters = prepare_resource(&cli.genome, &bam_name, index_name.as_deref());
 
     let features = FeatureFlags {
         strand_bias_all: cli.strand_bias_all,

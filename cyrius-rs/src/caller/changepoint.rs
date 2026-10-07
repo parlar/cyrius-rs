@@ -223,22 +223,63 @@ pub fn suggest_cnv_from_changepoints(
     // Require a substantial step (>0.20) for confidence
     let diff = first.mean_ratio - last.mean_ratio;
 
-    if diff > 0.20 {
+    let candidates: &[&str] = if diff > 0.20 {
         // 3' D6-rich, 5' D7-rich -> *13-like hybrid (pseudo-gene)
-        match total_cn {
-            2 => Some("star13".to_string()),
-            3 => Some("dup_star13".to_string()),
-            _ => None,
-        }
+        &["star13", "dup_star13"]
     } else if diff < -0.20 {
         // 3' D7-rich, 5' D6-rich -> *68-like hybrid (gene-pseudo)
-        match total_cn {
-            2 => Some("star5_star68".to_string()),
-            3 => Some("star68".to_string()),
-            4 => Some("star68_star68".to_string()),
-            _ => None,
-        }
+        &["star5_star68", "star68", "star68_star68"]
     } else {
-        None
+        return None;
+    };
+
+    // total_cn is the D6+D7 copy number; only suggest a tag whose expected
+    // total in the CNV lookup table agrees with it.
+    let lookup = crate::caller::call_variants::cnvtag_lookup_table();
+    candidates
+        .iter()
+        .find(|tag| lookup.get(**tag).map(|r| r.total_cn) == Some(total_cn))
+        .map(|tag| tag.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::caller::call_variants::cnvtag_lookup_table;
+
+    fn two_segments(first: f64, last: f64) -> ChangePointResult {
+        ChangePointResult {
+            segments: vec![
+                Segment { start_idx: 0, end_idx: 50, mean_ratio: first, n_valid: 40 },
+                Segment { start_idx: 50, end_idx: 117, mean_ratio: last, n_valid: 40 },
+            ],
+            n_changepoints: 1,
+            is_hybrid: true,
+            overall_ratio: (first + last) / 2.0,
+        }
+    }
+
+    #[test]
+    fn suggested_tag_total_cn_matches_observed_total_cn() {
+        // total_cn here is the D6+D7 copy number (4 for a normal genome).
+        let lookup = cnvtag_lookup_table();
+        for (first, last) in [(0.2, 0.5), (0.5, 0.2)] {
+            for total_cn in 2..=8u32 {
+                if let Some(tag) =
+                    suggest_cnv_from_changepoints(&two_segments(first, last), None, total_cn)
+                {
+                    assert_eq!(
+                        lookup[&tag].total_cn, total_cn,
+                        "suggested {tag} for total_cn {total_cn}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn star68_like_profile_at_total_cn_5_suggests_star68() {
+        let out = suggest_cnv_from_changepoints(&two_segments(0.2, 0.5), None, 5);
+        assert_eq!(out.as_deref(), Some("star68"));
     }
 }

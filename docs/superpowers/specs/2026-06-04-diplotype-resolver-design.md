@@ -209,6 +209,20 @@ genotype the cascade produces (after `phase_disambiguate`), scoring each candida
 multiset and either picking confidently or keeping an honest ambiguous set. Its top
 posterior is surfaced as `Resolver_posterior` in JSON.
 
+> **Correction (2026-10-07 review).** As implemented here the resolver never scored
+> anything: `main.rs` passed the D6+D7 total CN (4 for a normal genome) where
+> `build_assignment` needs the D6 copy count (2), so every candidate failed closed
+> and `Resolver_posterior` was always null. It also scored main-allele definitions
+> (`*2`, `*21`), which, once the CN was fixed, called HG00589 and NA18973 as `*2/*21`
+> at posterior 1.0 (truth `*1/*21`). Fixed: `score_candidates` now takes the
+> matcher's raw candidates, scores each answer through the exact sub-alleles that
+> matched it (e.g. `*1`+`*21.002` vs `*2.001`+`*21`), and takes the D6 copy count from
+> them. On GeT-RM all four `;`-ambiguous samples now score as honest 0.5/0.5 ties
+> (the reads carry no phase signal between the options); no call changed. The
+> site-319 "migration" below is unreachable: `KEPT_SUBALLELES` is empty, so `.013`
+> is stripped before that comparison. `RESOLVE_MARGIN` has not been calibrated on
+> any sample where the resolver separates candidates.
+
 **`RESOLVE_MARGIN` = 0.10** (near-tie posterior-gap epsilon, not the original "confidence
 gap"). During code review the gap-based rule was found to over-include non-competitive
 candidates for 3+ candidates; it was replaced with a single coherent near-tie rule: a

@@ -1,4 +1,4 @@
-use crate::depth_calling::utilities::open_alignment_file;
+use crate::depth_calling::utilities::open_alignment_file_with_index;
 use crate::stats;
 use crate::types::{NormalizedDepth, Region, RegionDic};
 use indexmap::IndexMap;
@@ -161,14 +161,20 @@ pub fn normalize(
     }
 }
 
-/// Get normalized depth from a BAM file.
+/// Get normalized depth from a BAM file. Returns Err if the alignment file
+/// (or its index) cannot be opened.
 pub fn get_normed_depth(
     bam_path: &str,
     region_dic: &RegionDic,
     n_cores: usize,
     reference: Option<&str>,
-) -> NormalizedDepth {
-    let mut reader = open_alignment_file(bam_path, reference).unwrap();
+    index_name: Option<&str>,
+) -> Result<NormalizedDepth, String> {
+    let open = || {
+        open_alignment_file_with_index(bam_path, reference, index_name)
+            .map_err(|e| format!("cannot open alignment file {}: {}", bam_path, e))
+    };
+    let mut reader = open()?;
 
     let mut counts_for_normalization = Vec::new();
     let mut gc_for_normalization = Vec::new();
@@ -238,37 +244,38 @@ pub fn get_normed_depth(
     } else {
         // Parallel processing using rayon
         use rayon::prelude::*;
-        let results: Vec<(f64, f64)> = norm_regions
+        let results: Result<Vec<(f64, f64)>, String> = norm_regions
             .par_iter()
             .map(|(region, gc)| {
-                let mut r = open_alignment_file(bam_path, reference).unwrap();
+                let mut r = open()?;
                 let nreads = get_read_count(&mut r, region, 0);
                 let region_length = (region.2 - region.1) as f64;
-                (nreads as f64 / region_length, *gc)
+                Ok((nreads as f64 / region_length, *gc))
             })
             .collect();
-        for (norm_depth, gc) in results {
+        for (norm_depth, gc) in results? {
             counts_for_normalization.push(norm_depth);
             gc_for_normalization.push(gc);
         }
     }
 
-    normalize(
+    Ok(normalize(
         &counts_for_normalization,
         &gc_for_normalization,
         &region_type_cn,
         read_length,
         true,
-    )
+    ))
 }
 
-/// Get normalized depth from a count file.
+/// Get normalized depth from a count file. Returns Err if the count file
+/// cannot be read or parsed.
 pub fn get_normed_depth_from_count(
     count_file: &str,
     region_dic: &RegionDic,
     read_length: f64,
-) -> NormalizedDepth {
-    let count_dic = get_count_from_file(count_file);
+) -> Result<NormalizedDepth, String> {
+    let count_dic = get_count_from_file(count_file)?;
 
     let mut counts_for_normalization = Vec::new();
     let mut gc_for_normalization = Vec::new();
@@ -308,26 +315,69 @@ pub fn get_normed_depth_from_count(
         }
     }
 
-    normalize(
+    Ok(normalize(
         &counts_for_normalization,
         &gc_for_normalization,
         &region_type_cn,
         read_length,
         true,
-    )
+    ))
 }
 
 /// Parse count file.
-fn get_count_from_file(count_file: &str) -> std::collections::HashMap<String, u64> {
+fn get_count_from_file(count_file: &str) -> Result<std::collections::HashMap<String, u64>, String> {
     let mut count_dic = std::collections::HashMap::new();
-    let content = std::fs::read_to_string(count_file).unwrap();
+    let content = std::fs::read_to_string(count_file)
+        .map_err(|e| format!("cannot read count file {}: {}", count_file, e))?;
     for line in content.lines() {
         let fields: Vec<&str> = line.split_whitespace().collect();
         if fields.len() >= 5 {
             let name = fields[3].to_string();
-            let count: u64 = fields.last().unwrap().parse().unwrap();
+            let last = fields[fields.len() - 1];
+            let count: u64 = last
+                .parse()
+                .map_err(|_| format!("bad count '{}' in count file {}", last, count_file))?;
             count_dic.entry(name).or_insert(count);
         }
     }
-    count_dic
+    Ok(count_dic)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_bam_is_an_error_not_a_panic() {
+        let r = get_normed_depth("/nonexistent/x.bam", &RegionDic::new(), 1, None, None);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn missing_count_file_is_an_error_not_a_panic() {
+        let r = get_normed_depth_from_count("/nonexistent/x_count.txt", &RegionDic::new(), 150.0);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn custom_index_path_is_used() {
+        // A symlinked BAM with no index next to it can only be opened through
+        // the custom index. Skipped when the benchmark data is not present.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let bam = root.join("benchmark/HG00096_pgx_regions.bam");
+        let bai = root.join("benchmark/HG00096_pgx_regions.bam.bai");
+        if !bam.exists() || !bai.exists() {
+            eprintln!("skipping: benchmark BAM not present");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("cyrius_idx_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let link = dir.join("sample.bam");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&bam, &link).unwrap();
+        let regions = crate::depth_calling::utilities::parse_region_file(crate::data::REGION_BED, "chr38");
+        let r = get_normed_depth(link.to_str().unwrap(), &regions, 1, None, bai.to_str());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(r.is_ok(), "{:?}", r.err());
+    }
 }

@@ -41,7 +41,11 @@ fn convert_to_main_allele(list_of_star: &[String]) -> Vec<String> {
         sorted.sort();
         converted_set.insert(sorted.join("_"));
     }
-    converted_set.into_iter().collect()
+    // Sorted so downstream picks (e.g. call_star68's last-tag fallback) are
+    // deterministic rather than following HashSet iteration order.
+    let mut out: Vec<String> = converted_set.into_iter().collect();
+    out.sort();
+    out
 }
 
 /// Return the star allele call and assign tags.
@@ -89,6 +93,14 @@ fn get_star(var_observed: &[String], dic: &HashMap<String, Vec<String>>) -> RawS
         .filter(|hap| !RARE_ALLELES.iter().any(|rare| hap.contains(rare)))
         .cloned()
         .collect();
+    // If every candidate is rare, filtering would empty the call; keep them all.
+    if non_rare.is_empty() {
+        return RawStarCall {
+            call_info: Some("more_than_one_match".to_string()),
+            candidate: raw_stars,
+            star_call: processed,
+        };
+    }
     let processed_filtered = convert_to_main_allele(&non_rare);
     if processed_filtered.len() == 1 {
         return RawStarCall {
@@ -237,6 +249,13 @@ fn call_star68(
     let mut hap_list: Vec<String> = Vec::new();
     for tag in &matchtag {
         hap_list.extend(tag.star_call.iter().cloned());
+    }
+    if hap_list.is_empty() {
+        return RawStarCall {
+            call_info: Some("no_match".to_string()),
+            candidate: vec![],
+            star_call: vec![],
+        };
     }
     let unique: std::collections::HashSet<&String> = hap_list.iter().collect();
     if unique.len() == 1 {
@@ -909,5 +928,37 @@ pub fn match_star(
             raw_call: Some(matchtag.candidate),
             clean_call: final_call_clean,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dic(entries: &[(&str, &[&str])]) -> HashMap<String, Vec<String>> {
+        entries
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.iter().map(|s| s.to_string()).collect()))
+            .collect()
+    }
+
+    #[test]
+    fn get_star_keeps_candidates_when_all_are_rare() {
+        // Every candidate carries a rare allele and they differ after main-allele
+        // conversion: the rare filter must not empty the call.
+        let d = dic(&[("g.X", &["*34_*1", "*39_*1"])]);
+        let out = get_star(&["g.X".to_string()], &d);
+        assert_eq!(out.call_info.as_deref(), Some("more_than_one_match"));
+        assert_eq!(out.star_call, vec!["*1_*34".to_string(), "*1_*39".to_string()]);
+    }
+
+    #[test]
+    fn call_star68_does_not_panic_when_matching_tag_is_all_rare() {
+        // Tag 0 (with g.42130692G>A) is no_match; tag 1 (after removing it)
+        // matches only rare-allele candidates.
+        let d = dic(&[("g.X", &["*34_*1", "*39_*1"])]);
+        let mut vars = vec!["g.42130692G>A".to_string(), "g.X".to_string()];
+        let out = call_star68(&mut vars, "star68", &d);
+        assert!(!out.star_call.is_empty());
     }
 }

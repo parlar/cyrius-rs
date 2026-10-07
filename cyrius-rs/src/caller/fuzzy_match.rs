@@ -18,6 +18,9 @@ const MIN_FUZZY_SCORE: f64 = 1.0;
 /// Maximum number of missing or extra variants allowed for a fuzzy match.
 const MAX_MISMATCH: usize = 2;
 
+/// Scores within this distance of the best are treated as tied.
+const TIE_EPS: f64 = 1e-9;
+
 /// Score a candidate variant multiset against observed variant multiset.
 /// Both inputs must be sorted.
 fn score_match(candidate: &[&str], observed: &[&str]) -> f64 {
@@ -69,10 +72,9 @@ pub fn fuzzy_match_star(
     }
 
     let mut best_score = f64::NEG_INFINITY;
-    let mut best_key = String::new();
-    let mut best_stars: Vec<String> = Vec::new();
+    let mut best_keys: Vec<&String> = Vec::new();
 
-    for (key, star_list) in dic {
+    for key in dic.keys() {
         if key == "NA" {
             continue;
         }
@@ -80,22 +82,36 @@ pub fn fuzzy_match_star(
         let candidate: Vec<&str> = key.split('_').collect();
 
         let score = score_match(&candidate, &sorted_observed);
-        if score > best_score {
+        if score > best_score + TIE_EPS {
             best_score = score;
-            best_key = key.clone();
-            best_stars = star_list.clone();
+            best_keys = vec![key];
+        } else if (score - best_score).abs() <= TIE_EPS {
+            best_keys.push(key);
+        }
+    }
+
+    // Report every tied best key rather than whichever HashMap iteration
+    // happened to reach first.
+    best_keys.sort();
+    let mut best_stars: Vec<String> = Vec::new();
+    for key in &best_keys {
+        for star in &dic[*key] {
+            if !best_stars.contains(star) {
+                best_stars.push(star.clone());
+            }
         }
     }
 
     if best_score >= MIN_FUZZY_SCORE && !best_stars.is_empty() {
-        let candidate: Vec<&str> = best_key.split('_').collect();
-        let missing: Vec<&&str> = candidate.iter().filter(|c| !sorted_observed.contains(c)).collect();
-        let extra: Vec<&&str> = sorted_observed.iter().filter(|o| !candidate.contains(o)).collect();
-
-        log::info!(
-            "fuzzy_match: score={:.1}, missing={:?}, extra={:?}, match={}",
-            best_score, missing, extra, best_stars.join(";")
-        );
+        for key in &best_keys {
+            let candidate: Vec<&str> = key.split('_').collect();
+            let missing: Vec<&&str> = candidate.iter().filter(|c| !sorted_observed.contains(c)).collect();
+            let extra: Vec<&&str> = sorted_observed.iter().filter(|o| !candidate.contains(o)).collect();
+            log::info!(
+                "fuzzy_match: score={:.1}, missing={:?}, extra={:?}, match={}",
+                best_score, missing, extra, dic[*key].join(";")
+            );
+        }
 
         let processed = convert_to_main_allele_simple(&best_stars);
 
@@ -122,7 +138,7 @@ pub fn fuzzy_match_star_cn1(
     }
 
     let mut best_score = f64::NEG_INFINITY;
-    let mut best_star = String::new();
+    let mut best_stars: Vec<String> = Vec::new();
 
     for (key, star) in dic {
         if key == "NA" {
@@ -131,23 +147,26 @@ pub fn fuzzy_match_star_cn1(
         let candidate: Vec<&str> = key.split('_').collect();
 
         let score = score_match(&candidate, &sorted_observed);
-        if score > best_score {
+        if score > best_score + TIE_EPS {
             best_score = score;
-            best_star = star.clone();
+            best_stars = vec![star.clone()];
+        } else if (score - best_score).abs() <= TIE_EPS && !best_stars.contains(star) {
+            best_stars.push(star.clone());
         }
     }
+    best_stars.sort();
 
-    if best_score >= MIN_FUZZY_SCORE && !best_star.is_empty() {
+    if best_score >= MIN_FUZZY_SCORE && !best_stars.is_empty() {
         log::info!(
             "fuzzy_match_cn1: score={:.1}, match={}",
-            best_score, best_star
+            best_score, best_stars.join(";")
         );
 
-        let processed = convert_to_main_allele_simple(&[best_star.clone()]);
+        let processed = convert_to_main_allele_simple(&best_stars);
 
         Some(RawStarCall {
             call_info: Some(format!("fuzzy_match(score={:.1})", best_score)),
-            candidate: vec![best_star],
+            candidate: best_stars,
             star_call: processed,
         })
     } else {
@@ -168,5 +187,45 @@ fn convert_to_main_allele_simple(stars: &[String]) -> Vec<String> {
         sorted.sort();
         result_set.insert(sorted.join("_"));
     }
-    result_set.into_iter().collect()
+    let mut out: Vec<String> = result_set.into_iter().collect();
+    out.sort();
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn obs(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn tied_best_keys_are_all_reported() {
+        // Both keys score 3 - 0.5 = 2.5 against the observed set.
+        let dic: HashMap<String, Vec<String>> = [
+            ("a_b_c_d".to_string(), vec!["*10_*20".to_string()]),
+            ("a_b_c_e".to_string(), vec!["*20_*4".to_string()]),
+        ]
+        .into_iter()
+        .collect();
+        let out = fuzzy_match_star(&obs(&["a", "b", "c"]), &dic).unwrap();
+        let mut calls = out.star_call.clone();
+        calls.sort();
+        assert_eq!(calls, vec!["*10_*20".to_string(), "*20_*4".to_string()]);
+    }
+
+    #[test]
+    fn tied_best_keys_are_all_reported_cn1() {
+        let dic: HashMap<String, String> = [
+            ("a_b_d".to_string(), "*10".to_string()),
+            ("a_b_e".to_string(), "*4".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let out = fuzzy_match_star_cn1(&obs(&["a", "b"]), &dic).unwrap();
+        let mut calls = out.star_call.clone();
+        calls.sort();
+        assert_eq!(calls, vec!["*10".to_string(), "*4".to_string()]);
+    }
 }
