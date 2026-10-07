@@ -1,0 +1,57 @@
+# GeT-RM CYP2D6 consensus genotypes for validation
+# Source: Pratt et al. 2019, J Mol Diagn 21(6):1034-1052 (PMC6854474)
+# CDC GeT-RM Pharmacogenetics program
+# Format: sample_id	cyp2d6_diplotype	source_table	notes
+HG00111	*3/*3	Table4	null/null
+HG00337	*2x2/*22	Table4	duplication
+HG00373	*2/*2	Table4	normal
+HG00421	*2/*10x2	Table4	duplication, decreased function
+HG00436	*2x2/*71	Table3	duplication, revised
+HG00463	*36+*10/*36+*10	Table4	tandem homozygous
+HG00589	*1/*21	Table3	revised
+HG01086	*178/*31	Table4	*178 = *1 + g.42128876C>T (PharmVar update)
+HG01094	*1/*31	Table4
+HG01108	*2/*106	Table4
+HG01190	*68+*4/*5	Table3	hybrid + deletion, revised
+HG01680	*28/*59	Table4
+HG02373	*14/*36+*10	Table4	tandem
+HG03225	*5/*56	Table4	gene deletion + rare
+HG03246	*5/*43	Table4	gene deletion + rare
+HG03259	*5/*106	Table4	gene deletion + rare
+HG03619	*2/*113	Table4
+HG03643	*2/*7	Table4
+HG03703	*1/*99	Table4
+HG03780	*1/*112	Table4
+HG03781	*2/*99	Table4
+HG03882	*1/*112	Table4
+HG04206	*2/*113	Table4
+NA06989	*9/*9	Table4	decreased/decreased
+NA11832	*1/*68+*4	Table3	hybrid, revised
+NA12154	*68+*4/*33	Table4	hybrid
+NA12878	*3/*68+*4	Table3	null + hybrid (HG001), revised
+NA18526	*1/*36+*36+*10	Table3	tandem duplication, revised
+NA18544	*10/*41	Table3	decreased/decreased, revised
+NA18545	*5/*36x2+*10x2	Table4	deletion + tandem duplication
+NA18563	*1/*36+*10	Table3	tandem, revised
+NA18564	*2/*36+*10	Table3	tandem, revised
+NA18565	*10/*36x2	Table3	tandem, revised
+NA18572	*36+*10/*41	Table3	tandem + decreased, revised
+NA18617	*36+*10/*36+*10	Table3	tandem homozygous, revised
+NA18632	*36+*36+*10/*52	Table4	tandem + rare
+NA18642	*36+*10/*1+*90	Table4	tandem + rare
+NA18959	*2/*36+*10	Table3	tandem, revised
+NA18973	*1/*21	Table3	revised
+NA18980	*2/*36+*10	Table3	tandem, revised
+NA19143	*2(*45)/*10	Table3	revised
+NA19207	*2x2/*10	Table3	duplication, revised
+NA19317	*5/*5	Table4	homozygous deletion (no gene)
+NA19777	*1/*82	Table4
+NA19785	*1/*13+*2	Table3	hybrid tandem, revised
+NA19819	*2/*4x2	Table3	duplication of null, revised
+NA19908	*1/*46	Table3	revised
+NA19917	*1/*40	Table3	revised
+NA19920	*1/*4x2	Table3	duplication of null, revised
+NA20289	*6/*11	Table4	null/decreased
+NA20803	*2/*22	Table4
+NA20875	*1/*111	Table4
+NA21105	*3/*111	Table4	null + rare
