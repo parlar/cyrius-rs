@@ -129,8 +129,20 @@ struct ResolvedVariant {
 ///
 /// `end` is one past the later position: the region is half-open, so stopping
 /// at the position itself drops any read whose leftmost mapped base is exactly
-/// the later variant. `start` is clamped at 0 so a variant at position 0
-/// cannot produce a negative coordinate.
+/// the later variant.
+///
+/// `start` is `min(pos) - 1`, one base wider than it needs to be. An htslib
+/// region query returns every read *overlapping* `[beg, end)`, not only reads
+/// starting inside it — a query at a single position comes back with reads
+/// that start ~150 bp earlier — so `start = min(pos)` would already fetch
+/// everything covering the earlier variant. The `-1` is a harmless leftover of
+/// the very misconception that produced the `end` bug. It is kept deliberately:
+/// narrowing a live fetch window is a behaviour change, not a comment fix.
+///
+/// `start` is clamped at 0 so a variant at position 0 cannot produce a negative
+/// coordinate. That clamp is unreachable on real CYP2D6 data, where positions
+/// are ~42 Mbp; it guards a bad coordinate from a malformed variant file, not
+/// any live case.
 ///
 /// Returns `(start, end)`.
 fn single_fetch_window(pos1: i64, pos2: i64) -> (i64, i64) {
@@ -438,8 +450,21 @@ pub fn disambiguate(
     let dt2_h1_set: HashSet<&str> = vars_dt2_h1.iter().map(|s| s.as_str()).collect();
     let dt2_h2_set: HashSet<&str> = vars_dt2_h2.iter().map(|s| s.as_str()).collect();
 
-    // Find pairs of variants where the two options predict different phasing
-    let all_vars_vec: Vec<&str> = all_vars.into_iter().collect();
+    // Find pairs of variants where the two options predict different phasing.
+    //
+    // `all_vars` is a HashSet, and std's RandomState seeds its iteration order
+    // per process, so draining it unsorted makes both the order of
+    // `phasing_pairs` and the (va, vb) assignment within each pair vary from
+    // run to run. Every consumer downstream happens to be order-symmetric
+    // today — `are_cis_in_diplotype` is symmetric in a/b, `single_fetch_window`
+    // is symmetric, the two-fetch branch merges both fetches so swapping
+    // rv1/rv2 only swaps `entry.0`/`entry.1` and cis/trans survive that swap,
+    // and the scores are order-independent sums — so the scores and the
+    // resolved call are stable. The debug log is not, and any future
+    // order-sensitive tiebreak would flip calls between runs. Sort for a
+    // reproducible order.
+    let mut all_vars_vec: Vec<&str> = all_vars.into_iter().collect();
+    all_vars_vec.sort_unstable();
     let mut phasing_pairs: Vec<(&str, &str, bool)> = Vec::new(); // (var_a, var_b, cis_in_dt1)
 
     for i in 0..all_vars_vec.len() {
@@ -620,14 +645,17 @@ mod tests {
         // position; at `end == pos` a read whose leftmost mapped base IS the
         // later variant falls outside the window and is never fetched.
         let (start, end) = single_fetch_window(42_126_611, 42_126_666);
-        assert!(
-            start <= 42_126_610,
-            "start {start} must reach at least one base before the earlier variant"
+        // Exact equality: `start <= 42_126_610` also passes for -1, so it does
+        // not guard the clamp, and `end > 42_126_666` also passes for
+        // 99_999_999.
+        assert_eq!(
+            start, 42_126_610,
+            "start must reach exactly one base before the earlier variant, got {start}"
         );
-        assert!(
-            end > 42_126_666,
-            "end {end} must be past the later variant 42126666 so a read \
-             starting exactly there is still fetched"
+        assert_eq!(
+            end, 42_126_667,
+            "end must be exactly one past the later variant 42126666 so a read \
+             starting exactly there is still fetched, got {end}"
         );
         // Argument order must not matter.
         assert_eq!(single_fetch_window(42_126_666, 42_126_611), (start, end));
@@ -639,5 +667,136 @@ mod tests {
         let (start, end) = single_fetch_window(0, 7);
         assert_eq!(start, 0, "start must be clamped to 0, got {start}");
         assert_eq!(end, 8, "end must be one past the later variant, got {end}");
+    }
+
+    /// 0-based position of the earlier of the fixture's two phasing variants.
+    const FIXTURE_POS_EARLY: i64 = 1000;
+    /// 0-based position of the later one: 100 bp on, so `distance <= 120` and
+    /// `check_phasing` takes the single-fetch path under either flag setting.
+    const FIXTURE_POS_LATE: i64 = 1100;
+    /// 0-based start of the mate. With CIGAR 50M its last mapped base is
+    /// exactly `FIXTURE_POS_EARLY`.
+    const FIXTURE_MATE_POS: i64 = 951;
+
+    /// Write an indexed BAM holding one two-record pair for the single-fetch
+    /// phasing window.
+    ///
+    /// Record 1 (the mate) is 50M from `FIXTURE_MATE_POS`, so its last mapped
+    /// base is exactly `FIXTURE_POS_EARLY`, where it carries the ALT. Record 2
+    /// starts at exactly `FIXTURE_POS_LATE` — the later variant — and carries
+    /// the ALT there. They share one qname, so the two observations land in the
+    /// same `read_alleles` entry and tally as a single cis read, but only if
+    /// the fetch window actually reaches record 2.
+    ///
+    /// NOTE: `bam::Record::new()` leaves `flags = 4` (unmapped), and htslib's
+    /// `bam_endpos` ignores the CIGAR for an unmapped record, so an unflagged
+    /// record spans only `[pos, pos + 1)` and silently drops out of region
+    /// queries. The `set_flags` calls below are load-bearing.
+    fn write_phasing_pair_bam(dir: &std::path::Path) -> std::path::PathBuf {
+        let mut header = bam::header::Header::new();
+        let mut sq = bam::header::HeaderRecord::new(b"SQ");
+        sq.push_tag(b"SN", "chr22");
+        sq.push_tag(b"LN", 50_818_468);
+        header.push_record(&sq);
+        let path = dir.join("phasing_pair.bam");
+        {
+            let mut writer = bam::Writer::from_path(&path, &header, bam::Format::Bam).unwrap();
+            let cigar = bam::record::CigarString(vec![bam::record::Cigar::Match(50)]);
+            let qual = vec![30u8; 50];
+            let span = FIXTURE_POS_LATE + 50 - FIXTURE_MATE_POS;
+
+            // The mate: ALT 'C' against REF 'G' at FIXTURE_POS_EARLY.
+            let mut mate_seq = vec![b'G'; 50];
+            mate_seq[(FIXTURE_POS_EARLY - FIXTURE_MATE_POS) as usize] = b'C';
+            let mut mate = bam::Record::new();
+            mate.set(b"pair1", Some(&cigar), &mate_seq, &qual);
+            mate.set_tid(0);
+            mate.set_pos(FIXTURE_MATE_POS);
+            mate.set_mapq(60);
+            mate.set_mtid(0);
+            mate.set_mpos(FIXTURE_POS_LATE);
+            mate.set_insert_size(span);
+            // PAIRED | PROPER_PAIR | MATE_REVERSE — mapped, primary, not a dup.
+            mate.set_flags(0x1 | 0x2 | 0x20);
+            writer.write(&mate).unwrap();
+
+            // The read starting exactly at the later variant: ALT 'T' against
+            // REF 'A' at FIXTURE_POS_LATE, query offset 0.
+            let mut read_seq = vec![b'A'; 50];
+            read_seq[0] = b'T';
+            let mut read = bam::Record::new();
+            read.set(b"pair1", Some(&cigar), &read_seq, &qual);
+            read.set_tid(0);
+            read.set_pos(FIXTURE_POS_LATE);
+            read.set_mapq(60);
+            read.set_mtid(0);
+            read.set_mpos(FIXTURE_MATE_POS);
+            read.set_insert_size(-span);
+            // PAIRED | PROPER_PAIR | REVERSE
+            read.set_flags(0x1 | 0x2 | 0x10);
+            writer.write(&read).unwrap();
+        }
+        bam::index::build(
+            &path,
+            None::<&std::path::PathBuf>,
+            bam::index::Type::Bai,
+            1,
+        )
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn check_phasing_fetches_a_read_starting_exactly_at_the_later_variant() {
+        // Finding #52, end to end. The single-fetch region used to be
+        // [min(pos) - 1, max(pos)); it is half-open, so the read whose leftmost
+        // mapped base is exactly the later variant was never fetched. Its
+        // mate's ALT at the earlier variant then sat alone in the entry as
+        // (Some(true), None) and was dropped as uninformative, so the pair
+        // tallied (0, 0) instead of (1, 0).
+        //
+        // The two window-arithmetic tests above cannot catch that: reverting
+        // the call site to `let end = pos1.max(pos2);` leaves both of them
+        // green and only this test red. That is what makes the fix
+        // demonstrably non-vacuous.
+        let dir = std::env::temp_dir()
+            .join(format!("cyrius_phase_window_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bam_path = write_phasing_pair_bam(&dir);
+        let mut reader = bam::IndexedReader::from_path(&bam_path).unwrap();
+
+        let rv_early = ResolvedVariant {
+            pos_0based: FIXTURE_POS_EARLY,
+            alt_bases: "C".to_string(),
+            ref_bases: "G".to_string(),
+        };
+        let rv_late = ResolvedVariant {
+            pos_0based: FIXTURE_POS_LATE,
+            alt_bases: "T".to_string(),
+            ref_bases: "A".to_string(),
+        };
+
+        let single = check_phasing(&mut reader, "chr22", &rv_early, &rv_late, false);
+        // 100 bp apart, so --phase-readpair takes the same single-fetch path.
+        let readpair = check_phasing(&mut reader, "chr22", &rv_early, &rv_late, true);
+
+        // Clean up before the assertions so a failure still leaves nothing behind.
+        drop(reader);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(
+            single,
+            (1, 0),
+            "the ALT-carrying read starting exactly at {FIXTURE_POS_LATE} plus \
+             its mate's ALT at {FIXTURE_POS_EARLY} are one cis observation; got \
+             (cis, trans) = {single:?}, which is what a window ending at the \
+             later position returns"
+        );
+        assert_eq!(
+            readpair,
+            (1, 0),
+            "the two variants are only 100 bp apart, so --phase-readpair must \
+             take the same single-fetch path; got {readpair:?}"
+        );
     }
 }
