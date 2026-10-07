@@ -210,3 +210,41 @@ fn complement_base(base: char) -> char {
 fn reverse_complement(sequence: &str) -> String {
     sequence.chars().rev().map(complement_base).collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Review finding #12: the g.42128445delCTGCC row in
+    /// data/CYP2D6_target_variant_38.txt (line 64) was off-by-one on its
+    /// D6 position and had its ALT/REF alleles swapped, so the site was
+    /// never counted. Pin the corrected row as actually parsed by
+    /// get_snp_position() (the loader `main.rs` uses for this file),
+    /// through the real embedded data, not a hand-rolled re-parse.
+    #[test]
+    fn target_variant_delctgcc_site_is_parsed_with_corrected_position_and_alleles() {
+        let var_db = get_snp_position(crate::data::TARGET_VARIANT, "38", None);
+
+        // This is the 63rd non-comment data row in the file (0-based index 62).
+        let d6_key = "42128443_62";
+        let d7_key = "42142135_62";
+
+        assert_eq!(
+            var_db.dsnp1.get(d6_key).map(|s| s.as_str()),
+            Some("GCT_GCCTGCCT"),
+            "corrected D6-side entry for g.42128445delCTGCC not found at {d6_key}; dsnp1 did not \
+             parse the fixed position/alleles"
+        );
+        assert_eq!(
+            var_db.dsnp2.get(d7_key).map(|s| s.as_str()),
+            Some("GCT_GCCTGCCT"),
+            "corrected D7-side entry for g.42128445delCTGCC not found at {d7_key}"
+        );
+
+        // The old, mis-specified key must be gone.
+        assert!(
+            !var_db.dsnp1.contains_key("42128442_62"),
+            "stale off-by-one key 42128442_62 should no longer be present"
+        );
+    }
+}
