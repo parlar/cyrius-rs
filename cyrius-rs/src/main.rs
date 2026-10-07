@@ -7,7 +7,8 @@ use std::path::Path;
 use cyrius_rs::caller::call_variants::{
     call_cn_snp, call_cn_var, call_cn_var_homo, call_exon9gc, call_var42126938,
     call_var42127526_var42127556, call_var42127803hap, call_var42130655ins_a,
-    get_allele_counts_var42128936, get_called_variants, update_var42128936, NOISY_VAR,
+    get_allele_counts_var42128936, get_called_variants, update_var42128936, CNV_ACCEPTED,
+    NOISY_VAR,
 };
 use cyrius_rs::caller::cnv_hybrid::get_cnvtag;
 use cyrius_rs::caller::construct_star_table::get_hap_table;
@@ -37,37 +38,6 @@ const HAPLOTYPE_VAR: &[&str] = &[
     "g.42127803C>T",
     "g.42127526C>T_g.42127556T>C",
     "g.42130655-42130656insA",
-];
-
-const CNV_ACCEPTED: &[&str] = &[
-    "star5_star5",
-    "star13_star13",
-    "star13intron1_star13intron1",
-    "star5",
-    "star13",
-    "star13intron1",
-    "star5_star5_star68",
-    "star5_star68",
-    "cn2",
-    "exon9hyb_star5",
-    "dup_star13",
-    "dup_star13intron1",
-    "star13_star68",
-    "cn3",
-    "exon9hyb",
-    "star68",
-    "cn4",
-    "exon9hyb_exon9hyb",
-    "star68_star68",
-    "dup_exon9hyb",
-    "dup_star68",
-    "exon9hyb_star68",
-    "cn5",
-    "exon9hyb_exon9hyb_exon9hyb",
-    "star68_star68_star68",
-    "cn6",
-    "exon9hyb_exon9hyb_exon9hyb_exon9hyb",
-    "star68_star68_star68_star68",
 ];
 
 #[derive(Parser, Debug)]

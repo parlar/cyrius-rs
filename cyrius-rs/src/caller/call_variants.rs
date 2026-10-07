@@ -17,40 +17,60 @@ const INTRON1_BP_APPROX: i64 = 42130500;
 const EXON9_BP_APPROX: i64 = 42126611;
 const P_CUTOFF: f64 = 0.05;
 
+/// The CNV tag vocabulary: (tag, total_cn, exon9_and_downstream, exon9_to_intron1,
+/// intron1_upstream). This is the single source of truth for both the accepted-tag
+/// vocabulary (`CNV_ACCEPTED`) and the CN-pattern lookup table
+/// (`cnvtag_lookup_table`), so the two can never drift apart (finding #26).
+pub const CNVTAG_ENTRIES: [(&str, u32, u32, u32, u32); 28] = [
+    ("star5_star5", 2, 0, 0, 0),
+    ("star13_star13", 2, 2, 0, 0),
+    ("star13intron1_star13intron1", 2, 2, 2, 0),
+    ("star5", 3, 1, 1, 1),
+    ("star13", 3, 2, 1, 1),
+    ("star13intron1", 3, 2, 2, 1),
+    ("star5_star5_star68", 3, 0, 0, 1),
+    ("star5_star68", 4, 1, 1, 2),
+    ("cn2", 4, 2, 2, 2),
+    ("exon9hyb_star5", 4, 2, 2, 2),
+    ("dup_star13", 4, 3, 2, 2),
+    ("dup_star13intron1", 4, 3, 3, 2),
+    ("star13_star68", 4, 2, 1, 2),
+    ("cn3", 5, 3, 3, 3),
+    ("exon9hyb", 5, 2, 3, 3),
+    ("star68", 5, 2, 2, 3),
+    ("cn4", 6, 4, 4, 4),
+    ("exon9hyb_exon9hyb", 6, 2, 4, 4),
+    ("star68_star68", 6, 2, 2, 4),
+    ("dup_exon9hyb", 6, 3, 4, 4),
+    ("dup_star68", 6, 3, 3, 4),
+    ("exon9hyb_star68", 6, 2, 3, 4),
+    ("cn5", 7, 5, 5, 5),
+    ("exon9hyb_exon9hyb_exon9hyb", 7, 2, 5, 5),
+    ("star68_star68_star68", 7, 2, 2, 5),
+    ("cn6", 8, 6, 6, 6),
+    ("exon9hyb_exon9hyb_exon9hyb_exon9hyb", 8, 2, 6, 6),
+    ("star68_star68_star68_star68", 8, 2, 2, 6),
+];
+
+/// Pull just the tag names out of a `CNVTAG_ENTRIES`-shaped array, preserving order.
+const fn tags_of<'a, const N: usize>(entries: &[(&'a str, u32, u32, u32, u32); N]) -> [&'a str; N] {
+    let mut tags = [""; N];
+    let mut i = 0;
+    while i < N {
+        tags[i] = entries[i].0;
+        i += 1;
+    }
+    tags
+}
+
+/// The accepted CNV tag vocabulary, derived from `CNVTAG_ENTRIES` so it can never
+/// list a tag the lookup table doesn't also know about, or vice versa (finding #26).
+pub const CNV_ACCEPTED: [&str; 28] = tags_of(&CNVTAG_ENTRIES);
+
 /// CNVTAG lookup table mapping cnv tags to CN regions.
 pub fn cnvtag_lookup_table() -> HashMap<String, CnRegions> {
     let mut m = HashMap::new();
-    let entries: Vec<(&str, u32, u32, u32, u32)> = vec![
-        ("star5_star5", 2, 0, 0, 0),
-        ("star13_star13", 2, 2, 0, 0),
-        ("star13intron1_star13intron1", 2, 2, 2, 0),
-        ("star5", 3, 1, 1, 1),
-        ("star13", 3, 2, 1, 1),
-        ("star13intron1", 3, 2, 2, 1),
-        ("star5_star5_star68", 3, 0, 0, 1),
-        ("star5_star68", 4, 1, 1, 2),
-        ("cn2", 4, 2, 2, 2),
-        ("exon9hyb_star5", 4, 2, 2, 2),
-        ("dup_star13", 4, 3, 2, 2),
-        ("dup_star13intron1", 4, 3, 3, 2),
-        ("star13_star68", 4, 2, 1, 2),
-        ("cn3", 5, 3, 3, 3),
-        ("exon9hyb", 5, 2, 3, 3),
-        ("star68", 5, 2, 2, 3),
-        ("cn4", 6, 4, 4, 4),
-        ("exon9hyb_exon9hyb", 6, 2, 4, 4),
-        ("star68_star68", 6, 2, 2, 4),
-        ("dup_exon9hyb", 6, 3, 4, 4),
-        ("dup_star68", 6, 3, 3, 4),
-        ("exon9hyb_star68", 6, 2, 3, 4),
-        ("cn5", 7, 5, 5, 5),
-        ("exon9hyb_exon9hyb_exon9hyb", 7, 2, 5, 5),
-        ("star68_star68_star68", 7, 2, 2, 5),
-        ("cn6", 8, 6, 6, 6),
-        ("exon9hyb_exon9hyb_exon9hyb_exon9hyb", 8, 2, 6, 6),
-        ("star68_star68_star68_star68", 8, 2, 2, 6),
-    ];
-    for (tag, total, exon9, exon9_intron1, intron1) in entries {
+    for (tag, total, exon9, exon9_intron1, intron1) in CNVTAG_ENTRIES {
         m.insert(
             tag.to_string(),
             CnRegions {
@@ -596,5 +616,41 @@ mod tests {
         let d6_count = vec![11usize, 2usize];
         let d7_count = vec![0usize, 2usize];
         assert_eq!(call_exon9gc(&d6_count, &d7_count, Some(2)), Some(2));
+    }
+
+    // Finding #26: CNV_ACCEPTED (main.rs) and cnvtag_lookup_table()'s keys used to be
+    // two independently maintained lists that happened to agree. Both now derive from
+    // the single CNVTAG_ENTRIES const below, so the three tests that follow pin the
+    // vocabulary's shape rather than re-asserting the (now tautological) "do the two
+    // lists match" fact.
+
+    // Pins the vocabulary size as a literal so an accidental addition or deletion in
+    // CNVTAG_ENTRIES shows up as a test failure rather than silently changing which
+    // cnvtags main.rs's no-call gate accepts.
+    #[test]
+    fn cnv_accepted_has_the_documented_28_tags() {
+        assert_eq!(CNV_ACCEPTED.len(), 28);
+        assert_eq!(CNVTAG_ENTRIES.len(), 28);
+    }
+
+    // Detects a duplicate tag in CNVTAG_ENTRIES: HashMap::insert silently collapses a
+    // repeated key, so the map would end up shorter than the entries list even though
+    // CNV_ACCEPTED (derived from the same list) still carries the duplicate twice.
+    // The call_cn_var unwrap (finding #26) depends on every accepted tag having
+    // exactly one row, so a collapse here is exactly the failure mode to catch.
+    #[test]
+    fn cnvtag_lookup_table_has_one_entry_per_const_entry() {
+        assert_eq!(cnvtag_lookup_table().len(), CNVTAG_ENTRIES.len());
+    }
+
+    // The invariant finding #26 actually cares about: get_total_cn_per_site's
+    // lookup.get(cnvtag)? must resolve for every tag main.rs's CNV_ACCEPTED gate lets
+    // through, or call_cn_var's unwrap (call_variants.rs:173) panics.
+    #[test]
+    fn every_accepted_cnvtag_resolves_in_lookup_table() {
+        let table = cnvtag_lookup_table();
+        for tag in CNV_ACCEPTED {
+            assert!(table.get(tag).is_some(), "accepted tag {tag:?} has no lookup table row");
+        }
     }
 }
