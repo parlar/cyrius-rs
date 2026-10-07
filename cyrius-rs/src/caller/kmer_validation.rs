@@ -118,15 +118,26 @@ impl KmerCounts {
             .collect()
     }
 
-    /// Overall D6/(D6+D7) ratio across all positions.
-    pub fn overall_ratio(&self) -> f64 {
+    /// Overall D6/(D6+D7) ratio across all positions, or `None` when no
+    /// diagnostic k-mers were counted at all.
+    ///
+    /// The guard is on the *counts*, not on `total_reads`: the ratio is
+    /// undefined exactly when its denominator (D6+D7) is zero, whatever the
+    /// cause -- a chromosome missing from the BAM header, a failed region
+    /// fetch, records without SEQ, or reads that simply carry no diagnostic
+    /// k-mer. `total_reads > 0` with no matches is just as unmeasurable as
+    /// no reads at all, and `matched_reads == 0` is equivalent to this test
+    /// (a matched read always increments one of the two counters). Returning
+    /// `None` keeps "no data" in the type, so it cannot be mistaken for a
+    /// measured 50/50 ratio.
+    pub fn overall_ratio(&self) -> Option<f64> {
         let total_d6: u64 = self.d6_counts.iter().map(|&c| c as u64).sum();
         let total_d7: u64 = self.d7_counts.iter().map(|&c| c as u64).sum();
         let total = total_d6 + total_d7;
         if total == 0 {
-            0.5
+            None
         } else {
-            total_d6 as f64 / total as f64
+            Some(total_d6 as f64 / total as f64)
         }
     }
 }
@@ -265,12 +276,16 @@ pub struct KmerStructuralClass {
 /// supplementary information but does NOT drive the classification, since
 /// the 189-position panel has too much inherent ratio variation for reliable
 /// changepoint detection on regional BAMs.
+///
+/// `overall` must be a *measured* ratio: it is taken as an argument rather
+/// than read back off `counts` so that this function cannot invent a
+/// category out of a default ratio when nothing was counted. The caller
+/// handles the no-data case (see `KmerCounts::overall_ratio`).
 fn classify_from_ratios(
     counts: &KmerCounts,
     total_cn: u32,
+    overall: f64,
 ) -> KmerStructuralClass {
-    let overall = counts.overall_ratio();
-
     // Estimated D6 and D7 copy numbers
     let estimated_d6_cn = total_cn as f64 * overall;
     let estimated_d7_cn = total_cn as f64 - estimated_d6_cn;
@@ -340,7 +355,8 @@ pub struct KmerValidationResult {
 
 impl KmerValidationResult {
     /// A no-result placeholder used when validation can't run (e.g. the BAM
-    /// fails to open). Reports no agreement and no detection.
+    /// fails to open, or not a single diagnostic k-mer was counted). Reports
+    /// no agreement and no detection.
     fn unavailable(reason: &str) -> Self {
         KmerValidationResult {
             kmer_category: format!("unavailable: {}", reason),
@@ -457,10 +473,22 @@ pub fn validate_with_kmers(
     }
 
     let position_ratios = merged.ratios(5);
-    let overall_ratio = merged.overall_ratio();
+
+    // No diagnostic k-mers at all means there is nothing to validate against:
+    // report it as unavailable rather than letting a default ratio fabricate
+    // an estimate that happens to "agree" with the depth call.
+    let overall_ratio = match merged.overall_ratio() {
+        Some(r) => r,
+        None => {
+            return KmerValidationResult::unavailable(&format!(
+                "no diagnostic k-mers counted ({} reads scanned, {} matched)",
+                merged.total_reads, merged.matched_reads
+            ))
+        }
+    };
 
     // Classify structural type using D6 copy number
-    let classification = classify_from_ratios(&merged, total_cn);
+    let classification = classify_from_ratios(&merged, total_cn, overall_ratio);
 
     // Compare expected D6 CN (from depth cnvtag) vs observed D6 CN (from k-mers)
     let expected = expected_d6_cn(depth_cnvtag, total_cn);
@@ -494,5 +522,116 @@ pub fn validate_with_kmers(
         d6_counts: merged.d6_counts,
         d7_counts: merged.d7_counts,
         segments_summary,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Write a BAM holding nothing but an `@SQ` header line for `chr22`, plus
+    /// its BAI index, and return its path. Any region fetched from it yields
+    /// zero reads, which leaves the k-mer counters in exactly the state a
+    /// missing contig, a failed region fetch or reads without SEQ produce.
+    fn write_empty_indexed_bam(dir: &std::path::Path) -> std::path::PathBuf {
+        let mut header = bam::header::Header::new();
+        let mut sq = bam::header::HeaderRecord::new(b"SQ");
+        sq.push_tag(b"SN", "chr22");
+        sq.push_tag(b"LN", 50_818_468);
+        header.push_record(&sq);
+        let path = dir.join("empty.bam");
+        {
+            let _writer = bam::Writer::from_path(&path, &header, bam::Format::Bam).unwrap();
+        }
+        bam::index::build(
+            &path,
+            None::<&std::path::PathBuf>,
+            bam::index::Type::Bai,
+            1,
+        )
+        .unwrap();
+        path
+    }
+
+    fn counts(d6: Vec<u32>, d7: Vec<u32>) -> KmerCounts {
+        let matched = d6.iter().chain(d7.iter()).map(|&c| c as u64).sum();
+        KmerCounts {
+            d6_counts: d6,
+            d7_counts: d7,
+            total_reads: matched,
+            matched_reads: matched,
+        }
+    }
+
+    #[test]
+    fn overall_ratio_is_none_when_nothing_was_counted() {
+        // All-zero counters: the ratio's denominator is zero, so there is no
+        // ratio -- not a 50/50 one. Holds whether or not reads were scanned.
+        assert_eq!(counts(vec![0; 4], vec![0; 4]).overall_ratio(), None);
+        let mut scanned_but_unmatched = counts(vec![0; 4], vec![0; 4]);
+        scanned_but_unmatched.total_reads = 1000;
+        assert_eq!(scanned_but_unmatched.overall_ratio(), None);
+        assert_eq!(counts(Vec::new(), Vec::new()).overall_ratio(), None);
+    }
+
+    #[test]
+    fn overall_ratio_is_the_measured_fraction_when_counts_exist() {
+        assert_eq!(counts(vec![3, 1], vec![3, 3]).overall_ratio(), Some(0.4));
+        // A single count on one side is still a measurement, not "no data".
+        assert_eq!(counts(vec![0, 1], vec![0, 0]).overall_ratio(), Some(1.0));
+        assert_eq!(counts(vec![0, 0], vec![0, 1]).overall_ratio(), Some(0.0));
+    }
+
+    #[test]
+    fn zero_kmer_counts_report_unavailable_not_agreement() {
+        // Finding #50: with no diagnostic k-mers counted, overall_ratio()
+        // used to hand back a fabricated 0.5, so for a cn2 sample
+        // (total_cn = 4) the estimate came out at exactly 4 * 0.5 = 2.0,
+        // which is precisely expected_d6_cn("cn2", 4) -- a validation that
+        // "agreed" on no data at all, and called the category "normal".
+        let dir =
+            std::env::temp_dir().join(format!("cyrius_kmer_zero_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bam_path = write_empty_indexed_bam(&dir);
+
+        let result = validate_with_kmers(
+            bam_path.to_str().unwrap(),
+            "chr22",
+            4,
+            None,
+            "cn2",
+            None,
+            None,
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(
+            result.matched_reads, 0,
+            "an empty BAM must yield no k-mer-matched reads"
+        );
+        assert!(
+            !result.agrees,
+            "with zero diagnostic k-mers counted there is nothing to agree with, \
+             but agrees={} category={:?} overall_ratio={} estimated_d6_cn={}",
+            result.agrees, result.kmer_category, result.overall_ratio, result.estimated_d6_cn,
+        );
+        assert!(
+            result.kmer_category.starts_with("unavailable"),
+            "zero counts must report an 'unavailable' category, got {:?}",
+            result.kmer_category
+        );
+        assert_eq!(
+            result.overall_ratio, 0.0,
+            "zero counts must not report a measured ratio"
+        );
+        assert_eq!(
+            result.estimated_d6_cn, 0.0,
+            "zero counts must not report an estimated D6 copy number"
+        );
     }
 }
