@@ -4,20 +4,38 @@ use rust_htslib::bam::{self, Read as BamRead};
 /// CYP2D7 is on the reverse strand at chr22:42139000-42144575.
 /// Gene direction (5'→3') runs from high coords to low coords.
 ///
-/// Sub-regions (from StellarPGx test3.bed):
-///   D7 intron4-intron8: chr22:42139500-42140600  (gene body, 3' half)
-///   D7 exon9:           chr22:42140600-42142500  (exon9 region)
+/// Sub-regions:
+///   D7 exon9:           chr22:42140061-42140855  (exon9 region)
+///   D7 intron4-intron8: chr22:42140855-42142569  (gene body, 3' half)
 ///   D7 exon2-intron8:   chr22:42140600-42143600  (gene body, broad)
 ///   D7 5'UTR-intron1:   chr22:42143600-42144575  (promoter/5' end)
+///
+/// D7_EXON9_* and D7_IN4_IN8_* are derived from `data/CYP2D6_SNP_38.txt`
+/// (review finding #14 — they used to be swapped, inverting the *36
+/// gene-conversion signal). That file's D7 column anchors each named
+/// CYP2D6 feature to a CYP2D7 coordinate via the diagnostic D6/D7 SNP
+/// pairs. The exon9-annotated rows (0-indexed sites 7 and 8) place exon9
+/// at D7 42140315 (16bp allele, to 42140330) and 42140362 (10bp allele, to
+/// 42140371). The boundary on each side is drawn at the midpoint to the
+/// nearest neighboring annotated feature. On the 3' (low-coord) side, the
+/// nearest neighbor is the last downstream_exon9 row at 42139807 (1bp), so
+/// midpoint(42139807, 42140315) = 42140061. On the 5' (high-coord) side,
+/// the nearest neighbor is the exon7 row at 42141339 (1bp), so
+/// midpoint(42140371, 42141339) = 42140855. D7_IN4_IN8 picks up at that
+/// same 42140855 boundary (no gap, no overlap) and runs through the
+/// exon7/intron6/exon6/intron5/intron4 rows — intron4's last row ends at
+/// 42142406 (1bp) — to the midpoint with the next annotated feature,
+/// exon3 at 42142732 (1bp): midpoint(42142406, 42142732) = 42142569. This
+/// keeps D7_IN4_IN8 a real gene-body window (bounded by exon7 through
+/// intron4), not merely "whatever is left after excluding exon9".
 ///
 /// Additional composite regions for *13 detection:
 ///   D7 3' half:  chr22:42139000-42142455  (intron4 to 3' end)
 ///   D7 5' half:  chr22:42142465-42144575  (5'UTR to intron4)
-
-const D7_EXON9_START: i64 = 42140600;
-const D7_EXON9_END: i64 = 42142500;
-const D7_IN4_IN8_START: i64 = 42139500;
-const D7_IN4_IN8_END: i64 = 42140600;
+const D7_EXON9_START: i64 = 42140061;
+const D7_EXON9_END: i64 = 42140855;
+const D7_IN4_IN8_START: i64 = 42140855;
+const D7_IN4_IN8_END: i64 = 42142569;
 const D7_EX2_IN8_START: i64 = 42140600;
 const D7_EX2_IN8_END: i64 = 42143600;
 const D7_5PR_IN1_START: i64 = 42143600;
@@ -217,5 +235,58 @@ pub fn classify_d7_signals(profile: &D7DepthProfile) -> D7HybridSignals {
         three_prime_five_prime_ratio,
         exon9_elevated,
         three_prime_depleted,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::depth_calling::utilities::get_snp_position;
+
+    /// Review finding #14: D7_EXON9_* and D7_IN4_IN8_* were swapped, so the
+    /// window named "exon9" excluded the actual exon9 diagnostic SNP sites
+    /// (CYP2D6_SNP_38.txt data rows 7 and 8, 0-indexed) and the window named
+    /// "intron4-intron8" contained them instead — inverting the *36
+    /// gene-conversion signal.
+    ///
+    /// Resolve both sites' D7 positions from the real embedded SNP file at
+    /// run time (never hardcode the position) so this test breaks if either
+    /// the data file's contents or the window constants in this file move.
+    #[test]
+    fn exon9_window_contains_exon9_snp_sites_and_body_window_does_not() {
+        let snp_db = get_snp_position(crate::data::SNP_FILE, "38", None);
+
+        // dsnp2 keys are formatted "<D7 position>_<0-based row index>" by
+        // get_snp_position(). Find the D7 position for a given row index
+        // without ever naming the position literal ourselves.
+        let d7_pos_for_site = |idx: usize| -> i64 {
+            let target = idx.to_string();
+            let key = snp_db
+                .dsnp2
+                .keys()
+                .find(|k| k.rsplit('_').next() == Some(target.as_str()))
+                .unwrap_or_else(|| panic!("site index {idx} not found in SNP_FILE dsnp2"));
+            key.rsplit_once('_')
+                .expect("dsnp2 key must contain an underscore")
+                .0
+                .parse()
+                .expect("D7 position prefix must be numeric")
+        };
+
+        let site7_d7 = d7_pos_for_site(7);
+        let site8_d7 = d7_pos_for_site(8);
+
+        for pos in [site7_d7, site8_d7] {
+            assert!(
+                (D7_EXON9_START..D7_EXON9_END).contains(&pos),
+                "exon9 SNP site D7 pos {pos} is not inside the exon9 window \
+                 {D7_EXON9_START}..{D7_EXON9_END}"
+            );
+            assert!(
+                !(D7_IN4_IN8_START..D7_IN4_IN8_END).contains(&pos),
+                "exon9 SNP site D7 pos {pos} must not fall inside the \
+                 intron4-intron8 window {D7_IN4_IN8_START}..{D7_IN4_IN8_END}"
+            );
+        }
     }
 }
