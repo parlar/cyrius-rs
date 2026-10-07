@@ -434,6 +434,10 @@ fn get_count_from_file(count_file: &str) -> Result<std::collections::HashMap<Str
     let content = std::fs::read_to_string(count_file)
         .map_err(|e| format!("cannot read count file {}: {}", count_file, e))?;
     for line in content.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
         let fields: Vec<&str> = line.split_whitespace().collect();
         if fields.len() >= 5 {
             let name = fields[3].to_string();
@@ -571,5 +575,97 @@ mod tests {
     fn downgrade_filter_for_high_mad_leaves_none_alone() {
         let r = downgrade_filter_for_high_mad(None, 0.27, 0.11);
         assert_eq!(r, None);
+    }
+
+    #[test]
+    fn count_file_with_comment_header_and_blank_lines_parses() {
+        // Reproduces finding #4: a count file whose header is a '#'-prefixed
+        // line with >=5 whitespace-separated fields (e.g.
+        // '#chr start end name type gc count') used to be read as a data
+        // row, failing to parse its last field ('count') as a u64.
+        let dir = std::env::temp_dir().join(format!("cyrius_count_header_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sample_count.txt");
+        std::fs::write(
+            &path,
+            "#chr\tstart\tend\tname\ttype\tgc\tcount\n\
+             \n\
+             chr1\t100\t200\tregion_a\tnorm\t0.5\t42\n\
+             \n\
+             chr1\t300\t400\tregion_b\tnorm\t0.6\t7\n",
+        )
+        .unwrap();
+
+        let count_dic = get_count_from_file(path.to_str().unwrap())
+            .expect("a count file with a '#' header line and blank lines should parse");
+
+        assert_eq!(count_dic.get("region_a"), Some(&42));
+        assert_eq!(count_dic.get("region_b"), Some(&7));
+        // The comment header's literal field value must not leak in as data.
+        assert_eq!(count_dic.get("name"), None);
+        assert_eq!(count_dic.len(), 2);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn missing_norm_region_name_behaves_like_an_explicit_zero_count() {
+        // Task 1's select_usable_control_regions (shared by both
+        // normalization paths) excludes zero/negligible-depth control
+        // regions before they can skew the median. A region name that is
+        // simply absent from the count file reads as 0 via unwrap_or(&0)
+        // too (see the `norm` loop in get_normed_depth_from_count), so it
+        // should be excluded the same way and produce a result identical to
+        // writing that region's count as an explicit 0.
+        let mut region_dic: RegionDic = IndexMap::new();
+        region_dic.insert(
+            "CYP2D6".to_string(),
+            vec![(
+                ("chr1".to_string(), 0, 1000, "CYP2D6_hapcn2".to_string()),
+                0.5,
+            )],
+        );
+
+        let gcs = [0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70];
+        let counts: [u64; 9] = [90, 95, 100, 105, 110, 100, 95, 105, 100];
+        let mut norm_regions = Vec::new();
+        let mut good_lines = String::new();
+        for (i, (&gc, &count)) in gcs.iter().zip(counts.iter()).enumerate() {
+            let name = format!("norm_{}", i);
+            norm_regions.push((("chr2".to_string(), 0, 1000, name.clone()), gc));
+            good_lines.push_str(&format!("chr2\t0\t1000\t{}\tnorm\t{}\t{}\n", name, gc, count));
+        }
+        norm_regions.push((("chr2".to_string(), 0, 1000, "norm_var".to_string()), 0.5));
+        region_dic.insert("norm".to_string(), norm_regions);
+
+        let base = format!("chr1\t0\t1000\tCYP2D6_hapcn2\tCYP2D6\t0.5\t200\n{}", good_lines);
+
+        let dir = std::env::temp_dir().join(format!("cyrius_missing_norm_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let explicit_zero_path = dir.join("explicit_zero_count.txt");
+        std::fs::write(
+            &explicit_zero_path,
+            format!("{}chr2\t0\t1000\tnorm_var\tnorm\t0.5\t0\n", base),
+        )
+        .unwrap();
+
+        let missing_path = dir.join("missing_count.txt");
+        std::fs::write(&missing_path, &base).unwrap();
+
+        let explicit_zero =
+            get_normed_depth_from_count(explicit_zero_path.to_str().unwrap(), &region_dic, 150.0)
+                .expect("explicit zero count should normalize successfully");
+        let missing = get_normed_depth_from_count(missing_path.to_str().unwrap(), &region_dic, 150.0)
+            .expect("a missing region name should normalize successfully, the same as an explicit zero");
+
+        assert_eq!(explicit_zero.mediandepth, missing.mediandepth);
+        assert_eq!(explicit_zero.mad, missing.mad);
+        assert_eq!(explicit_zero.normalized, missing.normalized);
+
+        let _ = std::fs::remove_file(&explicit_zero_path);
+        let _ = std::fs::remove_file(&missing_path);
+        let _ = std::fs::remove_dir(&dir);
     }
 }
