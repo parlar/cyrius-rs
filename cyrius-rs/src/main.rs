@@ -481,16 +481,13 @@ fn d6_star_caller(
 
     // Feature: hmm_cnv — HMM-based segmentation as fallback when consensus fails
     let cnvtag = if features.hmm_cnv && cnvtag.is_none() {
-        // Extract sd_per_copy from GMM parameters: sd_cn2 / sqrt(2)
-        let sd_cn2: Option<f64> = params
-            .gmm_parameter
-            .get("d67")
-            .and_then(|m| m.get("sd"))
-            .and_then(|v| v.first())
-            .and_then(|s| s.parse().ok());
-        let sd_cn2 = sd_cn2.unwrap_or(0.0);
-        let sd_per_copy = sd_cn2 / std::f64::consts::SQRT_2;
-        let hmm_params = cyrius_rs::caller::hmm_cnv::HmmParams::from_gmm_prior(total_cn, sd_per_copy);
+        // Emission SD is measured on the per-site D6-CN profile the HMM runs
+        // over. The depth GMM's `sd` describes normalised depth over the whole
+        // D6+D7 region and is 4-10x too small here (review findings #15/#81).
+        let sd_per_copy =
+            cyrius_rs::caller::hmm_cnv::estimate_sd_per_copy(&raw_d6_cn, &snp_d6, &snp_d7);
+        let hmm_params =
+            cyrius_rs::caller::hmm_cnv::HmmParams::from_sd_per_copy(total_cn, sd_per_copy);
         let hmm_result = cyrius_rs::caller::hmm_cnv::hmm_segment(
             &raw_d6_cn, &snp_d6, &snp_d7, total_cn, &hmm_params,
         );
@@ -498,7 +495,8 @@ fn d6_star_caller(
             &hmm_result.segments, total_cn, raw_cn_call.spacer_cn,
         );
         log::info!(
-            "hmm_cnv: segmented into {} segments",
+            "hmm_cnv: profile-estimated sd_per_copy={:.3}, segmented into {} segments",
+            sd_per_copy,
             hmm_result.segments.len(),
         );
         for (i, seg) in hmm_result.segments.iter().enumerate() {

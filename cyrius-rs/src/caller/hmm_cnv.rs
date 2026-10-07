@@ -10,12 +10,13 @@
 //!
 //! # Usage
 //! ```ignore
-//! let params = HmmParams::from_gmm_prior(total_cn, sd);
+//! let sd_per_copy = estimate_sd_per_copy(&raw_d6_cn, &snp_d6, &snp_d7);
+//! let params = HmmParams::from_sd_per_copy(total_cn, sd_per_copy);
 //! let result = hmm_segment(&raw_d6_cn, &snp_d6, &snp_d7, total_cn, &params);
 //! let cnvtag = classify_segments(&result.segments, total_cn, spacer_cn);
 //! ```
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 // ---------------------------------------------------------------------------
 // CYP2D6 gene structure: SNP site index boundaries
@@ -25,6 +26,54 @@ const REP_END: usize = 3;
 const EXON9_END: usize = 9;
 const INTRON4_BP: usize = 40;
 const INTRON1_BP: usize = 74;
+
+// ---------------------------------------------------------------------------
+// Emission-model constants
+// ---------------------------------------------------------------------------
+
+/// Minimum total (D6 + D7) read depth for a site's observation to be used.
+const DEFAULT_MIN_DEPTH: usize = 10;
+
+/// Lower bound on the per-copy emission SD.
+///
+/// A robust dispersion legitimately collapses to 0 on a flat or heavily tied
+/// profile (a whole-gene deletion, for instance), and a zero SD makes the
+/// Gaussian emission degenerate. The bound comes from the model's own
+/// transition cost rather than from taste: the round-trip penalty for leaving
+/// a state and returning is `2 * ln(p_stay / p_switch_each)`, which is 13.4
+/// nats at `total_cn = 2` and 14.5 at `total_cn = 5`. For Viterbi not to split
+/// a single site off for a deviation below half a CN unit — the midpoint
+/// between adjacent CN states, where the observation genuinely becomes
+/// ambiguous — the emission SD must satisfy `0.5 * (0.5 / sd)^2 < 13.4`, i.e.
+/// `sd > 0.097`. Rounded up, 0.10.
+///
+/// Measured, not asserted: the floor binds on 22 of the 61 benchmark profiles
+/// (the quietest ones, where the SD matters least), and segmentation behaviour
+/// over the cohort is identical for any floor from 0.05 to 0.15 — 54/60
+/// agreement with `get_cnvtag`, median 2 segments. Only a floor of exactly 0
+/// degrades it, and then only via the one all-flat `star5_star5` profile. So
+/// this value guards the degenerate case without doing the discriminating
+/// work itself.
+const MIN_SD_PER_COPY: f64 = 0.10;
+
+/// Gaussian consistency factor converting a median absolute deviation to an SD.
+const MAD_TO_SD: f64 = 1.4826;
+
+/// Fewest usable sites a structural region must have for its dispersion to
+/// enter the emission-SD estimate.
+const MIN_REGION_SITES: usize = 10;
+
+/// The structural regions of the gene, as half-open index ranges into the SNP
+/// site array. CYP2D6 copy-number transitions occur at these boundaries, so
+/// within one region the true CN is constant. Shared by [`estimate_sd_per_copy`]
+/// and [`get_region_cn`] so the two cannot drift apart.
+const REGION_BOUNDS: [(&str, usize, usize); 5] = [
+    ("rep", 0, REP_END),
+    ("exon9", REP_END, EXON9_END),
+    ("body", EXON9_END, INTRON4_BP),
+    ("intron4", INTRON4_BP, INTRON1_BP),
+    ("upstream", INTRON1_BP, usize::MAX), // extends to the end
+];
 
 // ---------------------------------------------------------------------------
 // HMM parameters
@@ -48,12 +97,19 @@ pub struct HmmParams {
 }
 
 impl HmmParams {
-    /// Construct default parameters from the total CN call and an estimated SD.
+    /// Construct default parameters from the total CN call and a per-copy SD.
     ///
-    /// `sd_per_copy` is the standard deviation of the D6-CN observation per
-    /// unit of copy number — typically ~0.3–0.5 for WGS data. The GMM's
-    /// `sd_cn2` value (divided by 2 to get per-copy) is a reasonable source.
-    pub fn from_gmm_prior(total_cn: u32, sd_per_copy: f64) -> Self {
+    /// `sd_per_copy` is the standard deviation of the per-site D6-CN
+    /// observation at copy number 1; the emission SD for state `cn` is
+    /// `sd_per_copy * sqrt(cn)`. Take it from [`estimate_sd_per_copy`], which
+    /// measures it on the profile being segmented.
+    ///
+    /// Do **not** pass the depth GMM's `sd` here (review findings #15/#81):
+    /// that value describes the normalised depth of the whole D6+D7 region,
+    /// not the per-site D6/D7 read split this HMM runs over, and is 4-10x too
+    /// small — tight enough that ordinary per-site noise outweighs the
+    /// ~14-nat round-trip switch penalty and Viterbi splits off single sites.
+    pub fn from_sd_per_copy(total_cn: u32, sd_per_copy: f64) -> Self {
         let max_cn = (total_cn + 2) as usize; // allow some room above total
         let n_states = max_cn + 1;
 
@@ -82,7 +138,7 @@ impl HmmParams {
             log_prior,
             log_stay: p_stay.ln(),
             log_switch: p_switch_each.ln(),
-            min_depth: 10,
+            min_depth: DEFAULT_MIN_DEPTH,
         }
     }
 
@@ -93,6 +149,86 @@ impl HmmParams {
         self.log_switch = p_switch_each.ln();
         self
     }
+}
+
+/// Robust (MAD-based) dispersion of a set of observations, scaled to a
+/// Gaussian SD. Returns 0.0 for fewer than two values.
+fn robust_sd(values: &[f64]) -> f64 {
+    if values.len() < 2 {
+        return 0.0;
+    }
+    let level = crate::stats::median(values);
+    let deviations: Vec<f64> = values.iter().map(|x| (x - level).abs()).collect();
+    MAD_TO_SD * crate::stats::median(&deviations)
+}
+
+/// Estimate the per-copy emission SD from the per-site profile itself.
+///
+/// The emission model compares each site's observation to an integer CN, so
+/// the SD it needs is the *marginal* spread of the observations about their
+/// segment level. The depth GMM cannot supply that: its `sd` describes the
+/// normalised depth of the whole D6+D7 region, and using it makes the
+/// emissions 4-10x too tight (review findings #15/#81).
+///
+/// Method: take the robust dispersion of the usable observations **within
+/// each structural region** of [`REGION_BOUNDS`], and use the median across
+/// regions. CYP2D6 copy-number transitions occur at those boundaries, so a
+/// within-region spread is observation noise rather than CN signal, and the
+/// median across regions tolerates one region holding an off-boundary
+/// breakpoint. The result is divided by `sqrt(median observation)` to undo the
+/// `sqrt(cn)` scaling that [`HmmParams::from_sd_per_copy`] re-applies, and
+/// floored at [`MIN_SD_PER_COPY`].
+///
+/// A whole-profile dispersion is the fallback when no region has
+/// [`MIN_REGION_SITES`] usable sites.
+///
+/// Measured over the 61 benchmark profiles that have a d67 profile, before
+/// flooring (per copy): q1 0.092, median 0.112, q3 0.136, max 0.238 — against
+/// the single value 0.040 the GMM route produced. Replacing the GMM SD cuts the
+/// median segment count from 6 to 2 and the worst case from 19 to 7, drops
+/// profiles containing a single-site segment from 30 to 6, removes both of the
+/// exact region-vote ties (see [`region_cn_vote`]), and raises agreement with
+/// `get_cnvtag` from 51/60 to 54/60 with one disagreement instead of two.
+///
+/// Note that a global dispersion must *not* be used in place of the
+/// per-region one: real CN steps inflate it (0.26-0.64 on the `star68` and
+/// `star5_star68` samples), which suppresses the very breakpoints the HMM
+/// exists to find.
+///
+/// A lag-1 first-difference estimator must not be used either. Adjacent
+/// diagnostic sites are covered by the same reads, so their D6/D7 split noise
+/// is shared: the lag-1 innovation SD is 0.053 against a marginal spread of
+/// 0.237 on the cn2 samples, and the estimate lands on the floor for all 61
+/// profiles with a d67 profile — a constant wearing an estimator's clothes.
+pub fn estimate_sd_per_copy(raw_d6_cn: &[f64], snp_d6: &[usize], snp_d7: &[usize]) -> f64 {
+    let n = raw_d6_cn.len().min(snp_d6.len()).min(snp_d7.len());
+    let site_ok =
+        |i: usize| raw_d6_cn[i].is_finite() && snp_d6[i] + snp_d7[i] >= DEFAULT_MIN_DEPTH;
+
+    let mut region_sds: Vec<f64> = Vec::new();
+    for &(_, region_start, region_end) in REGION_BOUNDS.iter() {
+        let hi = region_end.min(n);
+        if region_start >= hi {
+            continue;
+        }
+        let values: Vec<f64> = (region_start..hi)
+            .filter(|&i| site_ok(i))
+            .map(|i| raw_d6_cn[i])
+            .collect();
+        if values.len() >= MIN_REGION_SITES {
+            region_sds.push(robust_sd(&values));
+        }
+    }
+
+    let all: Vec<f64> = (0..n).filter(|&i| site_ok(i)).map(|i| raw_d6_cn[i]).collect();
+    let sd_site = if region_sds.is_empty() {
+        robust_sd(&all)
+    } else {
+        crate::stats::median(&region_sds)
+    };
+    let ref_cn = crate::stats::median(&all).max(1.0);
+
+    (sd_site / ref_cn.sqrt()).max(MIN_SD_PER_COPY)
 }
 
 // ---------------------------------------------------------------------------
@@ -395,33 +531,49 @@ pub fn classify_segments(
 
 /// Determine the dominant CN in each named gene region from HMM segments.
 fn get_region_cn(segments: &[CnSegment]) -> HashMap<String, u32> {
-    // Map each SNP index range to a region name
-    let regions: &[(&str, usize, usize)] = &[
-        ("rep", 0, REP_END),
-        ("exon9", REP_END, EXON9_END),
-        ("body", EXON9_END, INTRON4_BP),
-        ("intron4", INTRON4_BP, INTRON1_BP),
-        ("upstream", INTRON1_BP, usize::MAX), // extends to end
-    ];
-
     let mut result = HashMap::new();
 
-    for &(name, region_start, region_end) in regions {
-        // Weighted vote: each segment contributes its overlap length
-        let mut votes: HashMap<u32, usize> = HashMap::new();
-        for seg in segments {
-            let overlap_start = seg.start_idx.max(region_start);
-            let overlap_end = (seg.end_idx + 1).min(region_end);
-            if overlap_start < overlap_end {
-                *votes.entry(seg.cn).or_insert(0) += overlap_end - overlap_start;
-            }
-        }
-        if let Some((&cn, _)) = votes.iter().max_by_key(|&(_, &count)| count) {
+    for &(name, region_start, region_end) in REGION_BOUNDS.iter() {
+        if let Some(cn) = region_cn_vote(segments, region_start, region_end) {
             result.insert(name.to_string(), cn);
         }
     }
 
     result
+}
+
+/// Overlap-weighted vote for the dominant CN of one region, `[start, end)`.
+///
+/// Each segment contributes the number of sites it shares with the region.
+/// Votes accumulate in a `BTreeMap`, so the outcome does not depend on hash
+/// seeding, and an exact tie between two or more CN states returns `None`:
+/// a tie carries no information about the region's CN, and resolving it
+/// arbitrarily used to pick between structurally different CNV tags at random
+/// (review finding #16). `None` is also returned when no segment overlaps.
+///
+/// A missing region leaves `get_region_cn` without that key, which makes
+/// `classify_segments` return `None` — no CNV tag rather than a coin flip.
+fn region_cn_vote(
+    segments: &[CnSegment],
+    region_start: usize,
+    region_end: usize,
+) -> Option<u32> {
+    let mut votes: BTreeMap<u32, usize> = BTreeMap::new();
+    for seg in segments {
+        let overlap_start = seg.start_idx.max(region_start);
+        let overlap_end = (seg.end_idx + 1).min(region_end);
+        if overlap_start < overlap_end {
+            *votes.entry(seg.cn).or_insert(0) += overlap_end - overlap_start;
+        }
+    }
+
+    let best = votes.values().copied().max()?;
+    let mut winners = votes.iter().filter(|&(_, &count)| count == best);
+    let (&cn, _) = winners.next()?;
+    if winners.next().is_some() {
+        return None; // exact tie — region CN unknown
+    }
+    Some(cn)
 }
 
 /// Rename CNV tags to match the existing vocabulary (mirrors cnv_hybrid::transform_cnvtag).
@@ -704,7 +856,7 @@ mod tests {
     fn test_hmm_segment_full_pipeline() {
         // Simulate a star5 pattern: first few sites CN~2, rest CN~1
         let total_cn = 3u32;
-        let params = HmmParams::from_gmm_prior(total_cn, 0.3);
+        let params = HmmParams::from_sd_per_copy(total_cn, 0.3);
 
         let n = 90;
         let mut raw_d6_cn = Vec::with_capacity(n);
@@ -758,5 +910,179 @@ mod tests {
 
         let tag = classify_segments(&[], 4, Some(2));
         assert_eq!(tag, None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Review finding #16: the region vote must be deterministic, and an exact
+    // tie must report an unknown region CN rather than a hash-order winner.
+    // -----------------------------------------------------------------------
+
+    /// The reviewer's reproduction case: segments [0..5 cn2, 6..116 cn3] split
+    /// the 6-site exon9 region exactly 3/3, so that region's vote ties.
+    fn tie_segments() -> Vec<CnSegment> {
+        vec![
+            CnSegment { start_idx: 0, end_idx: 5, cn: 2, n_valid: 6, mean_obs: 2.0 },
+            CnSegment { start_idx: 6, end_idx: 116, cn: 3, n_valid: 111, mean_obs: 3.0 },
+        ]
+    }
+
+    #[test]
+    fn test_classify_segments_tie_is_deterministic_and_none() {
+        let segments = tie_segments();
+        let results: Vec<Option<String>> = (0..200)
+            .map(|_| classify_segments(&segments, 5, Some(2)))
+            .collect();
+        let mut distinct: Vec<&Option<String>> = Vec::new();
+        for r in &results {
+            if !distinct.contains(&r) {
+                distinct.push(r);
+            }
+        }
+        assert_eq!(
+            distinct.len(), 1,
+            "classify_segments is non-deterministic on a tie: saw {:?} over 200 calls",
+            distinct
+        );
+        assert_eq!(results[0], None,
+            "an exact tie in the exon9 region must leave the region CN unknown");
+    }
+
+    #[test]
+    fn test_region_cn_vote_tie_returns_none() {
+        let segments = tie_segments();
+        // exon9 (sites 3..9) is split 3/3 between cn2 and cn3 -> unknown
+        assert_eq!(region_cn_vote(&segments, REP_END, EXON9_END), None);
+        // rep (sites 0..3) is entirely cn2 -> unambiguous
+        assert_eq!(region_cn_vote(&segments, 0, REP_END), Some(2));
+        // body (sites 9..40) is entirely cn3 -> unambiguous
+        assert_eq!(region_cn_vote(&segments, EXON9_END, INTRON4_BP), Some(3));
+        // a region no segment overlaps is unknown
+        assert_eq!(region_cn_vote(&segments, 200, 300), None);
+        // a one-site majority is still a winner, not a tie
+        assert_eq!(region_cn_vote(&segments, 0, 5), Some(2));
+    }
+
+    // -----------------------------------------------------------------------
+    // Review findings #15 / #81: the emission SD must be estimated from the
+    // per-site profile, not taken from the depth GMM, or Viterbi over-segments.
+    // -----------------------------------------------------------------------
+
+    /// Deterministic synthetic profile with a single true D6 copy number,
+    /// generated from the real noise source: a binomial D6/D7 read split at
+    /// per-site depths sweeping 20..80 (so the per-site SD, ~0.3, and its tails
+    /// match the 0.19-0.34 measured on the cn2 benchmark samples).
+    ///
+    /// Returns (raw_d6_cn, snp_d6, snp_d7).
+    fn binomial_flat_profile(
+        n: usize,
+        total_cn: u32,
+        true_d6_cn: u32,
+    ) -> (Vec<f64>, Vec<usize>, Vec<usize>) {
+        let mut state: u64 = 0x2d6_cafe;
+        let mut next = || {
+            // 32-bit LCG (Numerical Recipes constants) — reproducible noise
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223) & 0xffff_ffff;
+            (state >> 8) as f64 / ((1u64 << 24) as f64)
+        };
+        let p = true_d6_cn as f64 / total_cn as f64;
+        let mut raw = Vec::with_capacity(n);
+        let mut d6 = Vec::with_capacity(n);
+        let mut d7 = Vec::with_capacity(n);
+        for i in 0..n {
+            let depth = 20 + (i * 7) % 61;
+            let k = (0..depth).filter(|_| next() < p).count();
+            raw.push(total_cn as f64 * k as f64 / depth as f64);
+            d6.push(k);
+            d7.push(depth - k);
+        }
+        (raw, d6, d7)
+    }
+
+    #[test]
+    fn test_noisy_flat_profile_segments_into_one_segment() {
+        // A cn2 sample: total D6+D7 CN = 4, per-site D6 CN ~ 2.
+        let total_cn = 4u32;
+        let (raw, d6, d7) = binomial_flat_profile(117, total_cn, 2);
+
+        let sd_per_copy = estimate_sd_per_copy(&raw, &d6, &d7);
+        let params = HmmParams::from_sd_per_copy(total_cn, sd_per_copy);
+        let result = hmm_segment(&raw, &d6, &d7, total_cn, &params);
+        assert_eq!(
+            result.segments.len(), 1,
+            "one true CN must give one segment (sd_per_copy={sd_per_copy:.3}), got {:?}",
+            result.segments.iter().map(|s| (s.start_idx, s.end_idx, s.cn)).collect::<Vec<_>>()
+        );
+        assert_eq!(result.segments[0].cn, 2);
+        assert_eq!(
+            classify_segments(&result.segments, total_cn, Some(2)),
+            Some("cn2".to_string())
+        );
+    }
+
+    #[test]
+    fn test_gmm_derived_sd_over_segments_the_same_profile() {
+        // Regression guard for findings #15/#81: data/CYP2D6_gmm.txt carries
+        // `d67 sd 2:0.056` and main.rs used 0.056 / sqrt(2) = 0.0396, which
+        // shattered this single-CN profile.
+        let total_cn = 4u32;
+        let (raw, d6, d7) = binomial_flat_profile(117, total_cn, 2);
+        let params =
+            HmmParams::from_sd_per_copy(total_cn, 0.056 / std::f64::consts::SQRT_2);
+        let result = hmm_segment(&raw, &d6, &d7, total_cn, &params);
+        assert!(
+            result.segments.len() > 5,
+            "the GMM-derived SD is expected to over-segment this profile, got {} segments",
+            result.segments.len()
+        );
+    }
+
+    #[test]
+    fn test_estimate_sd_per_copy_tracks_the_profile_and_ignores_cn_steps() {
+        let total_cn = 4u32;
+        let (raw, d6, d7) = binomial_flat_profile(117, total_cn, 2);
+        let sd_per_copy = estimate_sd_per_copy(&raw, &d6, &d7);
+        // Per-site SD of this profile is ~0.31 at CN 2, so per copy ~0.22.
+        assert!(
+            (0.15..0.30).contains(&sd_per_copy),
+            "expected sd_per_copy near 0.22, got {sd_per_copy}"
+        );
+        // A real CN step raises the dispersion of the one region it falls in
+        // (here intron4, sites 40..74); the median across regions absorbs it.
+        let mut stepped = raw.clone();
+        for x in stepped.iter_mut().take(55) {
+            *x += 1.0;
+        }
+        let sd_stepped = estimate_sd_per_copy(&stepped, &d6, &d7);
+        assert!(
+            (sd_stepped - sd_per_copy).abs() < 0.03,
+            "a CN step moved the estimate from {sd_per_copy} to {sd_stepped}"
+        );
+        // A global dispersion would not survive that step — the guard that
+        // keeps the HMM able to see breakpoints at all.
+        assert!(
+            robust_sd(&stepped) > 2.0 * robust_sd(&raw),
+            "expected the global dispersion to be inflated by the step"
+        );
+    }
+
+    #[test]
+    fn test_estimate_sd_per_copy_floors_on_degenerate_profile() {
+        // A perfectly flat profile has a median absolute first difference of 0;
+        // the estimator must floor rather than return a degenerate SD of 0.
+        let raw = vec![2.0; 50];
+        let d6 = vec![30usize; 50];
+        let d7 = vec![30usize; 50];
+        assert_eq!(estimate_sd_per_copy(&raw, &d6, &d7), MIN_SD_PER_COPY);
+
+        // All sites below min depth -> no usable differences -> floor.
+        let low = vec![1usize; 50];
+        assert_eq!(estimate_sd_per_copy(&raw, &low, &low), MIN_SD_PER_COPY);
+
+        // Too short to difference -> floor.
+        assert_eq!(estimate_sd_per_copy(&[2.0], &[30], &[30]), MIN_SD_PER_COPY);
+
+        // The floored SD still gives a proper (non-degenerate) emission density.
+        let params = HmmParams::from_sd_per_copy(4, MIN_SD_PER_COPY);
+        assert!(params.emission_sd.iter().all(|sd| *sd > 0.0 && sd.is_finite()));
     }
 }
