@@ -341,11 +341,6 @@ pub fn call_exon9gc(
         if let Some(ave_cn) = ave_call[0] {
             if ave_cn == cn_calls[0] {
                 if ave_cn == 1 {
-                    // No site had depth to report a D6 fraction at all; there is
-                    // nothing to compare against the min/max guard below.
-                    if d6_values.is_empty() {
-                        return None;
-                    }
                     let min_d6 = d6_values.iter().cloned().fold(f64::INFINITY, f64::min);
                     let max_d6 = d6_values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
                     if min_d6 < 1.2 && max_d6 < 1.3 {
@@ -576,10 +571,16 @@ mod tests {
         assert_eq!(call_exon9gc(&d6_count, &d7_count, Some(2)), None);
     }
 
-    // When no exon9 site has any depth at all there is no D6 fraction to
-    // report at any site, so the call must be None (not a stale CN-1 call).
+    // Characterization test (not a red-to-green regression test for this
+    // task's change): when no exon9 site has any depth at all, the call must
+    // be None. This already held before this task touched the function —
+    // `cn_prob` is all `None`, so `cn_calls` has length 0 (not 1), and the
+    // `cn_calls.len() == 1` gate a few lines up falls through to the final
+    // `None` without ever reaching the per-site `d6_values` vector. Kept
+    // because the "no depth anywhere -> None" behavior is worth pinning, even
+    // though nothing in this task's diff is what makes it true.
     #[test]
-    fn exon9gc_no_site_has_depth_returns_none() {
+    fn exon9gc_no_depth_anywhere_falls_through_to_none() {
         let d6_count = vec![0usize, 0usize];
         let d7_count = vec![0usize, 0usize];
         assert_eq!(call_exon9gc(&d6_count, &d7_count, Some(2)), None);
