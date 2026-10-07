@@ -18,10 +18,24 @@ const EXON9_BP_APPROX: i64 = 42126611;
 const P_CUTOFF: f64 = 0.05;
 
 /// The CNV tag vocabulary: (tag, total_cn, exon9_and_downstream, exon9_to_intron1,
-/// intron1_upstream). This is the single source of truth for both the accepted-tag
-/// vocabulary (`CNV_ACCEPTED`) and the CN-pattern lookup table
-/// (`cnvtag_lookup_table`), so the two can never drift apart (finding #26).
-pub const CNVTAG_ENTRIES: [(&str, u32, u32, u32, u32); 28] = [
+/// intron1_upstream).
+///
+/// This is the single source of truth for the two *consumers* that used to hold
+/// independent copies of the list (finding #26): the accepted-tag gate `CNV_ACCEPTED`
+/// (consumed at `main.rs:560`) and the CN-pattern lookup table `cnvtag_lookup_table`.
+/// Those two cannot drift apart from each other, which is what `call_cn_var`'s
+/// `get_total_cn_per_site(...).unwrap()` needs.
+///
+/// It does **not** constrain tag *producers*, and the vocabulary is not centralised
+/// beyond those two symbols. Tag strings are still hardcoded in `main.rs`,
+/// `cnv_hybrid.rs`, `hmm_cnv.rs`, `match_star_allele.rs`, `changepoint.rs`,
+/// `kmer_validation.rs` and `consistency.rs`; most importantly,
+/// `cnv_hybrid::transform_cnvtag` *composes* a tag by string join without consulting
+/// this const, so it can mint tags outside the vocabulary (verified:
+/// `transform_cnvtag("exon9hyb_star13intron1_star5_star5")` yields
+/// `"star13intron1_star5"`, which the gate then rejects). Constraining producers is a
+/// separate, deliberately deferred change.
+pub(crate) const CNVTAG_ENTRIES: [(&str, u32, u32, u32, u32); 28] = [
     ("star5_star5", 2, 0, 0, 0),
     ("star13_star13", 2, 2, 0, 0),
     ("star13intron1_star13intron1", 2, 2, 2, 0),
@@ -63,9 +77,14 @@ const fn tags_of<'a, const N: usize>(entries: &[(&'a str, u32, u32, u32, u32); N
     tags
 }
 
-/// The accepted CNV tag vocabulary, derived from `CNVTAG_ENTRIES` so it can never
-/// list a tag the lookup table doesn't also know about, or vice versa (finding #26).
-pub const CNV_ACCEPTED: [&str; 28] = tags_of(&CNVTAG_ENTRIES);
+/// The accepted CNV tag vocabulary: the no-call gate at `main.rs:560`. Derived from
+/// `CNVTAG_ENTRIES` so this gate can never list a tag the lookup table doesn't also
+/// know about, or vice versa (finding #26).
+///
+/// This is a filter over tags that have *already* been produced; it does not constrain
+/// what produces them -- see the note on `CNVTAG_ENTRIES`. Stays `pub` (not
+/// `pub(crate)`) because `main.rs` is a separate bin crate.
+pub const CNV_ACCEPTED: [&str; CNVTAG_ENTRIES.len()] = tags_of(&CNVTAG_ENTRIES);
 
 /// CNVTAG lookup table mapping cnv tags to CN regions.
 pub fn cnvtag_lookup_table() -> HashMap<String, CnRegions> {
@@ -618,39 +637,86 @@ mod tests {
         assert_eq!(call_exon9gc(&d6_count, &d7_count, Some(2)), Some(2));
     }
 
-    // Finding #26: CNV_ACCEPTED (main.rs) and cnvtag_lookup_table()'s keys used to be
-    // two independently maintained lists that happened to agree. Both now derive from
-    // the single CNVTAG_ENTRIES const below, so the three tests that follow pin the
-    // vocabulary's shape rather than re-asserting the (now tautological) "do the two
-    // lists match" fact.
+    // Finding #26: CNV_ACCEPTED (main.rs's no-call gate) and cnvtag_lookup_table()'s
+    // keys used to be two independently maintained lists that happened to agree. Both
+    // now derive from the single CNVTAG_ENTRIES const above.
+    //
+    // That makes "the accepted set equals the table's keys" -- and its forward
+    // direction, "every accepted tag resolves in the table" -- a *construction
+    // invariant*, not a runtime fact: CNV_ACCEPTED[i] is literally CNVTAG_ENTRIES[i].0
+    // and the table inserts exactly those keys, so the property holds for any content
+    // that compiles and a test asserting it cannot go red. a11d907 shipped such a test;
+    // it has been deleted rather than left as green decoration. (The thing it was meant
+    // to protect -- call_cn_var's get_total_cn_per_site(...).unwrap() -- is still
+    // protected, just by the derivation itself rather than by an assertion.)
+    //
+    // The one way the derivation can still fail at runtime is duplicate-key collapse in
+    // the HashMap, covered by cnvtag_lookup_table_has_one_entry_per_const_entry below.
+    // Neither the derivation nor that test says anything about the vocabulary's
+    // *contents*, hence the content pin that follows.
 
-    // Pins the vocabulary size as a literal so an accidental addition or deletion in
-    // CNVTAG_ENTRIES shows up as a test failure rather than silently changing which
-    // cnvtags main.rs's no-call gate accepts.
+    // Pins the vocabulary's content: the 28 tag names, in order, against an independent
+    // literal. Renaming, retyping or reordering an entry in CNVTAG_ENTRIES goes red
+    // here -- which matters because the tags are a gate on real output: dropping "cn2",
+    // say, would no-call nearly every normal diploid sample.
+    //
+    // The literal below is a deliberate test guard, not a return of the production
+    // duplication finding #26 removed: nothing outside this test reads it, so it cannot
+    // change program behaviour, and its entire purpose is to be able to disagree with
+    // the production const.
+    //
+    // What this test does NOT catch:
+    //   * an added or removed entry. CNVTAG_ENTRIES's length is fixed in its type
+    //     (`[(&str, u32, u32, u32, u32); 28]`), so a 29th row is a compile error from
+    //     the array literal; and once that annotation is widened, CNV_ACCEPTED becomes
+    //     `[&str; 29]` and the assert below stops compiling against a 28-element
+    //     literal. Either way it surfaces as a compile error, never as this failure.
+    //   * the CN numbers. Only the tag names are pinned; the four CN columns of each
+    //     row are unconstrained by any test in this file.
     #[test]
-    fn cnv_accepted_has_the_documented_28_tags() {
-        assert_eq!(CNV_ACCEPTED.len(), 28);
-        assert_eq!(CNVTAG_ENTRIES.len(), 28);
+    fn cnv_accepted_matches_the_pinned_tag_vocabulary() {
+        let expected = [
+            "star5_star5",
+            "star13_star13",
+            "star13intron1_star13intron1",
+            "star5",
+            "star13",
+            "star13intron1",
+            "star5_star5_star68",
+            "star5_star68",
+            "cn2",
+            "exon9hyb_star5",
+            "dup_star13",
+            "dup_star13intron1",
+            "star13_star68",
+            "cn3",
+            "exon9hyb",
+            "star68",
+            "cn4",
+            "exon9hyb_exon9hyb",
+            "star68_star68",
+            "dup_exon9hyb",
+            "dup_star68",
+            "exon9hyb_star68",
+            "cn5",
+            "exon9hyb_exon9hyb_exon9hyb",
+            "star68_star68_star68",
+            "cn6",
+            "exon9hyb_exon9hyb_exon9hyb_exon9hyb",
+            "star68_star68_star68_star68",
+        ];
+        assert_eq!(CNV_ACCEPTED, expected);
     }
 
     // Detects a duplicate tag in CNVTAG_ENTRIES: HashMap::insert silently collapses a
     // repeated key, so the map would end up shorter than the entries list even though
     // CNV_ACCEPTED (derived from the same list) still carries the duplicate twice.
-    // The call_cn_var unwrap (finding #26) depends on every accepted tag having
-    // exactly one row, so a collapse here is exactly the failure mode to catch.
+    // call_cn_var's get_total_cn_per_site(...).unwrap() (finding #26) depends on every
+    // accepted tag having exactly one row, so a collapse here is exactly the failure
+    // mode to catch. Falsifiable: renaming ("cn3", 5, 3, 3, 3) to ("cn2", 5, 3, 3, 3)
+    // keeps 28 entries but yields 27 map keys, and this goes red.
     #[test]
     fn cnvtag_lookup_table_has_one_entry_per_const_entry() {
         assert_eq!(cnvtag_lookup_table().len(), CNVTAG_ENTRIES.len());
-    }
-
-    // The invariant finding #26 actually cares about: get_total_cn_per_site's
-    // lookup.get(cnvtag)? must resolve for every tag main.rs's CNV_ACCEPTED gate lets
-    // through, or call_cn_var's unwrap (call_variants.rs:173) panics.
-    #[test]
-    fn every_accepted_cnvtag_resolves_in_lookup_table() {
-        let table = cnvtag_lookup_table();
-        for tag in CNV_ACCEPTED {
-            assert!(table.get(tag).is_some(), "accepted tag {tag:?} has no lookup table row");
-        }
     }
 }
