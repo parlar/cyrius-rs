@@ -610,14 +610,29 @@ mod tests {
     }
 
     #[test]
-    fn missing_norm_region_name_behaves_like_an_explicit_zero_count() {
+    fn missing_norm_region_name_is_excluded_like_the_region_never_existed() {
         // Task 1's select_usable_control_regions (shared by both
         // normalization paths) excludes zero/negligible-depth control
-        // regions before they can skew the median. A region name that is
-        // simply absent from the count file reads as 0 via unwrap_or(&0)
-        // too (see the `norm` loop in get_normed_depth_from_count), so it
-        // should be excluded the same way and produce a result identical to
-        // writing that region's count as an explicit 0.
+        // regions before they can skew the median. This exercises the full
+        // exclusion step end-to-end via get_normed_depth_from_count, across
+        // three scenarios for one control region out of ten:
+        //   1. explicit_zero: the region is present with an explicit count
+        //      of 0.
+        //   2. missing: the region's name is listed in the norm RegionDic
+        //      but absent from the count file, which reads as 0 via
+        //      unwrap_or(&0) in the `norm` loop in
+        //      get_normed_depth_from_count -- the same 0 as scenario 1 by
+        //      the time it reaches select_usable_control_regions.
+        //   3. no_zero_region: the region is not in the norm RegionDic at
+        //      all, i.e. only the other 9 (real, positive-depth) control
+        //      regions exist. This arm is falsifiable: if the exclusion
+        //      step were broken and the zero from scenarios 1/2 survived
+        //      into their normalization instead of being dropped, those
+        //      would fold a 10th (zero) region into the median and GC fit
+        //      that this 9-region scenario never sees, and the equality
+        //      assertions below would fail.
+        // All three must produce identical results if the zero/missing
+        // region is truly excluded before use, as Task 1 established.
         let mut region_dic: RegionDic = IndexMap::new();
         region_dic.insert(
             "CYP2D6".to_string(),
@@ -636,6 +651,14 @@ mod tests {
             norm_regions.push((("chr2".to_string(), 0, 1000, name.clone()), gc));
             good_lines.push_str(&format!("chr2\t0\t1000\t{}\tnorm\t{}\t{}\n", name, gc, count));
         }
+
+        // Scenario 3's RegionDic: only the 9 real positive-depth regions,
+        // no zero-depth region entry at all.
+        let mut region_dic_no_zero_region = region_dic.clone();
+        region_dic_no_zero_region.insert("norm".to_string(), norm_regions.clone());
+
+        // Scenarios 1 and 2's RegionDic: the same 9 regions plus a 10th,
+        // zero-depth region ("norm_var") that must be excluded.
         norm_regions.push((("chr2".to_string(), 0, 1000, "norm_var".to_string()), 0.5));
         region_dic.insert("norm".to_string(), norm_regions);
 
@@ -654,18 +677,36 @@ mod tests {
         let missing_path = dir.join("missing_count.txt");
         std::fs::write(&missing_path, &base).unwrap();
 
+        let no_zero_region_path = dir.join("no_zero_region_count.txt");
+        std::fs::write(&no_zero_region_path, &base).unwrap();
+
         let explicit_zero =
             get_normed_depth_from_count(explicit_zero_path.to_str().unwrap(), &region_dic, 150.0)
                 .expect("explicit zero count should normalize successfully");
         let missing = get_normed_depth_from_count(missing_path.to_str().unwrap(), &region_dic, 150.0)
             .expect("a missing region name should normalize successfully, the same as an explicit zero");
+        let no_zero_region = get_normed_depth_from_count(
+            no_zero_region_path.to_str().unwrap(),
+            &region_dic_no_zero_region,
+            150.0,
+        )
+        .expect("a RegionDic with no zero-depth region at all should normalize successfully");
 
         assert_eq!(explicit_zero.mediandepth, missing.mediandepth);
         assert_eq!(explicit_zero.mad, missing.mad);
         assert_eq!(explicit_zero.normalized, missing.normalized);
 
+        assert_eq!(
+            explicit_zero.mediandepth, no_zero_region.mediandepth,
+            "a region absent from the RegionDic entirely must normalize the same as one \
+             explicitly zeroed -- if this fails, the zero region leaked into the median/GC fit"
+        );
+        assert_eq!(explicit_zero.mad, no_zero_region.mad);
+        assert_eq!(explicit_zero.normalized, no_zero_region.normalized);
+
         let _ = std::fs::remove_file(&explicit_zero_path);
         let _ = std::fs::remove_file(&missing_path);
+        let _ = std::fs::remove_file(&no_zero_region_path);
         let _ = std::fs::remove_dir(&dir);
     }
 }
