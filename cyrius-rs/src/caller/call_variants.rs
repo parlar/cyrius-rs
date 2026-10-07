@@ -301,10 +301,11 @@ pub fn call_exon9gc(
     for (i, &c1) in d6_count.iter().enumerate() {
         let c2 = d7_count[i];
         let sum = c1 + c2;
+        // A zero-depth site carries no evidence about the D6 fraction at this
+        // position; skip it rather than recording a phantom D6 value of 0.0
+        // (which would otherwise always satisfy the min_d6 < 1.2 guard below).
         if sum > 0 {
             d6_values.push(cn as f64 * c1 as f64 / sum as f64);
-        } else {
-            d6_values.push(0.0);
         }
         cn_prob.push(call_reg1_cn(Some(cn as u32), c1 as f64, c2 as f64, 3.0)[0].clone().into());
     }
@@ -318,12 +319,17 @@ pub fn call_exon9gc(
         .collect();
 
     if cn_calls.len() == 1 {
+        // Round (rather than truncate) the mean counts before handing them to
+        // call_reg1_cn, which casts its count arguments with `as u64`. A raw
+        // mean like 44.5 would otherwise be silently truncated to 44.
         let mean_c1 = stats::mean(
             &d6_count.iter().map(|&x| x as f64).collect::<Vec<_>>(),
-        );
+        )
+        .round();
         let mean_c2 = stats::mean(
             &d7_count.iter().map(|&x| x as f64).collect::<Vec<_>>(),
-        );
+        )
+        .round();
         // Relaxed from 0.75 to 0.70 to handle *10D cases where the duplication
         // breakpoint downstream of exon9 causes borderline D6/D7 ratios at exon9
         // (e.g., HG00421: average probability 0.729 was failing the 0.75 cutoff).
@@ -335,6 +341,11 @@ pub fn call_exon9gc(
         if let Some(ave_cn) = ave_call[0] {
             if ave_cn == cn_calls[0] {
                 if ave_cn == 1 {
+                    // No site had depth to report a D6 fraction at all; there is
+                    // nothing to compare against the min/max guard below.
+                    if d6_values.is_empty() {
+                        return None;
+                    }
                     let min_d6 = d6_values.iter().cloned().fold(f64::INFINITY, f64::min);
                     let max_d6 = d6_values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
                     if min_d6 < 1.2 && max_d6 < 1.3 {
@@ -544,4 +555,45 @@ pub fn get_called_variants(
         }
     }
     total_callset
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Finding #24: a zero-depth exon9 site was pushed into d6_values as 0.0,
+    // which trivially satisfies the `min_d6 < 1.2` guard for the CN-1 case.
+    // Site 8 has no reads; site 7 calls CN 1 with a D6 value of 1.25. Two live
+    // sites at 1.25 would correctly fail the min check, so this must be None.
+    #[test]
+    fn exon9gc_zero_depth_site_does_not_vote_as_d6_cn_zero() {
+        let d6_count = vec![25usize, 0usize];
+        let d7_count = vec![15usize, 0usize];
+        assert_eq!(call_exon9gc(&d6_count, &d7_count, Some(2)), None);
+    }
+
+    // When no exon9 site has any depth at all there is no D6 fraction to
+    // report at any site, so the call must be None (not a stale CN-1 call).
+    #[test]
+    fn exon9gc_no_site_has_depth_returns_none() {
+        let d6_count = vec![0usize, 0usize];
+        let d7_count = vec![0usize, 0usize];
+        assert_eq!(call_exon9gc(&d6_count, &d7_count, Some(2)), None);
+    }
+
+    // Finding #24: the average D6/D7 counts were truncated (`as u64`) rather
+    // than rounded before being scored. Here mean_c1 = (11+2)/2 = 6.5 and
+    // mean_c2 = (0+2)/2 = 1.0; site 0 alone (11 vs 0 reads) confidently calls
+    // CN 2. Truncating the mean yields no confident average call (None);
+    // rounding it to the nearest integer yields Some(2), matching site 0.
+    #[test]
+    fn exon9gc_rounds_mean_counts_instead_of_truncating() {
+        let d6_count = vec![11usize, 2usize];
+        let d7_count = vec![0usize, 2usize];
+        assert_eq!(call_exon9gc(&d6_count, &d7_count, Some(2)), Some(2));
+    }
 }
