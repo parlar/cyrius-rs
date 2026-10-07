@@ -124,6 +124,21 @@ struct ResolvedVariant {
     ref_bases: String,
 }
 
+/// Half-open BAM fetch window `[start, end)` covering both variant positions
+/// for the single-fetch phasing path.
+///
+/// `end` is one past the later position: the region is half-open, so stopping
+/// at the position itself drops any read whose leftmost mapped base is exactly
+/// the later variant. `start` is clamped at 0 so a variant at position 0
+/// cannot produce a negative coordinate.
+///
+/// Returns `(start, end)`.
+fn single_fetch_window(pos1: i64, pos2: i64) -> (i64, i64) {
+    let start = (pos1.min(pos2) - 1).max(0);
+    let end = pos1.max(pos2) + 1;
+    (start, end)
+}
+
 /// Check if two variants at nearby positions co-occur on the same reads (cis)
 /// or on different reads (trans).
 ///
@@ -226,8 +241,7 @@ fn check_phasing(
         }
     } else {
         // Single fetch spanning both positions
-        let start = pos1.min(pos2) - 1;
-        let end = pos1.max(pos2);
+        let (start, end) = single_fetch_window(pos1, pos2);
         if reader
             .fetch(bam::FetchDefinition::Region(tid as i32, start, end))
             .is_err()
@@ -598,5 +612,32 @@ mod tests {
             .collect();
         assert_eq!(by_raw["*1"], ("*1", "*4"));
         assert_eq!(by_raw["*10"], ("*10", "*4"));
+    }
+
+    #[test]
+    fn single_fetch_window_reaches_past_the_later_variant() {
+        // The fetch region is half-open, so `end` must be one past the later
+        // position; at `end == pos` a read whose leftmost mapped base IS the
+        // later variant falls outside the window and is never fetched.
+        let (start, end) = single_fetch_window(42_126_611, 42_126_666);
+        assert!(
+            start <= 42_126_610,
+            "start {start} must reach at least one base before the earlier variant"
+        );
+        assert!(
+            end > 42_126_666,
+            "end {end} must be past the later variant 42126666 so a read \
+             starting exactly there is still fetched"
+        );
+        // Argument order must not matter.
+        assert_eq!(single_fetch_window(42_126_666, 42_126_611), (start, end));
+    }
+
+    #[test]
+    fn single_fetch_window_clamps_a_negative_start() {
+        // A variant at position 0 must not produce a negative fetch start.
+        let (start, end) = single_fetch_window(0, 7);
+        assert_eq!(start, 0, "start must be clamped to 0, got {start}");
+        assert_eq!(end, 8, "end must be one past the later variant, got {end}");
     }
 }
