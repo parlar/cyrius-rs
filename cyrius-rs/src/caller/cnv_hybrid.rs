@@ -188,7 +188,19 @@ pub fn get_cnvtag(
         consensus.intron1_upstream.unwrap(),
     ) {
         change_point.sort();
-        let sv_call = transform_cnvtag(&change_point.join("_"));
+        let joined = change_point.join("_");
+        let sv_call = transform_cnvtag(&joined);
+        if sv_call.is_empty() {
+            // The exon9hyb/star5 and dup/star13 cancellation rules in
+            // transform_cnvtag can cancel every detected event, leaving no
+            // tag. Route that into the existing no-call path instead of
+            // reporting an empty-string CNV_group (finding #20).
+            log::info!(
+                "get_cnvtag: CNV events cancelled out (change points \"{}\") -- no CNV tag",
+                joined
+            );
+            return (None, consensus);
+        }
         return (Some(sv_call), consensus);
     }
 
@@ -239,6 +251,57 @@ fn transform_cnvtag(cnvtag: &str) -> String {
         return "cn4".to_string();
     }
     split_call.join("_")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- transform_cnvtag: direct coverage of the pure helper ----
+    //
+    // finding #20: total_cn=4, all sites CN 2, exon9gc=None, spacer=Some(4)
+    // drives get_cnvtag to build change_point events exon9hyb x2 + star5 x2,
+    // which sort/join to exactly the string used below. transform_cnvtag
+    // correctly cancels every matched pair down to "" -- that part of the
+    // pure function is not the bug. The bug is one level up, in get_cnvtag,
+    // which wrapped that "" in `Some("")` instead of treating a fully
+    // cancelled result as a no-call. That is covered by the test below.
+
+    #[test]
+    fn transform_cnvtag_cancels_matched_pairs_to_empty_string() {
+        assert_eq!(transform_cnvtag("exon9hyb_exon9hyb_star5_star5"), "");
+    }
+
+    /// Normal path: an uncancelled "dup" still becomes a real tag.
+    #[test]
+    fn transform_cnvtag_still_produces_a_real_tag_for_uncancelled_input() {
+        assert_eq!(transform_cnvtag("dup"), "cn3");
+    }
+
+    /// Line ~210 special-cases this exact pair so it is NOT cancelled --
+    /// it denotes a specific *5-with-exon9-hybrid call, not a cancellation.
+    #[test]
+    fn transform_cnvtag_does_not_cancel_the_exon9hyb_star5_special_case() {
+        assert_eq!(transform_cnvtag("exon9hyb_star5"), "exon9hyb_star5");
+    }
+
+    // ---- get_cnvtag: the actual bug -- Some("") must become a no-call ----
+
+    #[test]
+    fn get_cnvtag_reports_no_call_instead_of_an_empty_tag_when_events_cancel() {
+        // finding #20's exact traced scenario: total_cn=4, all sites CN 2,
+        // exon9gc_call_stringent=None, spacer_cn=Some(4). This produces
+        // change_point events exon9hyb x2 + star5 x2, which cancel to ""
+        // in transform_cnvtag. Before the fix, get_cnvtag returned
+        // `Some("".to_string())`, which main.rs would print as CNV_group "".
+        let cn_call_per_site = vec![Some(2u32); 120];
+        let raw_d6_cn = vec![2.0f64; 120];
+        let (tag, _consensus) = get_cnvtag(4, &raw_d6_cn, &cn_call_per_site, None, Some(4));
+        assert_eq!(
+            tag, None,
+            "an all-events-cancel result must be a no-call, not Some(\"\")"
+        );
+    }
 }
 
 /// Check that the CNV combination produces the right final copy number.
