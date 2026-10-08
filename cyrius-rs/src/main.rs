@@ -985,6 +985,15 @@ fn main() {
 
     let cli = Cli::parse();
 
+    // Size rayon's global pool from --threads before anything can touch rayon.
+    // Both rayon users (the control-region loop in `bin_count` and
+    // `diplotype_caller`'s `par_chunks`) sit inside `d6_star_caller`, but this
+    // is deliberately the earliest point at which `cli.threads` is known: a
+    // global pool can only be built once, and whichever rayon call runs first
+    // builds the default all-cores pool if we have not. Placing it here means
+    // no later code path can bypass the bound. Review finding #10.
+    let pool_threads = cyrius_rs::threading::init_rayon_global_pool(cli.threads);
+
     let (bam_name, index_name) = if cli.input.contains("##idx##") {
         let parts: Vec<&str> = cli.input.splitn(2, "##idx##").collect();
         (parts[0].to_string(), Some(parts[1].to_string()))
@@ -1104,7 +1113,11 @@ fn main() {
         );
     }
 
-    log::info!("Processing sample {}", sample_id);
+    log::info!(
+        "Processing sample {} with {} rayon thread(s)",
+        sample_id,
+        pool_threads
+    );
 
     let mut cyp2d6_call = d6_star_caller(
         &bam_name,

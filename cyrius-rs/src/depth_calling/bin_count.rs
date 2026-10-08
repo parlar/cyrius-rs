@@ -355,18 +355,33 @@ pub fn get_normed_depth(
             control_gc.push(*gc);
         }
     } else {
-        // Parallel processing using rayon
+        // Parallel processing using rayon. One reader is opened per *chunk*,
+        // not per region: `get_read_count` fetches its region and drains it,
+        // so it leaves no reader state behind -- the serial branch above
+        // already reuses a single reader for all 50 regions. Chunking to
+        // ~n_cores pieces keeps every worker busy while cutting the opens
+        // from one-per-region (50, each of which re-reads the index and, for
+        // CRAM, the reference) to at most n_cores. `par_chunks` and `collect`
+        // both preserve order, and the per-chunk map is sequential, so
+        // `control_counts`/`control_gc` come out in region order exactly as
+        // the serial branch produces them. Review finding #10.
         use rayon::prelude::*;
-        let results: Result<Vec<(f64, f64)>, String> = norm_regions
-            .par_iter()
-            .map(|(region, gc)| {
+        let chunk_len = norm_regions.len().div_ceil(n_cores).max(1);
+        let results: Result<Vec<Vec<(f64, f64)>>, String> = norm_regions
+            .par_chunks(chunk_len)
+            .map(|chunk| {
                 let mut r = open()?;
-                let nreads = get_read_count(&mut r, region, 0);
-                let region_length = (region.2 - region.1) as f64;
-                Ok((nreads as f64 / region_length, *gc))
+                Ok(chunk
+                    .iter()
+                    .map(|(region, gc)| {
+                        let nreads = get_read_count(&mut r, region, 0);
+                        let region_length = (region.2 - region.1) as f64;
+                        (nreads as f64 / region_length, *gc)
+                    })
+                    .collect())
             })
             .collect();
-        for (norm_depth, gc) in results? {
+        for (norm_depth, gc) in results?.into_iter().flatten() {
             control_counts.push(norm_depth);
             control_gc.push(gc);
         }
@@ -511,6 +526,58 @@ mod tests {
         let r = get_normed_depth(link.to_str().unwrap(), &regions, 1, None, bai.to_str());
         let _ = std::fs::remove_dir_all(&dir);
         assert!(r.is_ok(), "{:?}", r.err());
+    }
+
+    #[test]
+    fn parallel_control_regions_are_bit_identical_to_the_serial_path() {
+        // The n_cores > 1 branch reuses one reader per chunk instead of
+        // opening one per region; this pins that it produces exactly the same
+        // normalization as the single-reader serial branch, bit for bit.
+        // Skipped when the benchmark data is not present.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let bam = root.join("benchmark/HG00096_pgx_regions.bam");
+        if !bam.exists() {
+            eprintln!("skipping: benchmark BAM not present");
+            return;
+        }
+        let bam = bam.to_str().unwrap();
+        let regions =
+            crate::depth_calling::utilities::parse_region_file(crate::data::REGION_BED, "chr38");
+        let serial = get_normed_depth(bam, &regions, 1, None, None).unwrap();
+        for n_cores in [2usize, 4, 7] {
+            let parallel = get_normed_depth(bam, &regions, n_cores, None, None).unwrap();
+            assert_eq!(
+                serial.mediandepth.to_bits(),
+                parallel.mediandepth.to_bits(),
+                "mediandepth differs at n_cores={}",
+                n_cores
+            );
+            assert_eq!(
+                serial.mad.to_bits(),
+                parallel.mad.to_bits(),
+                "mad differs at n_cores={}",
+                n_cores
+            );
+            assert_eq!(
+                serial.normalized.len(),
+                parallel.normalized.len(),
+                "region set differs at n_cores={}",
+                n_cores
+            );
+            for (region, s_depth) in &serial.normalized {
+                let p_depth = parallel
+                    .normalized
+                    .get(region)
+                    .unwrap_or_else(|| panic!("region {} missing at n_cores={}", region, n_cores));
+                assert_eq!(
+                    s_depth.map(f64::to_bits),
+                    p_depth.map(f64::to_bits),
+                    "region {} differs at n_cores={}",
+                    region,
+                    n_cores
+                );
+            }
+        }
     }
 
     #[test]

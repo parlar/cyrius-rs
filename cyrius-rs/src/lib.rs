@@ -4,4 +4,5 @@ pub mod depth_calling;
 pub mod fisher;
 pub mod phenotype;
 pub mod stats;
+pub mod threading;
 pub mod types;
