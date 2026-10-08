@@ -61,6 +61,23 @@ pub fn get_reads_by_region(
             None => continue,
         };
 
+        // A site's alleles can differ in length (indels), and the two lengths
+        // that differ belong to DIFFERENT regions -- e.g. a 22 bp reg1 ALT
+        // against a 13 bp reg2 REF at g.42126656-42126657insAGTGGGCAC. Gating
+        // each allele by its own `qpos + allele.len() <= seq.len()` therefore
+        // let a read ending within `max_len` of the site match the SHORTER
+        // allele while the longer one was never even tested, so reads near
+        // their 3' end were counted only for the shorter allele and the allele
+        // fractions were biased (review finding #6). The bound is taken over
+        // the union of both regions' alleles, so a read without room for the
+        // longest allele at the site is counted for neither.
+        let max_allele_len = reg1_allele
+            .split(',')
+            .chain(reg2_allele.split(','))
+            .map(str::len)
+            .max()
+            .unwrap_or(0);
+
         // Pileup at this position. A fetch failure (bad region / corrupt index)
         // means no reads here — skip rather than aborting the whole caller.
         if reader
@@ -112,38 +129,38 @@ pub fn get_reads_by_region(
                     None => continue,
                 };
 
+                let seq = record.seq().as_bytes();
+                // One bound for every allele of the site: either the read has
+                // room for all of them or it is counted for none.
+                if qpos + max_allele_len > seq.len() {
+                    continue;
+                }
+
                 let read_name =
                     String::from_utf8_lossy(record.qname()).to_string();
-                let seq = record.seq().as_bytes();
 
                 // Check reg1 alleles
                 for allele in reg1_allele.split(',') {
-                    let end_pos = qpos + allele.len();
-                    if end_pos <= seq.len() {
-                        let read_seq =
-                            String::from_utf8_lossy(&seq[qpos..end_pos]);
-                        if read_seq == allele {
-                            if record.is_reverse() {
-                                lsnp1_reverse[dsnp_index].insert(read_name.clone());
-                            } else {
-                                lsnp1_forward[dsnp_index].insert(read_name.clone());
-                            }
+                    let read_seq =
+                        String::from_utf8_lossy(&seq[qpos..qpos + allele.len()]);
+                    if read_seq == allele {
+                        if record.is_reverse() {
+                            lsnp1_reverse[dsnp_index].insert(read_name.clone());
+                        } else {
+                            lsnp1_forward[dsnp_index].insert(read_name.clone());
                         }
                     }
                 }
 
                 // Check reg2 alleles
                 for allele in reg2_allele.split(',') {
-                    let end_pos = qpos + allele.len();
-                    if end_pos <= seq.len() {
-                        let read_seq =
-                            String::from_utf8_lossy(&seq[qpos..end_pos]);
-                        if read_seq == allele {
-                            if record.is_reverse() {
-                                lsnp2_reverse[dsnp_index].insert(read_name.clone());
-                            } else {
-                                lsnp2_forward[dsnp_index].insert(read_name.clone());
-                            }
+                    let read_seq =
+                        String::from_utf8_lossy(&seq[qpos..qpos + allele.len()]);
+                    if read_seq == allele {
+                        if record.is_reverse() {
+                            lsnp2_reverse[dsnp_index].insert(read_name.clone());
+                        } else {
+                            lsnp2_forward[dsnp_index].insert(read_name.clone());
                         }
                     }
                 }
@@ -298,4 +315,175 @@ pub fn get_supporting_reads_single_region(
         lsnp1_for.iter().map(|s| s.len()).collect(),
         lsnp1_rev.iter().map(|s| s.len()).collect(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The real alleles of `g.42126656-42126657insAGTGGGCAC` from
+    /// `data/CYP2D6_target_variant_38.txt`: reg1 (D6 ALT) is 22 bp, reg2 (D7
+    /// REF) is 13 bp, and they already differ at offset 12 (`A` vs `C`), so a
+    /// read carrying ALT can never be mistaken for REF on its first 13 bases.
+    const ALT_22: &str = "TCCAGTGGGCACAGTGGGCACC";
+    const REF_13: &str = "TCCAGTGGGCACC";
+    /// 1-based site position, matching the `dsnp` key below.
+    const SITE_1BASED: i64 = 1001;
+    /// Every fixture read is 50M, so there is room for the 22 bp allele only
+    /// when the site sits at least 22 bases from the read's 3' end.
+    const READ_LEN: usize = 50;
+
+    /// Write an indexed single-site BAM holding three 50M reads.
+    ///
+    /// * `ref_at_end` — positioned so exactly 13 bases remain from the site:
+    ///   enough for the 13 bp REF, not for the 22 bp ALT. This is the biased
+    ///   read; it must be counted for neither allele.
+    /// * `ref_roomy` — 10 bases into the read, so both alleles fit. Counted
+    ///   as REF.
+    /// * `alt_roomy` — same offset, carrying ALT. Counted as ALT.
+    ///
+    /// NOTE: `bam::Record::new()` leaves `flags = 4` (unmapped), and htslib's
+    /// `bam_endpos` ignores the CIGAR for an unmapped record, so an unflagged
+    /// record spans only `[pos, pos + 1)` and silently drops out of region
+    /// queries. The `set_flags(0)` calls below are load-bearing.
+    fn write_indel_end_bias_bam(dir: &std::path::Path) -> std::path::PathBuf {
+        let mut header = bam::header::Header::new();
+        let mut sq = bam::header::HeaderRecord::new(b"SQ");
+        sq.push_tag(b"SN", "chr22");
+        sq.push_tag(b"LN", 50_818_468);
+        header.push_record(&sq);
+
+        let path = dir.join("indel_end_bias.bam");
+        let site_0based = SITE_1BASED - 1;
+        {
+            let mut writer =
+                bam::Writer::from_path(&path, &header, bam::Format::Bam).unwrap();
+            let cigar = bam::record::CigarString(vec![bam::record::Cigar::Match(
+                READ_LEN as u32,
+            )]);
+            let qual = vec![30u8; READ_LEN];
+
+            let mut emit = |name: &[u8], qpos: usize, allele: &str| {
+                let mut seq = vec![b'G'; READ_LEN];
+                seq[qpos..qpos + allele.len()].copy_from_slice(allele.as_bytes());
+                let mut rec = bam::Record::new();
+                rec.set(name, Some(&cigar), &seq, &qual);
+                rec.set_tid(0);
+                rec.set_pos(site_0based - qpos as i64);
+                rec.set_mapq(60);
+                rec.set_flags(0); // mapped, primary, forward, not a duplicate
+                writer.write(&rec).unwrap();
+            };
+
+            // Sorted by start position: qpos 37 starts at 963, qpos 10 at 990.
+            emit(b"ref_at_end", READ_LEN - REF_13.len(), REF_13);
+            emit(b"ref_roomy", 10, REF_13);
+            emit(b"alt_roomy", 10, ALT_22);
+        }
+        bam::index::build(&path, None::<&std::path::PathBuf>, bam::index::Type::Bai, 1)
+            .unwrap();
+        path
+    }
+
+    fn names(sets: &[&Vec<HashSet<String>>]) -> Vec<String> {
+        let mut v: Vec<String> = sets
+            .iter()
+            .flat_map(|s| s[0].iter().cloned())
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn a_read_without_room_for_the_longer_allele_counts_for_neither() {
+        // Review finding #6. Each allele used to be gated by its own
+        // `qpos + allele.len() <= seq.len()`, so a read ending within
+        // `max_len` of the site could match the SHORTER allele and never the
+        // longer one. `ref_at_end` has exactly 13 bases left: it matched the
+        // 13 bp REF while the 22 bp ALT was never even tested, so reads near
+        // their 3' end were counted only for the shorter allele and the
+        // allele fractions were biased. The bound must be taken over the
+        // union of BOTH regions' alleles, because the two lengths that differ
+        // here belong to different regions.
+        let dir = std::env::temp_dir()
+            .join(format!("cyrius_indel_end_bias_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bam_path = write_indel_end_bias_bam(&dir);
+        let mut reader = bam::IndexedReader::from_path(&bam_path).unwrap();
+
+        let key = format!("{SITE_1BASED}_0");
+        let mut dsnp: indexmap::IndexMap<String, String> = indexmap::IndexMap::new();
+        dsnp.insert(key.clone(), format!("{ALT_22}_{REF_13}"));
+        let mut dindex: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        dindex.insert(key, 0);
+
+        let (reg1_fwd, reg1_rev, reg2_fwd, reg2_rev) =
+            get_reads_by_region(&mut reader, "chr22", &dsnp, &dindex, 0, None, false);
+
+        let reg1 = names(&[&reg1_fwd, &reg1_rev]);
+        let reg2 = names(&[&reg2_fwd, &reg2_rev]);
+
+        // Clean up before asserting so a failure leaves nothing behind.
+        drop(reader);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(
+            reg1,
+            vec!["alt_roomy".to_string()],
+            "only the read with room for the 22 bp ALT may support reg1; got {reg1:?}"
+        );
+        assert_eq!(
+            reg2,
+            vec!["ref_roomy".to_string()],
+            "`ref_at_end` has exactly {} bases left from the site -- enough for \
+             the {} bp REF but not for the {} bp ALT -- so it must be counted \
+             for NEITHER allele, not for the shorter one; got {reg2:?}",
+            REF_13.len(),
+            REF_13.len(),
+            ALT_22.len()
+        );
+    }
+
+    #[test]
+    fn equal_length_alleles_are_unaffected_by_the_read_end_bound() {
+        // Guard against over-correcting: when both regions' alleles are the
+        // same length (every site in `data/CYP2D6_SNP_38.txt`), a read whose
+        // last base is the site must still be counted.
+        let dir = std::env::temp_dir()
+            .join(format!("cyrius_indel_end_bias_eq_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bam_path = write_indel_end_bias_bam(&dir);
+        let mut reader = bam::IndexedReader::from_path(&bam_path).unwrap();
+
+        // 1 bp alleles: `ref_at_end` carries 'T' (REF_13[0]) at the site.
+        let key = format!("{SITE_1BASED}_0");
+        let mut dsnp: indexmap::IndexMap<String, String> = indexmap::IndexMap::new();
+        dsnp.insert(key.clone(), "G_T".to_string());
+        let mut dindex: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        dindex.insert(key, 0);
+
+        let (reg1_fwd, reg1_rev, reg2_fwd, reg2_rev) =
+            get_reads_by_region(&mut reader, "chr22", &dsnp, &dindex, 0, None, false);
+
+        let reg1 = names(&[&reg1_fwd, &reg1_rev]);
+        let reg2 = names(&[&reg2_fwd, &reg2_rev]);
+
+        drop(reader);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // `alt_roomy` has 'T' too (ALT_22[0]), `ref_roomy` has 'T'.
+        assert_eq!(
+            reg2,
+            vec![
+                "alt_roomy".to_string(),
+                "ref_at_end".to_string(),
+                "ref_roomy".to_string()
+            ],
+            "all three reads carry 'T' at the site, and a 1 bp allele fits in \
+             every one of them; got {reg2:?}"
+        );
+        assert!(reg1.is_empty(), "no read carries 'G' at the site; got {reg1:?}");
+    }
 }
