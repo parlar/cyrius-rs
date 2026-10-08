@@ -112,9 +112,45 @@ fn get_bases_per_read(
                     let read_name = String::from_utf8_lossy(record.qname()).to_string();
                     let seq = record.seq().as_bytes();
 
-                    let min_len = std::cmp::min(reg1_allele.len(), reg2_allele.len());
+                    // `min_len` is the length of the ONE slice extracted for
+                    // this (read, site). Both regions' allele fields can hold
+                    // several comma-separated alleles ('A,G'), so the raw
+                    // string length is not an allele length at all: taking the
+                    // minimum over the joined `reg1_allele`/`reg2_allele`
+                    // strings counted the commas and the extra alleles, and
+                    // the slice then came out longer than anything
+                    // `get_hap_counts` compares it against -- it splits on ','
+                    // and never matches the joined form, so every read at such
+                    // a site scored 'x' (review finding #7). Minimise over the
+                    // comma-SPLIT alleles of BOTH regions, the same split
+                    // `get_hap_counts` uses, so the extraction length agrees
+                    // with the matching.
+                    //
+                    // Latent today: `data/CYP2D6_haplotype_38.txt` has zero
+                    // commas. Residual limitation NOT addressed here: a single
+                    // fixed-length slice still cannot discriminate alleles of
+                    // unequal length at one site (the way `snp_count` does by
+                    // matching each allele with its own length). The haplotype
+                    // DB's one unequal-length row -- line 10, g.42130653
+                    // `GCAGG` vs `GCAAGG` -- is reached only by
+                    // `call_var42130655ins_a` through
+                    // `get_supporting_reads_single_region`, never through
+                    // haplotype extraction, so it is unreachable from here.
+                    let min_len = reg1_allele
+                        .split(',')
+                        .chain(reg2_allele.split(','))
+                        .map(str::len)
+                        .min()
+                        .unwrap_or(0);
                     let end_pos = qpos + min_len;
-                    if end_pos >= seq.len() {
+                    // `>`, not `>=`: `seq[qpos..end_pos]` is a valid slice when
+                    // `end_pos == seq.len()`, i.e. when the extracted bases run
+                    // to the read's last stored base. The old `>=` dropped
+                    // those reads from the haplotypes while `snp_count`'s bound
+                    // (`qpos + max_allele_len > seq.len()`) still counted the
+                    // very same reads in the D6/D7 depth ratios -- the two
+                    // copies of this pileup loop had drifted apart here.
+                    if end_pos > seq.len() {
                         continue;
                     }
 
@@ -230,4 +266,240 @@ pub fn extract_hap(
         hap_count.entry(key).or_insert_with(Vec::new).push(1);
     }
     hap_count
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One fixture read: `(qname, 0-based start, [(qpos, bases)])`.
+    type FixtureRead<'a> = (&'a str, i64, &'a [(usize, &'a str)]);
+
+    /// Write a small indexed BAM of all-match reads.
+    ///
+    /// Each read is `(qname, 0-based start, [(qpos, bases)])`; the rest of the
+    /// read is `N`, which matches no allele used below. Reads must be given in
+    /// coordinate order so the BAI build succeeds.
+    ///
+    /// NOTE: `bam::Record::new()` leaves `flags = 4` (unmapped), and htslib's
+    /// `bam_endpos` ignores the CIGAR for an unmapped record, so an unflagged
+    /// record spans only `[pos, pos + 1)` and silently drops out of the region
+    /// queries `get_bases_per_read` issues. The `set_flags(0)` below is
+    /// load-bearing.
+    fn write_hap_bam(
+        path: &std::path::Path,
+        read_len: usize,
+        reads: &[FixtureRead],
+    ) {
+        let mut header = bam::header::Header::new();
+        let mut sq = bam::header::HeaderRecord::new(b"SQ");
+        sq.push_tag(b"SN", "chr22");
+        sq.push_tag(b"LN", 50_818_468);
+        header.push_record(&sq);
+
+        {
+            let mut writer = bam::Writer::from_path(path, &header, bam::Format::Bam).unwrap();
+            let cigar =
+                bam::record::CigarString(vec![bam::record::Cigar::Match(read_len as u32)]);
+            let qual = vec![30u8; read_len];
+            for (name, pos, bases) in reads {
+                let mut seq = vec![b'N'; read_len];
+                for (qpos, allele) in bases.iter() {
+                    seq[*qpos..*qpos + allele.len()].copy_from_slice(allele.as_bytes());
+                }
+                let mut rec = bam::Record::new();
+                rec.set(name.as_bytes(), Some(&cigar), &seq, &qual);
+                rec.set_tid(0);
+                rec.set_pos(*pos);
+                rec.set_mapq(60);
+                rec.set_flags(0); // mapped, primary, forward, not a duplicate
+                writer.write(&rec).unwrap();
+            }
+        }
+        bam::index::build(path, None::<&std::path::Path>, bam::index::Type::Bai, 1).unwrap();
+    }
+
+    /// Build a `SnpLookup` the way `get_snp_position` does: `dsnp1` keyed
+    /// `{reg1_pos}_{index}`, `dsnp2` keyed `{reg2_pos}_{index}`, both holding
+    /// the same `{reg1_alleles}_{reg2_alleles}` value, and `dindex` mapping
+    /// either key to the shared index.
+    fn hap_lookup(sites: &[(i64, i64, &str)]) -> SnpLookup {
+        let mut dsnp1 = indexmap::IndexMap::new();
+        let mut dsnp2 = indexmap::IndexMap::new();
+        let mut dindex: HashMap<String, usize> = HashMap::new();
+        for (idx, (reg1_pos, reg2_pos, alleles)) in sites.iter().enumerate() {
+            let k1 = format!("{reg1_pos}_{idx}");
+            let k2 = format!("{reg2_pos}_{idx}");
+            dsnp1.insert(k1.clone(), (*alleles).to_string());
+            dsnp2.insert(k2.clone(), (*alleles).to_string());
+            dindex.insert(k1, idx);
+            dindex.insert(k2, idx);
+        }
+        SnpLookup {
+            dsnp1,
+            dsnp2,
+            nchr: "chr22".to_string(),
+            dindex,
+        }
+    }
+
+    /// Scratch directory unique to the calling test.
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("cyrius_hap_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_read_whose_last_base_completes_the_site_keeps_its_haplotype() {
+        // Review finding #7. `get_bases_per_read` skipped a read when
+        // `end_pos >= seq.len()`, so a read whose extracted bases run to its
+        // LAST stored base was dropped from the haplotypes -- even though
+        // `seq[qpos..end_pos]` is a perfectly valid slice there, and even
+        // though `snp_count`'s bound (`qpos + max_allele_len > seq.len()`)
+        // still counts that same read in the D6/D7 depth ratios. The two
+        // copies of this pileup loop had drifted apart on exactly this test.
+        //
+        // The fixture mirrors `call_var42127803hap`'s real panel: the two 1 bp
+        // sites g.42127803 and g.42127941, 138 bp apart, read over 150 bp
+        // reads. 138 bp apart in a 150 bp read leaves at most 11 bases of
+        // slack past the second site, so a read covering both sites is always
+        // close to its end there -- `second_site_at_read_end` starts so that
+        // site 2 is its final stored base, i.e. `qpos + min_len == seq.len()`
+        // and the bound has ZERO slack. It is the read that pins the `>`:
+        // flipping it back to `>=` makes its haplotype "1x" instead of "12",
+        // and since `extract_hap` discards any haplotype containing 'x' the
+        // read then vanishes from the '12'/'21' counts the caller gates on.
+        let dir = scratch("end_bound");
+        let bam_path = dir.join("hap_end_bound.bam");
+        // Site 1 at 1-based 1001 (0-based 1000), site 2 at 1-based 1139
+        // (0-based 1138) -- the same 138 bp spacing as 42127803/42127941.
+        const READ_LEN: usize = 150;
+        write_hap_bam(
+            &bam_path,
+            READ_LEN,
+            &[
+                // qpos 11 at site 1, qpos 149 at site 2: site 2 is this read's
+                // final stored base.  1138 - 149 = 989.
+                ("second_site_at_read_end", 989, &[(11, "C"), (149, "A")]),
+                // qpos 0 / qpos 138: 11 bases of slack past site 2.
+                ("roomy", 1000, &[(0, "T"), (138, "G")]),
+            ],
+        );
+
+        let base_db = hap_lookup(&[(1001, 2001, "C_T"), (1139, 2139, "G_A")]);
+        let mut reader = bam::IndexedReader::from_path(&bam_path).unwrap();
+        let haps = get_haplotypes_from_bam_single_region(&mut reader, &base_db, &[0, 1]);
+        let counts = extract_hap(&haps, &[0, 1]);
+
+        drop(reader);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(
+            haps.get("second_site_at_read_end").map(String::as_str),
+            Some("12"),
+            "site 2 is this read's last stored base, so `end_pos == seq.len()` \
+             and the slice is still valid -- under the old `>=` bound the site \
+             was dropped and the haplotype became \"1x\"; got {:?}",
+            haps.get("second_site_at_read_end")
+        );
+        assert_eq!(
+            haps.get("roomy").map(String::as_str),
+            Some("21"),
+            "control read with 11 bases of slack past site 2; got {:?}",
+            haps.get("roomy")
+        );
+        // `call_var42127803hap` requires BOTH '12' and '21' to be seen.
+        assert_eq!(
+            counts.get("12").map(|v| v.iter().sum::<u32>()),
+            Some(1),
+            "the read ending exactly at site 2 must reach the '12' count; got {counts:?}"
+        );
+        assert_eq!(
+            counts.get("21").map(|v| v.iter().sum::<u32>()),
+            Some(1),
+            "the roomy read must reach the '21' count; got {counts:?}"
+        );
+    }
+
+    #[test]
+    fn allele_length_is_taken_per_allele_not_over_the_comma_joined_string() {
+        // Review finding #7, second half. `min_len` used to come from the RAW
+        // `reg1_allele`/`reg2_allele` strings, which can hold several
+        // comma-separated alleles ('A,G'). The commas and the extra alleles
+        // inflate the string length, so the single slice extracted here came
+        // out longer than any allele `get_hap_counts` later matches it
+        // against -- and `get_hap_counts` splits on ',' , so it never compares
+        // against the joined form. Minimising over the comma-SPLIT alleles of
+        // both regions is what makes the extraction length agree with the
+        // matching.
+        //
+        // HONEST SCOPE: `data/CYP2D6_haplotype_38.txt` contains ZERO commas,
+        // so this is a trap-removal test, not a bug reproduction. No shipped
+        // input reaches it, and the 62-BAM before/after measurement cannot
+        // move because of it.
+        //
+        // The fixture also shows the finding's own characterisation of when
+        // the raw `min_len` goes wrong ("both alleles contain commas, or a
+        // comma string is the shorter one") is too narrow: here only reg1 has
+        // a comma and its raw string is the LONGER of the two ("A,G" is 3
+        // bytes, "AC" is 2), yet the raw minimum is 2 while the true minimum
+        // allele length is 1.
+        let dir = scratch("comma");
+        let bam_path = dir.join("hap_comma.bam");
+        const READ_LEN: usize = 50;
+        write_hap_bam(
+            &bam_path,
+            READ_LEN,
+            &[
+                // Carries 'A' at the site, then 'C'.
+                ("a_then_c", 980, &[(20, "AC")]),
+                // Carries 'G' at the site, then 'T'.
+                ("g_then_t", 990, &[(10, "GT")]),
+            ],
+        );
+
+        // reg1 offers two 1 bp alleles, reg2 one 2 bp allele.
+        //   raw  min_len = min("A,G".len(), "AC".len())        = 2  (wrong)
+        //   split min_len = min(1 /*A*/, 1 /*G*/, 2 /*AC*/)    = 1  (right)
+        let base_db = hap_lookup(&[(1001, 2001, "A,G_AC")]);
+        let mut reader = bam::IndexedReader::from_path(&bam_path).unwrap();
+        let haps = get_haplotypes_from_bam_single_region(&mut reader, &base_db, &[0]);
+
+        drop(reader);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(
+            haps.get("g_then_t").map(String::as_str),
+            Some("1"),
+            "this read carries reg1's 1 bp 'G' allele. With the raw `min_len` \
+             of 2 the extracted slice was \"GT\", which matches none of \
+             reg1's 'A'/'G' or reg2's 'AC', so the read scored 'x' and \
+             `extract_hap` threw it away; got {:?}",
+            haps.get("g_then_t")
+        );
+        // RESIDUAL LIMITATION, pinned deliberately and NOT fixed here (out of
+        // scope for this change): `get_bases_per_read` still extracts ONE
+        // fixed-length slice per (read, site), so at a site whose alleles have
+        // different lengths it can only ever test the shortest. This read
+        // carries reg2's 2 bp "AC"; with the per-allele minimum of 1 the slice
+        // is "A", which matches reg1's 1 bp 'A' instead, so the read now
+        // scores '1' where the raw `min_len` of 2 happened to score it '2'.
+        // Neither is correct -- a single fixed-length extraction cannot
+        // discriminate alleles of unequal length at one site, which is what
+        // `snp_count` does by matching each allele with its own length. This
+        // is unreachable with today's data (see HONEST SCOPE above): the one
+        // unequal-length row in the haplotype DB, line 10 / g.42130653
+        // GCAGG vs GCAAGG, is consumed only by `call_var42130655ins_a` through
+        // `get_supporting_reads_single_region` and never reaches
+        // `get_bases_per_read`.
+        assert_eq!(
+            haps.get("a_then_c").map(String::as_str),
+            Some("1"),
+            "documents the residual unequal-length limitation; got {:?}",
+            haps.get("a_then_c")
+        );
+    }
 }
