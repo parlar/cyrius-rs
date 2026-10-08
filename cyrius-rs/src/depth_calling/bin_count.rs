@@ -358,13 +358,26 @@ pub fn get_normed_depth(
         // Parallel processing using rayon. One reader is opened per *chunk*,
         // not per region: `get_read_count` fetches its region and drains it,
         // so it leaves no reader state behind -- the serial branch above
-        // already reuses a single reader for all 50 regions. Chunking to
-        // ~n_cores pieces keeps every worker busy while cutting the opens
-        // from one-per-region (50, each of which re-reads the index and, for
-        // CRAM, the reference) to at most n_cores. `par_chunks` and `collect`
-        // both preserve order, and the per-chunk map is sequential, so
-        // `control_counts`/`control_gc` come out in region order exactly as
-        // the serial branch produces them. Review finding #10.
+        // already reuses a single reader for all 50 regions. Each open
+        // re-reads the index and, for CRAM, the reference, so chunking cuts
+        // them where it can: `strace -e trace=openat` counts 60 opens of the
+        // BAM (each paired with one of its index) at every `-t >= 2` with
+        // one-reader-per-region, and 12 / 14 / 18 / 23 at
+        // `-t` 2 / 4 / 8 / 16 with this chunking. The saving runs out above
+        // ~50 threads, where `chunk_len` saturates at 1 and the count returns
+        // to 60 (measured identical to the unchunked loop at `-t 50` and
+        // `-t 72`); the win is at the thread counts people actually pass.
+        //
+        // The property that matters for correctness is that the chunks are a
+        // *partition*: every control region is counted exactly once, none
+        // dropped and none duplicated. `normalize` reduces the (depth, gc)
+        // pairs order-independently, so it is invariant under a consistent
+        // permutation of them -- the pin test below stays green if the whole
+        // sequence is reversed, and that is fine. What it does catch is a
+        // broken partition: `par_chunks_exact` (drops the final short chunk)
+        // fails it on `mediandepth`, and iterating `norm_regions` instead of
+        // `chunk` (counts every region in every chunk) fails it on `mad`.
+        // Review finding #10.
         use rayon::prelude::*;
         let chunk_len = norm_regions.len().div_ceil(n_cores).max(1);
         let results: Result<Vec<Vec<(f64, f64)>>, String> = norm_regions

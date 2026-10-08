@@ -985,15 +985,6 @@ fn main() {
 
     let cli = Cli::parse();
 
-    // Size rayon's global pool from --threads before anything can touch rayon.
-    // Both rayon users (the control-region loop in `bin_count` and
-    // `diplotype_caller`'s `par_chunks`) sit inside `d6_star_caller`, but this
-    // is deliberately the earliest point at which `cli.threads` is known: a
-    // global pool can only be built once, and whichever rayon call runs first
-    // builds the default all-cores pool if we have not. Placing it here means
-    // no later code path can bypass the bound. Review finding #10.
-    let pool_threads = cyrius_rs::threading::init_rayon_global_pool(cli.threads);
-
     let (bam_name, index_name) = if cli.input.contains("##idx##") {
         let parts: Vec<&str> = cli.input.splitn(2, "##idx##").collect();
         (parts[0].to_string(), Some(parts[1].to_string()))
@@ -1030,6 +1021,20 @@ fn main() {
         write_file_or_exit(&out_tsv, header);
         return;
     }
+
+    // Size rayon's global pool from --threads before any rayon work can start.
+    // A global pool can only be built once, and whichever rayon call runs first
+    // builds the default all-cores pool if we have not, so this has to happen
+    // upstream of every rayon user. There are exactly two -- the control-region
+    // loop in `bin_count` and `diplotype_caller`'s `par_chunks` -- and both sit
+    // inside `d6_star_caller`, below. Nothing between `Cli::parse()` and here
+    // touches rayon either (string splitting, the sample-id default,
+    // `create_dir_all`, path formatting, the existence check and, on the
+    // early-return path, `write_file_or_exit`), which is why this sits *after*
+    // the "input does not exist" return rather than straight after
+    // `Cli::parse()`: a no-op run on a missing input used to spawn a pool it
+    // never used. Review finding #10.
+    let pool_threads = cyrius_rs::threading::init_rayon_global_pool(cli.threads);
 
     // Prepare data (after existence check, with the BAM half of ##idx##)
     log::info!("Starting {} v{}", TOOL_NAME, TOOL_VERSION);
@@ -1113,11 +1118,27 @@ fn main() {
         );
     }
 
-    log::info!(
-        "Processing sample {} with {} rayon thread(s)",
-        sample_id,
-        pool_threads
-    );
+    match pool_threads {
+        Some(n) => log::info!("Processing sample {} with {} rayon thread(s)", sample_id, n),
+        None => log::info!(
+            "Processing sample {} (rayon thread pool size unknown)",
+            sample_id
+        ),
+    }
+
+    // Now that --threads really bounds rayon, --diplotype-caller at the default
+    // -t 1 is single-threaded where it used to borrow every core by accident:
+    // ~2.5x slower in wall time (for ~28% less total CPU). Say so here, before
+    // the slow part starts, rather than leaving the user to infer it from the
+    // "1 rayon thread(s)" line above. No CLI surface change: --help still reads
+    // "Number of threads".
+    if features.diplotype_caller && pool_threads == Some(1) {
+        log::info!(
+            "--diplotype-caller scores diplotypes on rayon's thread pool, which \
+             --threads has bounded to 1 here; pass -t N to use more cores (-t 8 \
+             is roughly 2.5x faster in wall time on a large sample)."
+        );
+    }
 
     let mut cyp2d6_call = d6_star_caller(
         &bam_name,
