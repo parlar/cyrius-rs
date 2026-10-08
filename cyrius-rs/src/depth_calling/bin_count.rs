@@ -165,6 +165,7 @@ pub fn normalize(
         normalized: norm_count,
         mediandepth: vmedian,
         mad: vmad,
+        rep7_mapq0_fraction: None,
     }
 }
 
@@ -242,6 +243,75 @@ pub fn select_usable_control_regions(
 /// coverage-quality concern instead of only logging a warning. Any other
 /// filter value (ambiguous calls, fuzzy matches, no-calls, ...) is left
 /// untouched, since those already explain why the call is not a clean pass.
+/// (mapped reads, MAPQ-0 reads) among the reads that start in `region`:
+/// primary alignments (not secondary, not supplementary), mapped, 0-based
+/// start inside the region; duplicates included, as in `get_read_count`.
+/// A missing contig gives (0, 0); a failed fetch is an error (E1).
+pub fn get_mapq0_counts(
+    reader: &mut bam::IndexedReader,
+    region: &Region,
+) -> Result<(u64, u64), String> {
+    let tid = match reader.header().tid(region.0.as_bytes()) {
+        Some(t) => t,
+        None => return Ok((0, 0)),
+    };
+    let what = format!("{}:{}-{}", region.0, region.1, region.2);
+    fetch_region(reader, tid, region.1, region.2, &what)?;
+
+    let (mut mapped, mut mapq0) = (0u64, 0u64);
+    let mut record = bam::Record::new();
+    while let Some(result) = reader.read(&mut record) {
+        if result.is_err() {
+            continue;
+        }
+        if record.is_unmapped()
+            || record.is_secondary()
+            || record.is_supplementary()
+            || record.pos() < region.1
+            || record.pos() >= region.2
+        {
+            continue;
+        }
+        mapped += 1;
+        if record.mapq() == 0 {
+            mapq0 += 1;
+        }
+    }
+    Ok((mapped, mapq0))
+}
+
+/// `mapq0 / mapped` from `get_mapq0_counts`, or None when no mapped read
+/// starts in the region.
+pub fn mapq0_fraction((mapped, mapq0): (u64, u64)) -> Option<f64> {
+    (mapped > 0).then(|| mapq0 as f64 / mapped as f64)
+}
+
+/// cyrius-rs reads copy number from reads that fit CYP2D6 and CYP2D7 equally
+/// well, which aligners report with MAPQ 0. Pipelines that keep them put
+/// 0.58-0.91 of REP7's reads at MAPQ 0 (about 289 BAMs: NYGC bwa, bwa-mem2,
+/// minimap2, strobealign, DRAGEN 3.7.6); pipelines that drop them put 0 there
+/// (GIAB novoalign, `samtools view -q`), and their calls can be wrong at PASS.
+/// Fixed before looking at any data in the locked plan
+/// (/home/parlar_ai/cyrius-research/exp-guard, research idea P1 / H4).
+pub const MIN_REP7_MAPQ0_FRACTION: f64 = 0.40;
+
+/// Replace a PASS or Fuzzy_match filter with `"Multimapper_depleted"` when
+/// the REP7 MAPQ-0 fraction is below [`MIN_REP7_MAPQ0_FRACTION`]: the input
+/// does not meet the caller's assumption, so the call must not read as a
+/// clean pass. The genotype is still reported. Not measured (None), other
+/// filters and no-calls are left untouched.
+pub fn downgrade_filter_for_multimapper_depletion(
+    filter: Option<String>,
+    rep7_mapq0_fraction: Option<f64>,
+) -> Option<String> {
+    match (filter.as_deref(), rep7_mapq0_fraction) {
+        (Some("PASS" | "Fuzzy_match"), Some(m)) if m < MIN_REP7_MAPQ0_FRACTION => {
+            Some("Multimapper_depleted".to_string())
+        }
+        _ => filter,
+    }
+}
+
 pub fn downgrade_filter_for_high_mad(
     filter: Option<String>,
     coverage_mad: f64,
@@ -273,6 +343,7 @@ pub fn get_normed_depth(
     let mut gc_for_normalization = Vec::new();
     let mut region_type_cn = IndexMap::new();
     let mut last_region: Option<Region> = None;
+    let mut rep7_mapq0_fraction = None;
 
     for (region_type, regions) in region_dic {
         if region_type == "norm" {
@@ -285,6 +356,11 @@ pub fn get_normed_depth(
         for (region, gc) in regions {
             let nreads = get_read_count(&mut reader, region, 0)?;
             lcount.push(nreads);
+            if region.3 == "REP7" {
+                let counts = get_mapq0_counts(&mut reader, region)?;
+                log::info!("REP7: {} mapped reads, {} with MAPQ 0", counts.0, counts.1);
+                rep7_mapq0_fraction = mapq0_fraction(counts);
+            }
             if region.3.contains("_hapcn") {
                 region_length = Some(region.2 - region.1);
                 gc_for_normalization.push(*gc);
@@ -389,13 +465,15 @@ pub fn get_normed_depth(
     counts_for_normalization.extend(usable_counts);
     gc_for_normalization.extend(usable_gc);
 
-    Ok(normalize(
+    let mut normalized = normalize(
         &counts_for_normalization,
         &gc_for_normalization,
         &region_type_cn,
         read_length,
         true,
-    ))
+    );
+    normalized.rep7_mapq0_fraction = rep7_mapq0_fraction;
+    Ok(normalized)
 }
 
 /// Get normalized depth from a count file. Returns Err if the count file
@@ -909,6 +987,130 @@ mod tests {
         for n_cores in [1usize, 4] {
             let r = get_normed_depth(bam, &regions, n_cores, None, None);
             assert!(r.is_err(), "n_cores={n_cores}: a failed control-region fetch must be an error");
+        }
+    }
+
+    // ---- Multi-mapper input guard (research P1 / H4; plan locked in
+    // /home/parlar_ai/cyrius-research/exp-guard, commit 2b1a973) ----
+    //
+    // cyrius-rs reads copy number from reads that fit CYP2D6 and CYP2D7
+    // equally well (MAPQ 0). An aligner that drops or reassigns them changes
+    // the evidence itself: GIAB's novoalign BAMs have 0 MAPQ-0 reads in REP7,
+    // and HG002 2x250 novoalign is called *4/*13 PASS against truth *2/*4.
+
+    /// chr22 BAM with 50 bp reads around a test REP7 of [1000, 2000).
+    fn write_mapq_fixture_bam(path: &std::path::Path) {
+        let mut header = bam::header::Header::new();
+        let mut sq = bam::header::HeaderRecord::new(b"SQ");
+        sq.push_tag(b"SN", "chr22");
+        sq.push_tag(b"LN", 50_818_468);
+        header.push_record(&sq);
+        // (name, 0-based start, MAPQ, flags). Coordinate-sorted.
+        let reads: [(&str, i64, u8, u16); 8] = [
+            ("starts_before_region", 980, 0, 0),
+            ("mapq60_a", 1100, 60, 0),
+            ("mapq60_b", 1200, 60, 0),
+            ("mapq0", 1300, 0, 0),
+            ("mapq0_duplicate", 1400, 0, 0x400),
+            ("secondary", 1500, 0, 0x100),
+            ("supplementary", 1600, 0, 0x800),
+            ("unmapped_placed", 1700, 0, 0x4),
+        ];
+        {
+            let mut writer = bam::Writer::from_path(path, &header, bam::Format::Bam).unwrap();
+            let cigar = bam::record::CigarString(vec![bam::record::Cigar::Match(50)]);
+            for (name, pos, mapq, flags) in reads {
+                let mut rec = bam::Record::new();
+                rec.set(name.as_bytes(), Some(&cigar), &[b'A'; 50], &[30u8; 50]);
+                rec.set_tid(0);
+                rec.set_pos(pos);
+                rec.set_mapq(mapq);
+                rec.set_flags(flags); // Record::new() leaves flags = 4 (unmapped)
+                writer.write(&rec).unwrap();
+            }
+        }
+        bam::index::build(path, None::<&std::path::Path>, bam::index::Type::Bai, 1).unwrap();
+    }
+
+    fn mapq_fixture(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("cyrius_mapq_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let bam_path = dir.join("mapq.bam");
+        write_mapq_fixture_bam(&bam_path);
+        (dir, bam_path)
+    }
+
+    #[test]
+    fn get_mapq0_counts_counts_mapped_primary_reads_starting_in_the_region() {
+        // Counted: mapq60_a, mapq60_b, mapq0, mapq0_duplicate (duplicates
+        // stay in, as in get_read_count). Not counted: the read starting
+        // before the region, secondary, supplementary, and the unmapped read.
+        let (dir, bam_path) = mapq_fixture("counts");
+        let mut reader = bam::IndexedReader::from_path(&bam_path).unwrap();
+        let region: Region = ("chr22".to_string(), 1000, 2000, "REP7".to_string());
+        let counts = get_mapq0_counts(&mut reader, &region);
+        drop(reader);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(counts, Ok((4, 2)), "(mapped, MAPQ 0)");
+    }
+
+    #[test]
+    fn get_mapq0_counts_is_an_error_when_the_fetch_fails() {
+        // E1: a failed read is a no-call, here as everywhere else.
+        let (dir, bam_path) = mapq_fixture("fetch_err");
+        let mut reader = bam::IndexedReader::from_path(&bam_path).unwrap();
+        let inverted: Region = ("chr22".to_string(), 2000, 1000, "REP7".to_string());
+        let r = get_mapq0_counts(&mut reader, &inverted);
+        drop(reader);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(r.is_err(), "{r:?}");
+    }
+
+    #[test]
+    fn mapq0_fraction_is_none_without_mapped_reads() {
+        assert_eq!(mapq0_fraction((0, 0)), None);
+        assert_eq!(mapq0_fraction((4, 2)), Some(0.5));
+        assert_eq!(mapq0_fraction((133, 0)), Some(0.0));
+    }
+
+    #[test]
+    fn multimapper_guard_flags_pass_and_fuzzy_match_below_the_threshold() {
+        let flag = |f: Option<&str>, m: Option<f64>| {
+            downgrade_filter_for_multimapper_depletion(f.map(str::to_string), m)
+        };
+        let depleted = Some("Multimapper_depleted".to_string());
+        assert_eq!(flag(Some("PASS"), Some(0.0)), depleted);
+        assert_eq!(flag(Some("Fuzzy_match"), Some(0.399)), depleted);
+        // The threshold is strict: in-domain iff M >= 0.40 (locked plan).
+        assert_eq!(flag(Some("PASS"), Some(0.40)), Some("PASS".to_string()));
+        assert_eq!(flag(Some("PASS"), Some(0.84)), Some("PASS".to_string()));
+        // Not measured: no flag.
+        assert_eq!(flag(Some("PASS"), None), Some("PASS".to_string()));
+        // Filters that already explain a non-clean call, and no-calls, stay.
+        assert_eq!(
+            flag(Some("More_than_one_possible_genotype"), Some(0.0)),
+            Some("More_than_one_possible_genotype".to_string())
+        );
+        assert_eq!(flag(None, Some(0.0)), None);
+    }
+
+    #[test]
+    fn get_normed_depth_reports_the_rep7_mapq0_fraction() {
+        // Expected counts are exp-H4's features.tsv (n_rep7_mapped,
+        // n_rep7_mapq0): HG00096 971 / 813 (NYGC bwa), HG003 133 / 0
+        // (GIAB novoalign).
+        let regions =
+            crate::depth_calling::utilities::parse_region_file(crate::data::REGION_BED, "chr38");
+        for (sample, mapped, mapq0) in [("HG00096", 971.0, 813.0), ("HG003", 133.0, 0.0)] {
+            let bam = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("../benchmark/{sample}_pgx_regions.bam"));
+            if !bam.exists() {
+                eprintln!("skipping: benchmark BAM not present");
+                return;
+            }
+            let nd = get_normed_depth(bam.to_str().unwrap(), &regions, 1, None, None).unwrap();
+            assert_eq!(nd.rep7_mapq0_fraction, Some(mapq0 / mapped), "{sample}");
         }
     }
 }

@@ -32,6 +32,9 @@ pub struct NormalizedDepth {
     pub normalized: HashMap<String, Option<f64>>,
     pub mediandepth: f64,
     pub mad: f64,
+    /// Fraction of mapped reads starting in REP7 that have MAPQ 0 (None when
+    /// not measured, e.g. from a count file, or when REP7 has no mapped reads).
+    pub rep7_mapq0_fraction: Option<f64>,
 }
 
 /// Raw copy number call (d67 + spacer)
@@ -148,6 +151,8 @@ pub struct D6Call {
     pub kmer_validation: Option<KmerValidationSummary>,
     /// Top posterior from the likelihood resolver (None if it didn't run).
     pub resolver_posterior: Option<f64>,
+    /// See `NormalizedDepth::rep7_mapq0_fraction`.
+    pub rep7_mapq0_fraction: Option<f64>,
 }
 
 impl D6Call {
@@ -175,6 +180,7 @@ impl D6Call {
             variant_raw_count: None,
             kmer_validation: None,
             resolver_posterior: None,
+            rep7_mapq0_fraction: None,
         }
     }
 }
