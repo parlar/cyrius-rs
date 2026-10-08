@@ -5,12 +5,18 @@ use std::thread::{Scope, ScopedJoinHandle};
 /// Exon 9 gene conversion alleles
 const EXON9GC_ALLELES: &[&str] = &["*36", "*4.013", "*57", "*83", "*141"];
 
-fn exon9gc_pair_alleles() -> HashMap<&'static str, &'static str> {
-    let mut m = HashMap::new();
-    m.insert("*36", "*10");
-    m.insert("*4.013", "*4");
-    m
-}
+/// Each exon-9 gene-conversion allele with the allele it is duplicated against,
+/// in a fixed source order.
+///
+/// This was a `HashMap<&str, &str>`. `dhap_dup_exon9` is built by iterating these
+/// pairs and `insert_hap` appends candidates in iteration order, and every
+/// `HashMap` instance gets its own `RandomState`, so the per-key candidate order
+/// of that table was not reproducible between two builds -- including two eager
+/// ones (measured: 8 builds, 2 distinct order fingerprints). Candidate order
+/// reaches output, via `raw_call` into the `"Raw_star_allele"` JSON array and via
+/// `raw_candidates` into `score_candidates`, so an ordered slice pins it to the
+/// source. Same class as the `hmm_cnv` and `phase_disambiguate` orderings.
+const EXON9GC_PAIR_ALLELES: &[(&str, &str)] = &[("*36", "*10"), ("*4.013", "*4")];
 
 /// Merge variant ID slices, sort by ID (which equals alphabetical order),
 /// convert to "_"-joined string key. IDs must be assigned in alphabetical order.
@@ -58,7 +64,7 @@ fn insert_hap(key: &str, star_set: &str, hap_dic: &mut HashMap<String, Vec<Strin
 }
 
 /// A combination table: variant key -> the star-allele multisets that produce it.
-pub type HapTable = HashMap<String, Vec<String>>;
+pub(crate) type HapTable = HashMap<String, Vec<String>>;
 
 /// Which of [`StarCombinations`]'s ten combination tables a CNV tag needs. Exactly
 /// one is consulted per run, so this is also the unit of work for [`get_hap_table`]:
@@ -70,13 +76,18 @@ pub enum TableKind {
 }
 
 impl TableKind {
-    pub const ALL: [Self; 10] = [
+    /// Every kind, for the parity test's eager oracle. Was `pub`; it has no
+    /// production use site, and a reachable `ALL` is an invitation to exactly the
+    /// eager build finding #41 removed, so it is now `#[cfg(test)]` --
+    /// `pub(crate)` alone left it as dead code in the release build.
+    #[cfg(test)]
+    pub(crate) const ALL: [Self; 10] = [
         Self::Dhap2, Self::Dhap3, Self::Dhap3Pair, Self::Dhap4Pair, Self::Dhap5Pair,
         Self::Dhap6Pair, Self::Exon9X2, Self::Exon9X3, Self::Exon9X4, Self::DupExon9,
     ];
 
     /// The field this kind names: the one place field identity is decided.
-    pub fn table(self, c: &StarCombinations) -> &HapTable {
+    pub(crate) fn table(self, c: &StarCombinations) -> &HapTable {
         match self {
             TableKind::Dhap2 => &c.dhap2,
             TableKind::Dhap3 => &c.dhap3,
@@ -364,8 +375,7 @@ pub fn get_hap_table(star_table_content: &str, wanted: &[TableKind]) -> StarComb
 
             let h_dup_exon9 = spawn_if(s, want(TableKind::DupExon9), || {
                 let mut dhap_dup_exon9: HashMap<String, Vec<String>> = HashMap::new();
-                let pair_alleles = exon9gc_pair_alleles();
-                for (&e1, &e2) in &pair_alleles {
+                for &(e1, e2) in EXON9GC_PAIR_ALLELES {
                     if let (Some(ids_e1), Some(ids_e2)) = (star_var_ids.get(e1), star_var_ids.get(e2)) {
                         for s3 in &star_keys {
                             let ids3 = &star_var_ids[s3];
@@ -409,59 +419,153 @@ mod tests {
     use crate::caller::call_variants::CNV_ACCEPTED;
     use crate::data::STAR_TABLE;
 
-    /// The property the lazy build rests on (finding #41): for every accepted CNV
-    /// tag, a build of just the table that tag selects must put byte-identical
-    /// content in that field, leave the other nine empty, and still carry the two
-    /// cheap always-built tables.
+    /// The tag -> table mapping, pinned against a literal expectation, transcribed
+    /// from the pre-refactor `match_star_allele::get_dic` match (4142ba7).
+    ///
+    /// This is a deliberate second copy of the mapping, as a test oracle rather
+    /// than as production code. It is the one thing
+    /// `lazy_build_matches_eager_build_for_every_table_kind` cannot check: that
+    /// test drives both the eager reference and the lazy build through the same
+    /// `combination_table_for`, so a mapping error -- `cn2 -> Dhap3`, say -- stays
+    /// green there, because the selected table still matches eager and the other
+    /// nine are still empty.
+    const EXPECTED_TABLE_FOR_TAG: &[(&str, Option<TableKind>)] = &[
+        ("star5_star5", None),
+        ("star13_star13", None),
+        ("star13intron1_star13intron1", None),
+        ("star5", None),
+        ("star13", None),
+        ("star13intron1", Some(TableKind::Dhap2)),
+        ("star5_star5_star68", None),
+        ("star5_star68", None),
+        ("cn2", Some(TableKind::Dhap2)),
+        ("exon9hyb_star5", Some(TableKind::Dhap2)),
+        ("dup_star13", Some(TableKind::Dhap2)),
+        ("dup_star13intron1", Some(TableKind::Dhap3Pair)),
+        ("star13_star68", None),
+        ("cn3", Some(TableKind::Dhap3Pair)),
+        ("exon9hyb", Some(TableKind::Dhap3)),
+        ("star68", Some(TableKind::Dhap2)),
+        ("cn4", Some(TableKind::Dhap4Pair)),
+        ("exon9hyb_exon9hyb", Some(TableKind::Exon9X2)),
+        ("star68_star68", Some(TableKind::Dhap2)),
+        ("dup_exon9hyb", Some(TableKind::DupExon9)),
+        ("dup_star68", Some(TableKind::Dhap3Pair)),
+        ("exon9hyb_star68", Some(TableKind::Dhap3)),
+        ("cn5", Some(TableKind::Dhap5Pair)),
+        ("exon9hyb_exon9hyb_exon9hyb", Some(TableKind::Exon9X3)),
+        ("star68_star68_star68", Some(TableKind::Dhap2)),
+        ("cn6", Some(TableKind::Dhap6Pair)),
+        ("exon9hyb_exon9hyb_exon9hyb_exon9hyb", Some(TableKind::Exon9X4)),
+        ("star68_star68_star68_star68", Some(TableKind::Dhap2)),
+    ];
+
+    /// Key count of each table in a full build, measured. The ten are distinct, so
+    /// this pins kind -> *field* as well: a `TableKind::table` arm pointing at the
+    /// wrong `StarCombinations` field changes a length here.
+    fn expected_len(kind: TableKind) -> usize {
+        match kind {
+            TableKind::Dhap2 => 22_192,
+            TableKind::Dhap3 => 1_551_523,
+            TableKind::Dhap3Pair => 44_521,
+            TableKind::Dhap4Pair => 66_502,
+            TableKind::Dhap5Pair => 88_831,
+            TableKind::Dhap6Pair => 110_812,
+            TableKind::Exon9X2 => 210_168,
+            TableKind::Exon9X3 => 416_574,
+            TableKind::Exon9X4 => 1,
+            TableKind::DupExon9 => 44_381,
+        }
+    }
+
+    #[test]
+    fn combination_table_for_pins_the_tag_to_table_mapping() {
+        for &(tag, expected) in EXPECTED_TABLE_FOR_TAG {
+            assert_eq!(
+                combination_table_for(tag),
+                expected,
+                "combination_table_for({}) moved",
+                tag
+            );
+        }
+        // The oracle must span the whole accepted vocabulary, so a tag added to
+        // `CNV_ACCEPTED` cannot slip past it unpinned.
+        let mut pinned: Vec<&str> = EXPECTED_TABLE_FOR_TAG.iter().map(|&(t, _)| t).collect();
+        pinned.sort_unstable();
+        let mut accepted: Vec<&str> = CNV_ACCEPTED.to_vec();
+        accepted.sort_unstable();
+        assert_eq!(
+            pinned, accepted,
+            "EXPECTED_TABLE_FOR_TAG and CNV_ACCEPTED disagree on the tag vocabulary"
+        );
+    }
+
+    /// The property the lazy build rests on (finding #41): building just one table
+    /// must put byte-identical content in that one field -- same keys, same
+    /// per-key candidate order -- leave the other nine empty, and still carry the
+    /// two cheap always-built tables.
+    ///
+    /// Keyed on `TableKind`, not on tag: 28 accepted tags select only 10 distinct
+    /// kinds, and building per tag rebuilt `Dhap2` 7x and `Dhap3` 2x for nothing.
+    /// `combination_table_for_pins_the_tag_to_table_mapping` covers the per-tag
+    /// half without building anything.
     ///
     /// The nine-empty half is not pedantry: `get_dic` reads whichever field the tag
     /// selects, so a kind written into the wrong field would hand the matcher an
     /// empty map and silently drop every candidate.
     #[test]
-    fn lazy_build_matches_eager_build_for_every_accepted_tag() {
+    fn lazy_build_matches_eager_build_for_every_table_kind() {
         let eager = get_hap_table(STAR_TABLE, &TableKind::ALL);
-        for tag in CNV_ACCEPTED {
-            let kind = combination_table_for(tag);
-            let lazy = get_hap_table(STAR_TABLE, kind.as_slice());
-            assert_eq!(lazy.dhap, eager.dhap, "dhap differs for tag {}", tag);
-            assert_eq!(lazy.dstar, eager.dstar, "dstar differs for tag {}", tag);
+        for kind in TableKind::ALL {
+            let lazy = get_hap_table(STAR_TABLE, &[kind]);
+            assert_eq!(lazy.dhap, eager.dhap, "dhap differs for {:?}", kind);
+            assert_eq!(lazy.dstar, eager.dstar, "dstar differs for {:?}", kind);
             for other in TableKind::ALL {
-                if Some(other) == kind {
-                    // `dhap_dup_exon9` is the one table whose per-key candidate
-                    // *order* is not reproducible even between two eager builds:
-                    // `exon9gc_pair_alleles` returns a `HashMap`, and each
-                    // `HashMap` instance gets its own `RandomState`, so the two
-                    // pairs are visited in an arbitrary order and `insert_hap`
-                    // appends in that order. Compare its content, not its order;
-                    // the other nine are compared exactly.
-                    let mut got = other.table(&lazy).clone();
-                    let mut expected = other.table(&eager).clone();
-                    if other == TableKind::DupExon9 {
-                        got.values_mut().for_each(|v| v.sort());
-                        expected.values_mut().for_each(|v| v.sort());
-                    }
+                if other == kind {
+                    // Compared exactly, candidate order included -- `dhap_dup_exon9`
+                    // too, now that `EXON9GC_PAIR_ALLELES` fixes its build order.
                     assert_eq!(
-                        got, expected,
-                        "{:?} differs from the eager build for tag {}",
-                        other, tag
+                        other.table(&lazy),
+                        other.table(&eager),
+                        "{:?} differs from the eager build",
+                        other
                     );
-                    assert!(
-                        !other.table(&lazy).is_empty(),
-                        "{:?} is the table tag {} selects, yet it was not built",
-                        other,
-                        tag
+                    assert_eq!(
+                        other.table(&lazy).len(),
+                        expected_len(other),
+                        "{:?} key count moved",
+                        other
                     );
                 } else {
                     assert!(
                         other.table(&lazy).is_empty(),
-                        "tag {} selects {:?}, so {:?} should not have been built",
-                        tag,
+                        "only {:?} was asked for, yet {:?} was built",
                         kind,
                         other
                     );
                 }
             }
         }
+    }
+
+    /// The perf property itself, which otherwise has no red: asking for nothing must
+    /// build nothing. This is what `prepare_resource` does, and reverting it to
+    /// `&TableKind::ALL` -- or making `get_hap_table` ignore `wanted` -- is the
+    /// regression that gives back the ~3 s and ~1 GB of finding #41.
+    #[test]
+    fn an_empty_request_builds_no_combination_table() {
+        let none = get_hap_table(STAR_TABLE, &[]);
+        for kind in TableKind::ALL {
+            assert!(
+                kind.table(&none).is_empty(),
+                "no table was asked for, yet {:?} was built",
+                kind
+            );
+        }
+        // ... while still carrying the two always-built tables, which the CN=1 tags
+        // (`star5`, `star13`, ...) match against.
+        assert!(!none.dhap.is_empty(), "dhap must always be built");
+        assert!(!none.dstar.is_empty(), "dstar must always be built");
     }
 
     /// Every kind must be selected by some accepted tag. A kind nothing selects

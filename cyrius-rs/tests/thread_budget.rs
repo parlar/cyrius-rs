@@ -14,16 +14,26 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-/// Generous ceiling on concurrent threads at `-t 1`.
+/// Ceiling on concurrent threads at `-t 1`.
 ///
-/// The run's peak used to be set by `construct_star_table::get_hap_table`, which
-/// spawned 10 scoped threads unconditionally (not gated on `--threads`), plus the
-/// main thread: measured at exactly 11 across 10 repeats on a 72-CPU node. Since
-/// finding #41 it builds at most one table, so that source is down to 1 thread.
-/// With the pool unsized, the same run peaks at 75. An unbounded rayon pool
-/// adds one worker per core, so on any machine with more than `BUDGET` cores
-/// this bound separates the two states by a wide margin in both directions.
-const BUDGET: usize = 32;
+/// The peak used to be set by `construct_star_table::get_hap_table`, which spawned
+/// 10 scoped threads unconditionally (not gated on `--threads`), plus the main
+/// thread: measured at exactly 11 across 10 repeats on a 72-CPU node. Since
+/// finding #41 it builds at most one table, and the measured peak is **4**, stable
+/// across 5 repeats.
+///
+/// So this was tightened 32 -> 8, which makes it the only red for finding #41's
+/// perf property end-to-end: an eager rebuild puts the peak back at 11. 8 is a
+/// 2x margin over the real peak of 4 and not a generous one -- the task warned as
+/// much -- but the peak does not scale with cores (rayon is sized from the flag and
+/// at most one table thread is spawned), so there is nothing here for a bigger
+/// machine to inflate. Lowering it also *widens* the test's reach: the
+/// `available <= BUDGET` skip below now only fires at <= 8 CPUs instead of <= 32.
+///
+/// With the pool unsized the same run peaks at 75. An unbounded rayon pool adds one
+/// worker per core, so on any machine with more than `BUDGET` cores this bound
+/// still separates the two states by a wide margin in both directions.
+const BUDGET: usize = 8;
 
 #[test]
 fn diplotype_caller_at_one_thread_stays_within_the_thread_budget() {

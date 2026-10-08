@@ -882,6 +882,24 @@ pub fn match_star(
         }
     };
 
+    // Every one of the ten combination tables is non-empty once built (sizes 1 to
+    // 1,551,523), so an empty one here is never the data -- it means this
+    // `StarCombinations` was built without the `TableKind` this tag selects. Since
+    // finding #41 that is a live hazard: `d6_star_caller` holds a locally built
+    // `StarCombinations` with one table in it while `params.star_combinations`, with
+    // all ten empty, is still in scope, and nothing in the type distinguishes them.
+    // Reaching for the wrong one would leave `get_star` with no matching key, so it
+    // would return `no_match` -- no panic, no log, one silently changed call.
+    // Compiled out in release, so this catches the mistake in tests and debug runs,
+    // not in production.
+    debug_assert!(
+        !dic.is_empty(),
+        "combination table for CNV tag {} is empty: this StarCombinations was built \
+         without TableKind {:?}",
+        cnvcall,
+        super::construct_star_table::combination_table_for(cnvcall)
+    );
+
     if !cnvcall.contains("star68") {
         let mut matchtag = get_star(var_observed, dic);
 
