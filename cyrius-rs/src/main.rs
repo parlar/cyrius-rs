@@ -11,7 +11,7 @@ use cyrius_rs::caller::call_variants::{
     NOISY_VAR,
 };
 use cyrius_rs::caller::cnv_hybrid::get_cnvtag;
-use cyrius_rs::caller::construct_star_table::get_hap_table;
+use cyrius_rs::caller::construct_star_table::{combination_table_for, get_hap_table};
 use cyrius_rs::caller::match_star_allele::match_star;
 use cyrius_rs::caller::strand_bias_all;
 use cyrius_rs::data;
@@ -202,7 +202,8 @@ fn prepare_resource(
     let mut var_list = get_var_names(data::TARGET_VARIANT);
     var_list.extend(get_var_names(data::TARGET_VARIANT_HOMO));
 
-    let star_combinations = get_hap_table(data::STAR_TABLE);
+    // No combination table: `d6_star_caller` builds the one its CNV tag needs (#41).
+    let star_combinations = get_hap_table(data::STAR_TABLE, &[]);
 
     (
         ResourceInfo {
@@ -592,6 +593,10 @@ fn d6_star_caller(
 
     let cnvtag_str = cnvtag.unwrap();
 
+    // Only the combination table this tag matches against: the other nine cost ~3 s
+    // and ~1 GB and are never read (finding #41).
+    let star_combinations = get_hap_table(data::STAR_TABLE, combination_table_for(&cnvtag_str).as_slice());
+
     // Feature: kmer_validation — alignment-free k-mer paralog ratio validation.
     // Validation is decoupled from calling: the result is recorded for review
     // but does NOT modify the genotype, filter, or confidence.
@@ -741,7 +746,7 @@ fn d6_star_caller(
         &mut total_callset,
         &cnvtag_str,
         raw_cn_call.spacer_cn,
-        &params.star_combinations,
+        &star_combinations,
         &exon9_values,
         var42126938_g_haplotype,
         var42127803_diff_haplotype,

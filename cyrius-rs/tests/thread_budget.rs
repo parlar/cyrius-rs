@@ -16,9 +16,10 @@ use std::time::Duration;
 
 /// Generous ceiling on concurrent threads at `-t 1`.
 ///
-/// The run's real peak is set by `construct_star_table::get_hap_table`, which
-/// spawns 10 scoped threads unconditionally (not gated on `--threads`), plus
-/// the main thread: measured at exactly 11 across 10 repeats on a 72-CPU node.
+/// The run's peak used to be set by `construct_star_table::get_hap_table`, which
+/// spawned 10 scoped threads unconditionally (not gated on `--threads`), plus the
+/// main thread: measured at exactly 11 across 10 repeats on a 72-CPU node. Since
+/// finding #41 it builds at most one table, so that source is down to 1 thread.
 /// With the pool unsized, the same run peaks at 75. An unbounded rayon pool
 /// adds one worker per core, so on any machine with more than `BUDGET` cores
 /// this bound separates the two states by a wide margin in both directions.

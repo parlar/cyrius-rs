@@ -294,27 +294,11 @@ fn call_star68(
     }
 }
 
-/// Return the variant table to use for each CNV/hybrid group.
+/// Return the variant table to use for each CNV/hybrid group. The tag -> table map
+/// is `construct_star_table::combination_table_for`, which the builder also reads so
+/// it can build just this one table (finding #41).
 fn get_dic<'a>(cnvcall: &str, star_combinations: &'a StarCombinations) -> Option<&'a HashMap<String, Vec<String>>> {
-    match cnvcall {
-        "star5" | "star13" | "star5_star68" | "star13_star68" => None, // Uses dhap (CN=1)
-        "cn2" | "star13intron1" | "dup_star13" | "exon9hyb_star5" => {
-            Some(&star_combinations.dhap2)
-        }
-        s if s.starts_with("star68") && !s.contains("exon9hyb") && !s.contains("dup") => {
-            Some(&star_combinations.dhap2)
-        }
-        "exon9hyb" | "exon9hyb_star68" => Some(&star_combinations.dhap3),
-        "cn3" | "dup_star13intron1" | "dup_star68" => Some(&star_combinations.dhap3pair),
-        "cn4" => Some(&star_combinations.dhap4pair),
-        "cn5" => Some(&star_combinations.dhap5pair),
-        "cn6" => Some(&star_combinations.dhap6pair),
-        "exon9hyb_exon9hyb" => Some(&star_combinations.dhap_exon9_x2),
-        "exon9hyb_exon9hyb_exon9hyb" => Some(&star_combinations.dhap_exon9_x3),
-        "exon9hyb_exon9hyb_exon9hyb_exon9hyb" => Some(&star_combinations.dhap_exon9_x4),
-        "dup_exon9hyb" => Some(&star_combinations.dhap_dup_exon9),
-        _ => None,
-    }
+    super::construct_star_table::combination_table_for(cnvcall).map(|kind| kind.table(star_combinations))
 }
 
 /// Check if cnvcall uses CN=1 (dhap).

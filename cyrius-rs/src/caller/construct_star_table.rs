@@ -1,5 +1,6 @@
 use crate::types::StarCombinations;
 use std::collections::HashMap;
+use std::thread::{Scope, ScopedJoinHandle};
 
 /// Exon 9 gene conversion alleles
 const EXON9GC_ALLELES: &[&str] = &["*36", "*4.013", "*57", "*83", "*141"];
@@ -56,8 +57,80 @@ fn insert_hap(key: &str, star_set: &str, hap_dic: &mut HashMap<String, Vec<Strin
     }
 }
 
-/// Return all the possible variant tables based on the star allele definition file.
-pub fn get_hap_table(star_table_content: &str) -> StarCombinations {
+/// A combination table: variant key -> the star-allele multisets that produce it.
+pub type HapTable = HashMap<String, Vec<String>>;
+
+/// Which of [`StarCombinations`]'s ten combination tables a CNV tag needs. Exactly
+/// one is consulted per run, so this is also the unit of work for [`get_hap_table`]:
+/// the other nine cost ~3 s and ~1 GB for nothing (finding #41).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TableKind {
+    Dhap2, Dhap3, Dhap3Pair, Dhap4Pair, Dhap5Pair,
+    Dhap6Pair, Exon9X2, Exon9X3, Exon9X4, DupExon9,
+}
+
+impl TableKind {
+    pub const ALL: [Self; 10] = [
+        Self::Dhap2, Self::Dhap3, Self::Dhap3Pair, Self::Dhap4Pair, Self::Dhap5Pair,
+        Self::Dhap6Pair, Self::Exon9X2, Self::Exon9X3, Self::Exon9X4, Self::DupExon9,
+    ];
+
+    /// The field this kind names: the one place field identity is decided.
+    pub fn table(self, c: &StarCombinations) -> &HapTable {
+        match self {
+            TableKind::Dhap2 => &c.dhap2,
+            TableKind::Dhap3 => &c.dhap3,
+            TableKind::Dhap3Pair => &c.dhap3pair,
+            TableKind::Dhap4Pair => &c.dhap4pair,
+            TableKind::Dhap5Pair => &c.dhap5pair,
+            TableKind::Dhap6Pair => &c.dhap6pair,
+            TableKind::Exon9X2 => &c.dhap_exon9_x2,
+            TableKind::Exon9X3 => &c.dhap_exon9_x3,
+            TableKind::Exon9X4 => &c.dhap_exon9_x4,
+            TableKind::DupExon9 => &c.dhap_dup_exon9,
+        }
+    }
+}
+
+/// The combination table a CNV/hybrid group matches against, or `None` for the
+/// groups that match against `dhap` (CN=1) or do not match at all. The single copy
+/// of this mapping: `match_star_allele::get_dic` resolves it to a reference and
+/// [`get_hap_table`] reads it to decide what to build, so the two cannot drift --
+/// which is what finding #26 was.
+pub fn combination_table_for(cnvcall: &str) -> Option<TableKind> {
+    match cnvcall {
+        "star5" | "star13" | "star5_star68" | "star13_star68" => None, // Uses dhap (CN=1)
+        "cn2" | "star13intron1" | "dup_star13" | "exon9hyb_star5" => Some(TableKind::Dhap2),
+        s if s.starts_with("star68") && !s.contains("exon9hyb") && !s.contains("dup") => Some(TableKind::Dhap2),
+        "exon9hyb" | "exon9hyb_star68" => Some(TableKind::Dhap3),
+        "cn3" | "dup_star13intron1" | "dup_star68" => Some(TableKind::Dhap3Pair),
+        "cn4" => Some(TableKind::Dhap4Pair),
+        "cn5" => Some(TableKind::Dhap5Pair),
+        "cn6" => Some(TableKind::Dhap6Pair),
+        "exon9hyb_exon9hyb" => Some(TableKind::Exon9X2),
+        "exon9hyb_exon9hyb_exon9hyb" => Some(TableKind::Exon9X3),
+        "exon9hyb_exon9hyb_exon9hyb_exon9hyb" => Some(TableKind::Exon9X4),
+        "dup_exon9hyb" => Some(TableKind::DupExon9),
+        _ => None,
+    }
+}
+
+/// Spawn a combination-table builder only if its table was asked for.
+fn spawn_if<'s, 'e, F: FnOnce() -> HapTable + Send + 's>(
+    s: &'s Scope<'s, 'e>, build: bool, f: F,
+) -> Option<ScopedJoinHandle<'s, HapTable>> {
+    build.then(|| s.spawn(f))
+}
+
+/// An unspawned builder yields the empty table.
+fn opt_join(handle: Option<ScopedJoinHandle<'_, HapTable>>) -> HapTable {
+    handle.map_or_else(HapTable::new, |h| h.join().unwrap())
+}
+
+/// Build the variant tables for the star allele definition file. `dhap` and `dstar`
+/// are always built (cheap, and several callers read them); of the ten combination
+/// tables only those in `wanted` are built, one scoped thread each, rest empty.
+pub fn get_hap_table(star_table_content: &str, wanted: &[TableKind]) -> StarCombinations {
     // Phase 1: Parse and collect all unique variant names
     let mut all_var_names: Vec<String> = Vec::new();
     let mut var_name_set: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -118,13 +191,14 @@ pub fn get_hap_table(star_table_content: &str) -> StarCombinations {
     let mut star_keys: Vec<String> = star_var_ids.keys().cloned().collect();
     star_keys.sort();
 
-    // Phase 3: Build combination tables using fast integer merging (parallelized)
+    // Phase 3: Build the wanted combination tables, one scoped thread each
     let n = star_keys.len();
+    let want = |kind: TableKind| wanted.contains(&kind);
 
     let (dhap2, dhap3, dhap3pair, dhap4pair, dhap5pair, dhap6pair,
      dhap_exon9_x2, dhap_exon9_x3, dhap_exon9_x4, dhap_dup_exon9) =
         std::thread::scope(|s| {
-            let h_dhap2 = s.spawn(|| {
+            let h_dhap2 = spawn_if(s, want(TableKind::Dhap2), || {
                 let mut dhap2: HashMap<String, Vec<String>> = HashMap::new();
                 for i in 0..n {
                     let ids1 = &star_var_ids[&star_keys[i]];
@@ -138,7 +212,7 @@ pub fn get_hap_table(star_table_content: &str) -> StarCombinations {
                 dhap2
             });
 
-            let h_dhap3 = s.spawn(|| {
+            let h_dhap3 = spawn_if(s, want(TableKind::Dhap3), || {
                 let mut dhap3: HashMap<String, Vec<String>> = HashMap::new();
                 for i in 0..n {
                     let ids1 = &star_var_ids[&star_keys[i]];
@@ -155,7 +229,7 @@ pub fn get_hap_table(star_table_content: &str) -> StarCombinations {
                 dhap3
             });
 
-            let h_dhap3pair = s.spawn(|| {
+            let h_dhap3pair = spawn_if(s, want(TableKind::Dhap3Pair), || {
                 let mut dhap3pair: HashMap<String, Vec<String>> = HashMap::new();
                 for i in 0..n {
                     let ids1 = &star_var_ids[&star_keys[i]];
@@ -169,7 +243,7 @@ pub fn get_hap_table(star_table_content: &str) -> StarCombinations {
                 dhap3pair
             });
 
-            let h_dhap4pair = s.spawn(|| {
+            let h_dhap4pair = spawn_if(s, want(TableKind::Dhap4Pair), || {
                 let mut dhap4pair: HashMap<String, Vec<String>> = HashMap::new();
                 for i in 0..n {
                     let ids1 = &star_var_ids[&star_keys[i]];
@@ -189,7 +263,7 @@ pub fn get_hap_table(star_table_content: &str) -> StarCombinations {
                 dhap4pair
             });
 
-            let h_dhap5pair = s.spawn(|| {
+            let h_dhap5pair = spawn_if(s, want(TableKind::Dhap5Pair), || {
                 let mut dhap5pair: HashMap<String, Vec<String>> = HashMap::new();
                 for i in 0..n {
                     let ids1 = &star_var_ids[&star_keys[i]];
@@ -207,7 +281,7 @@ pub fn get_hap_table(star_table_content: &str) -> StarCombinations {
                 dhap5pair
             });
 
-            let h_dhap6pair = s.spawn(|| {
+            let h_dhap6pair = spawn_if(s, want(TableKind::Dhap6Pair), || {
                 let mut dhap6pair: HashMap<String, Vec<String>> = HashMap::new();
                 for i in 0..n {
                     let ids1 = &star_var_ids[&star_keys[i]];
@@ -234,7 +308,7 @@ pub fn get_hap_table(star_table_content: &str) -> StarCombinations {
                 dhap6pair
             });
 
-            let h_exon9_x2 = s.spawn(|| {
+            let h_exon9_x2 = spawn_if(s, want(TableKind::Exon9X2), || {
                 let mut dhap_exon9_x2: HashMap<String, Vec<String>> = HashMap::new();
                 for &e1 in EXON9GC_ALLELES {
                     for &e2 in EXON9GC_ALLELES {
@@ -254,7 +328,7 @@ pub fn get_hap_table(star_table_content: &str) -> StarCombinations {
                 dhap_exon9_x2
             });
 
-            let h_exon9_x3 = s.spawn(|| {
+            let h_exon9_x3 = spawn_if(s, want(TableKind::Exon9X3), || {
                 let mut dhap_exon9_x3: HashMap<String, Vec<String>> = HashMap::new();
                 for &e1 in EXON9GC_ALLELES {
                     for &e2 in EXON9GC_ALLELES {
@@ -278,7 +352,7 @@ pub fn get_hap_table(star_table_content: &str) -> StarCombinations {
                 dhap_exon9_x3
             });
 
-            let h_exon9_x4 = s.spawn(|| {
+            let h_exon9_x4 = spawn_if(s, want(TableKind::Exon9X4), || {
                 let mut dhap_exon9_x4: HashMap<String, Vec<String>> = HashMap::new();
                 if let (Some(ids_10), Some(ids_36)) = (star_var_ids.get("*10"), star_var_ids.get("*36")) {
                     let key = merge_to_key(&[ids_10, ids_10, ids_36, ids_36, ids_36, ids_36], &id_to_var);
@@ -288,7 +362,7 @@ pub fn get_hap_table(star_table_content: &str) -> StarCombinations {
                 dhap_exon9_x4
             });
 
-            let h_dup_exon9 = s.spawn(|| {
+            let h_dup_exon9 = spawn_if(s, want(TableKind::DupExon9), || {
                 let mut dhap_dup_exon9: HashMap<String, Vec<String>> = HashMap::new();
                 let pair_alleles = exon9gc_pair_alleles();
                 for (&e1, &e2) in &pair_alleles {
@@ -307,11 +381,10 @@ pub fn get_hap_table(star_table_content: &str) -> StarCombinations {
                 dhap_dup_exon9
             });
 
-            (h_dhap2.join().unwrap(), h_dhap3.join().unwrap(),
-             h_dhap3pair.join().unwrap(), h_dhap4pair.join().unwrap(),
-             h_dhap5pair.join().unwrap(), h_dhap6pair.join().unwrap(),
-             h_exon9_x2.join().unwrap(), h_exon9_x3.join().unwrap(),
-             h_exon9_x4.join().unwrap(), h_dup_exon9.join().unwrap())
+            (opt_join(h_dhap2), opt_join(h_dhap3), opt_join(h_dhap3pair),
+             opt_join(h_dhap4pair), opt_join(h_dhap5pair), opt_join(h_dhap6pair),
+             opt_join(h_exon9_x2), opt_join(h_exon9_x3), opt_join(h_exon9_x4),
+             opt_join(h_dup_exon9))
         });
 
     StarCombinations {
@@ -327,5 +400,82 @@ pub fn get_hap_table(star_table_content: &str) -> StarCombinations {
         dhap_exon9_x4,
         dhap_dup_exon9,
         dstar,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::caller::call_variants::CNV_ACCEPTED;
+    use crate::data::STAR_TABLE;
+
+    /// The property the lazy build rests on (finding #41): for every accepted CNV
+    /// tag, a build of just the table that tag selects must put byte-identical
+    /// content in that field, leave the other nine empty, and still carry the two
+    /// cheap always-built tables.
+    ///
+    /// The nine-empty half is not pedantry: `get_dic` reads whichever field the tag
+    /// selects, so a kind written into the wrong field would hand the matcher an
+    /// empty map and silently drop every candidate.
+    #[test]
+    fn lazy_build_matches_eager_build_for_every_accepted_tag() {
+        let eager = get_hap_table(STAR_TABLE, &TableKind::ALL);
+        for tag in CNV_ACCEPTED {
+            let kind = combination_table_for(tag);
+            let lazy = get_hap_table(STAR_TABLE, kind.as_slice());
+            assert_eq!(lazy.dhap, eager.dhap, "dhap differs for tag {}", tag);
+            assert_eq!(lazy.dstar, eager.dstar, "dstar differs for tag {}", tag);
+            for other in TableKind::ALL {
+                if Some(other) == kind {
+                    // `dhap_dup_exon9` is the one table whose per-key candidate
+                    // *order* is not reproducible even between two eager builds:
+                    // `exon9gc_pair_alleles` returns a `HashMap`, and each
+                    // `HashMap` instance gets its own `RandomState`, so the two
+                    // pairs are visited in an arbitrary order and `insert_hap`
+                    // appends in that order. Compare its content, not its order;
+                    // the other nine are compared exactly.
+                    let mut got = other.table(&lazy).clone();
+                    let mut expected = other.table(&eager).clone();
+                    if other == TableKind::DupExon9 {
+                        got.values_mut().for_each(|v| v.sort());
+                        expected.values_mut().for_each(|v| v.sort());
+                    }
+                    assert_eq!(
+                        got, expected,
+                        "{:?} differs from the eager build for tag {}",
+                        other, tag
+                    );
+                    assert!(
+                        !other.table(&lazy).is_empty(),
+                        "{:?} is the table tag {} selects, yet it was not built",
+                        other,
+                        tag
+                    );
+                } else {
+                    assert!(
+                        other.table(&lazy).is_empty(),
+                        "tag {} selects {:?}, so {:?} should not have been built",
+                        tag,
+                        kind,
+                        other
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every kind must be selected by some accepted tag. A kind nothing selects
+    /// would be a table built by nothing and checked by nothing above.
+    #[test]
+    fn every_table_kind_is_selected_by_some_accepted_tag() {
+        for kind in TableKind::ALL {
+            assert!(
+                CNV_ACCEPTED
+                    .iter()
+                    .any(|tag| combination_table_for(tag) == Some(kind)),
+                "no accepted CNV tag selects {:?}",
+                kind
+            );
+        }
     }
 }

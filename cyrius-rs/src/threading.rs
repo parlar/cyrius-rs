@@ -12,9 +12,9 @@
 //! ("Number of threads") should not be read as promising that it does. Three
 //! other thread sources are deliberately untouched by this module:
 //!
-//! * `caller::construct_star_table::get_hap_table` spawns 10 scoped threads
-//!   unconditionally, on every `prepare_resource` -- not gated on `--threads`
-//!   at all. At `-t 1` it is the largest single source of clones in a run.
+//! * `caller::construct_star_table::get_hap_table` spawns one scoped thread per
+//!   combination table asked for -- at most one per run since finding #41, and
+//!   none from `prepare_resource` -- not gated on `--threads` at all.
 //! * `main.rs`'s two `std::thread::scope` blocks spawn a fixed 4 threads each
 //!   whenever `threads > 1`, regardless of the value.
 //! * every alignment-file open calls `set_threads(1)`, adding an htslib worker.
