@@ -113,35 +113,121 @@ fn get_bases_per_read(
                     let seq = record.seq().as_bytes();
 
                     // `min_len` is the length of the ONE slice extracted for
-                    // this (read, site). Both regions' allele fields can hold
-                    // several comma-separated alleles ('A,G'), so the raw
-                    // string length is not an allele length at all: taking the
-                    // minimum over the joined `reg1_allele`/`reg2_allele`
-                    // strings counted the commas and the extra alleles, and
-                    // the slice then came out longer than anything
-                    // `get_hap_counts` compares it against -- it splits on ','
-                    // and never matches the joined form, so every read at such
-                    // a site scored 'x' (review finding #7). Minimise over the
-                    // comma-SPLIT alleles of BOTH regions, the same split
-                    // `get_hap_counts` uses, so the extraction length agrees
-                    // with the matching.
+                    // this (read, site) -- and therefore the only length at
+                    // which `get_hap_counts` can ever recognise an allele.
                     //
-                    // Latent today: `data/CYP2D6_haplotype_38.txt` has zero
-                    // commas. Residual limitation NOT addressed here: a single
-                    // fixed-length slice still cannot discriminate alleles of
-                    // unequal length at one site (the way `snp_count` does by
-                    // matching each allele with its own length). The haplotype
-                    // DB's one unequal-length row -- line 10, g.42130653
-                    // `GCAGG` vs `GCAAGG` -- is reached only by
+                    // Both regions' allele fields can hold several
+                    // comma-separated alleles ('A,G'), so the length of the
+                    // JOINED `reg1_allele`/`reg2_allele` string is not an
+                    // allele length at all: it counts the commas and the extra
+                    // alleles. Minimise over the comma-SPLIT alleles of BOTH
+                    // regions instead -- the same split `get_hap_counts` uses
+                    // -- so the extraction length is always a real allele
+                    // length (review finding #7).
+                    //
+                    // What the raw string length did wrong. Let `l_min` be the
+                    // minimum length over all comma-split alleles of both
+                    // regions, and `raw = min(|reg1_allele|, |reg2_allele|)`.
+                    // The two are equal IFF some region holds exactly one
+                    // allele whose length is `l_min`; otherwise `raw > l_min`
+                    // and the over-long slice either
+                    //   * matches no allele at all, so the read scores 'x' and
+                    //     `extract_hap` discards it, or
+                    //   * coincides with the length of a DIFFERENT allele at
+                    //     the same site, silently cross-assigning the read to
+                    //     the wrong region.
+                    // An earlier revision of this comment claimed the first
+                    // outcome always held. It does not, and the counterexample
+                    // is this commit's own fixture ('A,G' vs 'AC', in
+                    // `characterization_per_allele_length_fixes_commas_but_not_unequal_lengths`
+                    // below): there the raw bound of 2 scores the read '2', not
+                    // 'x'.
+                    //
+                    // The case that makes the split version STRICTLY better:
+                    // both regions comma'd with all alleles the same length,
+                    // e.g. 'A,G' vs 'C,T'. `raw` is then 3 -- a length no
+                    // allele has -- so EVERY read at the site scores 'x', the
+                    // panel reads as "no reads at all", and every downstream
+                    // gate defaults false; a silent, total loss of the site.
+                    // Verified by executing this function in
+                    // `both_regions_comma_separated_with_equal_length_alleles_are_still_scored`
+                    // below: raw yields {carries_a: "x", carries_t: "x"} and an
+                    // EMPTY `extract_hap`, split yields {carries_a: "1",
+                    // carries_t: "2"}. The case where NEITHER value is right is
+                    // alleles of unequal length -- the residual limitation at
+                    // the end of this comment.
+                    //
+                    // Real data, all four shipped position DBs (285 rows):
+                    // ZERO rows have both regions comma'd; `raw` and `l_min`
+                    // differ on exactly 5 rows, all indel/repeat rows of
+                    // `data/CYP2D6_target_variant_38.txt` (lines 47, 49, 67,
+                    // 80, 81), none of which reaches `get_bases_per_read`; and
+                    // on all 5 the `l_min` allele is not a prefix of any longer
+                    // allele at its site, so both bounds fail closed there.
+                    // `data/CYP2D6_haplotype_38.txt` -- the only DB that
+                    // reaches this function -- has ZERO commas, so the split is
+                    // a verified strict no-op on reachable data.
+                    //
+                    // NOT yet consistent with `snp_count`, contrary to the plan
+                    // for this change ("per-allele lengths (split on ','),
+                    // matching `snp_count`"). Only the comparison OPERATOR now
+                    // matches: `snp_count`'s `qpos + max_allele_len >
+                    // seq.len()` reject and the `end_pos > seq.len()` reject
+                    // below are the same test. The AGGREGATION still differs --
+                    // `snp_count` takes the MAX over all of a site's alleles
+                    // and then matches each allele at its own length, while
+                    // this takes the MIN -- so `snp_count` requires room for
+                    // the LONGEST allele and this requires room only for the
+                    // SHORTEST, and at any site whose alleles differ in length
+                    // the two functions still admit different read sets. They
+                    // agree today only because all EIGHT sites reachable from
+                    // here have equal reg1/reg2 lengths:
+                    // `data/CYP2D6_haplotype_38.txt` lines 4-9 are 1/1, line 2
+                    // is 10/10, line 3 is 12/12. `min` is deliberately NOT
+                    // changed to `max`: that would move read admission with no
+                    // mandate, and the benchmark has no power to detect it.
+                    //
+                    // RESIDUAL LIMITATION, not fixed here: one fixed-length
+                    // slice per (read, site) cannot discriminate alleles of
+                    // unequal length the way `snp_count` does by matching each
+                    // allele at its own length. Unreachable from here today --
+                    // the haplotype DB's single unequal-length row (line 10,
+                    // g.42130653 `GCAGG` vs `GCAAGG`) is consumed only by
                     // `call_var42130655ins_a` through
-                    // `get_supporting_reads_single_region`, never through
-                    // haplotype extraction, so it is unreachable from here.
+                    // `get_supporting_reads_single_region`.
                     let min_len = reg1_allele
                         .split(',')
                         .chain(reg2_allele.split(','))
                         .map(str::len)
                         .min()
                         .unwrap_or(0);
+
+                    // Fail CLOSED on a zero-length slice, which the comma split
+                    // above made reachable. `min_len == 0` means some allele
+                    // field held an EMPTY comma component -- 'A,' splits to
+                    // ["A", ""] -- i.e. one trailing-comma typo in a
+                    // hand-maintained 10-line TSV, in a project whose sibling
+                    // DBs already carry 22 comma'd rows (21 in
+                    // `data/CYP2D6_target_variant_38.txt`, 1 in
+                    // `data/CYP2D6_SNP_38.txt`).
+                    //
+                    // Without this guard the failure is NOT a dropped read, it
+                    // is a FABRICATED match on every read: `hap` would be "",
+                    // `get_hap_counts` splits `base1`/`base2` on ',' too, and
+                    // `"" == ""` MATCHES -- so every covering read at the site
+                    // scores '1' (or '2') and is counted by `extract_hap`.
+                    // Pinned in
+                    // `a_trailing_comma_must_not_fabricate_a_match_on_every_read`.
+                    //
+                    // This is strictly NEW exposure, not a restatement of the
+                    // old one: the raw `min(|reg1|, |reg2|)` needed an empty
+                    // RAW field, which `get_snp_position` cannot emit -- its
+                    // fields come from `split_whitespace`, so none is ever
+                    // empty. The comma split needs only an empty COMPONENT.
+                    if min_len == 0 {
+                        continue;
+                    }
+
                     let end_pos = qpos + min_len;
                     // `>`, not `>=`: `seq[qpos..end_pos]` is a valid slice when
                     // `end_pos == seq.len()`, i.e. when the extracted bases run
@@ -150,6 +236,17 @@ fn get_bases_per_read(
                     // (`qpos + max_allele_len > seq.len()`) still counted the
                     // very same reads in the D6/D7 depth ratios -- the two
                     // copies of this pileup loop had drifted apart here.
+                    //
+                    // UPSTREAM DIVERGENCE, disclosed: `bcyrius`'s
+                    // `depth_calling/haplotype.py` reads
+                    //     end_pos = start_pos + min(len(reg1_allele), len(reg2_allele))
+                    //     if end_pos < len(read_seq):
+                    // so the pre-change Rust was a FAITHFUL port of upstream on
+                    // both points, and upstream's own haplotype.py /
+                    // snp_count.py pair carries the same min-vs-max
+                    // inconsistency described above. Haplotype counts out of
+                    // this function will therefore differ from published Cyrius
+                    // output.
                     if end_pos > seq.len() {
                         continue;
                     }
@@ -343,13 +440,35 @@ mod tests {
         }
     }
 
-    /// Scratch directory unique to the calling test.
-    fn scratch(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir()
-            .join(format!("cyrius_hap_{tag}_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    /// Scratch directory unique to the calling test, removed on drop.
+    ///
+    /// The previous `fn scratch(tag) -> PathBuf` was unlinked by the test body
+    /// itself, which covered only the path where nothing panicked first: an
+    /// `unwrap` in `write_hap_bam` or in `IndexedReader::from_path` leaked a
+    /// BAM + BAI under `env::temp_dir()`. `Drop` runs during unwind too, so
+    /// this covers every exit path, assertion failures included. Each test
+    /// still drops its `bam::IndexedReader` explicitly before asserting, so
+    /// the guard never unlinks a file the test holds open.
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir()
+                .join(format!("cyrius_hap_{tag}_{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+
+        fn join(&self, name: &str) -> std::path::PathBuf {
+            self.0.join(name)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 
     #[test]
@@ -372,7 +491,7 @@ mod tests {
         // flipping it back to `>=` makes its haplotype "1x" instead of "12",
         // and since `extract_hap` discards any haplotype containing 'x' the
         // read then vanishes from the '12'/'21' counts the caller gates on.
-        let dir = scratch("end_bound");
+        let dir = Scratch::new("end_bound");
         let bam_path = dir.join("hap_end_bound.bam");
         // Site 1 at 1-based 1001 (0-based 1000), site 2 at 1-based 1139
         // (0-based 1138) -- the same 138 bp spacing as 42127803/42127941.
@@ -394,8 +513,9 @@ mod tests {
         let haps = get_haplotypes_from_bam_single_region(&mut reader, &base_db, &[0, 1]);
         let counts = extract_hap(&haps, &[0, 1]);
 
+        // Close the BAM before asserting; `dir` unlinks itself on drop,
+        // including when an assertion below panics.
         drop(reader);
-        let _ = std::fs::remove_dir_all(&dir);
 
         assert_eq!(
             haps.get("second_site_at_read_end").map(String::as_str),
@@ -425,16 +545,23 @@ mod tests {
     }
 
     #[test]
-    fn allele_length_is_taken_per_allele_not_over_the_comma_joined_string() {
+    fn characterization_per_allele_length_fixes_commas_but_not_unequal_lengths() {
         // Review finding #7, second half. `min_len` used to come from the RAW
         // `reg1_allele`/`reg2_allele` strings, which can hold several
         // comma-separated alleles ('A,G'). The commas and the extra alleles
-        // inflate the string length, so the single slice extracted here came
-        // out longer than any allele `get_hap_counts` later matches it
-        // against -- and `get_hap_counts` splits on ',' , so it never compares
-        // against the joined form. Minimising over the comma-SPLIT alleles of
-        // both regions is what makes the extraction length agree with the
-        // matching.
+        // inflate the string length, so the single slice extracted here is
+        // longer than the shortest allele at the site. Minimising over the
+        // comma-SPLIT alleles of both regions is what makes the extraction
+        // length agree with the matching.
+        //
+        // NOT "every read then scores 'x'" -- that overstatement was in the
+        // production comment for a while and this very fixture refutes it. An
+        // over-long slice misses every allele only when its length matches no
+        // allele length at the site; when it happens to match a DIFFERENT
+        // allele's length the read is scored for the WRONG region instead.
+        // Both outcomes occur here, measured under the raw bound of 2:
+        //   g_then_t -> "x"   (slice "GT" matches nothing)
+        //   a_then_c -> "2"   (slice "AC" matches reg2's 2 bp allele)
         //
         // HONEST SCOPE: `data/CYP2D6_haplotype_38.txt` contains ZERO commas,
         // so this is a trap-removal test, not a bug reproduction. No shipped
@@ -447,7 +574,7 @@ mod tests {
         // a comma and its raw string is the LONGER of the two ("A,G" is 3
         // bytes, "AC" is 2), yet the raw minimum is 2 while the true minimum
         // allele length is 1.
-        let dir = scratch("comma");
+        let dir = Scratch::new("comma");
         let bam_path = dir.join("hap_comma.bam");
         const READ_LEN: usize = 50;
         write_hap_bam(
@@ -468,8 +595,9 @@ mod tests {
         let mut reader = bam::IndexedReader::from_path(&bam_path).unwrap();
         let haps = get_haplotypes_from_bam_single_region(&mut reader, &base_db, &[0]);
 
+        // Close the BAM before asserting; `dir` unlinks itself on drop,
+        // including when an assertion below panics.
         drop(reader);
-        let _ = std::fs::remove_dir_all(&dir);
 
         assert_eq!(
             haps.get("g_then_t").map(String::as_str),
@@ -498,8 +626,246 @@ mod tests {
         assert_eq!(
             haps.get("a_then_c").map(String::as_str),
             Some("1"),
-            "documents the residual unequal-length limitation; got {:?}",
+            "CHARACTERIZATION, KNOWN-WRONG -- this assertion is a \
+             change-detector, NOT a specification. The read carries reg2's 2 bp \
+             \"AC\" and is labelled region 1, which is wrong; the expected \
+             value is pinned only so the residual unequal-length limitation \
+             cannot change unnoticed. When per-allele matching lands (the \
+             correct fix), DELETE this assertion rather than chasing it; got \
+             {:?}",
             haps.get("a_then_c")
+        );
+    }
+    #[test]
+    fn a_trailing_comma_must_not_fabricate_a_match_on_every_read() {
+        // Review of the `min_len` change: with the comma SPLIT, `min_len == 0`
+        // became reachable, and it fails OPEN. One trailing comma in an allele
+        // field -- `"A,"` splits to `["A", ""]` -- makes the minimum 0, so the
+        // extracted slice is the EMPTY string. `get_hap_counts` splits
+        // `base1`/`base2` on ',' as well, so it compares that empty slice
+        // against an empty component and `"" == ""` MATCHES: without the
+        // `min_len == 0` guard EVERY covering read at the site is scored '1'
+        // and counted by `extract_hap`. The failure mode is a fabricated
+        // haplotype on every read, not a discarded one.
+        //
+        // This exposure is strictly NEW, not inherited from the raw
+        // `min(|reg1|, |reg2|)`: that needed an empty RAW field, which
+        // `get_snp_position` cannot produce (its fields come from
+        // `split_whitespace`). The split needs only an empty component.
+        //
+        // Measured without the guard (`min_len == 0 { continue }` removed):
+        //   haps   = {"read_ac": "1", "read_gt": "1"}
+        //   counts = {"1": [1, 1]}
+        // i.e. 2 of 2 covering reads fabricated.
+        let dir = Scratch::new("zero_len");
+        let bam_path = dir.join("hap_zero_len.bam");
+        const READ_LEN: usize = 50;
+        write_hap_bam(
+            &bam_path,
+            READ_LEN,
+            &[
+                ("read_ac", 980, &[(20, "AC")]),
+                ("read_gt", 990, &[(10, "GT")]),
+            ],
+        );
+
+        // reg1 = "A," -> ["A", ""], reg2 = "AC" -> ["AC"]; the minimum over
+        // those three components is 0.
+        let base_db = hap_lookup(&[(1001, 2001, "A,_AC")]);
+        let mut reader = bam::IndexedReader::from_path(&bam_path).unwrap();
+        let haps = get_haplotypes_from_bam_single_region(&mut reader, &base_db, &[0]);
+        let counts = extract_hap(&haps, &[0]);
+
+        // Close the BAM before asserting; `dir` unlinks itself on drop,
+        // including when an assertion below panics.
+        drop(reader);
+
+        assert!(
+            haps.is_empty(),
+            "a zero-length extraction must be skipped, not compared: the empty \
+             slice matches an empty comma component in `get_hap_counts` and \
+             fabricates a '1' for every covering read. Without the \
+             `min_len == 0` guard this is {{\"read_ac\": \"1\", \
+             \"read_gt\": \"1\"}}; got {haps:?}"
+        );
+        assert!(
+            counts.is_empty(),
+            "no haplotype may reach `extract_hap` from a zero-length slice; \
+             without the guard this is {{\"1\": [1, 1]}}, i.e. 2 of 2 covering \
+             reads counted on nothing; got {counts:?}"
+        );
+    }
+
+    #[test]
+    fn a_multi_base_site_at_the_read_end_keeps_its_haplotype() {
+        // Same `>=` -> `>` bound as
+        // `a_read_whose_last_base_completes_the_site_keeps_its_haplotype`, but
+        // at MULTI-BASE sites, which that 1 bp fixture does not exercise at
+        // all: the slice there is `seq[qpos..qpos + 1]`, a single base, so it
+        // says nothing about a 10 or 12 base slice landing flush with the end
+        // of the stored sequence.
+        //
+        // Exactly one reachable panel has multi-base rows -- `g.42126938C>T`,
+        // `data/CYP2D6_haplotype_38.txt` lines 2 and 3, 10 bp and 12 bp -- and
+        // it is well covered on real data. Replaying the three reachable panels
+        // over the 62 benchmark BAMs, 99 of the 261 newly admitted observations
+        // (38%) sit at those two 10/12 bp sites (plus their D7 mates), spread
+        // over 47 of the 62 samples; HG006 contributes 6, HG02373 4 and
+        // NA19777 1.
+        //
+        // Note what is NOT true: multi-base sites are not MORE exposed per
+        // site. Both bounds reject `qpos + min_len > seq.len()`, so they differ
+        // on the single value `qpos == seq.len() - min_len` whatever `min_len`
+        // is, and the measured rescue count per (site, position) is about the
+        // same at 1 bp and at 10/12 bp sites (20-34 reads each). What is
+        // different is the slice itself, and that is what this test covers.
+        //
+        // Geometry copied from that panel: a 12 bp site and a 10 bp site 47 bp
+        // apart (as g.42126611 and g.42126658 are), read over 150 bp reads.
+        // `site_at_read_end` is placed so the 10 bp slice ends at exactly
+        // `seq.len()` -- zero slack. Under `>=` its second site is dropped and
+        // the haplotype is "1x", which `extract_hap` then discards.
+        let dir = Scratch::new("multibase_end");
+        let bam_path = dir.join("hap_multibase_end.bam");
+        const READ_LEN: usize = 150;
+        // Site A (index 0) at 1-based 1001 = 0-based 1000, 12 bp alleles.
+        // Site B (index 1) at 1-based 1048 = 0-based 1047, 10 bp alleles.
+        const A_REG1: &str = "GTCACCAGGAAA"; // 12 bp, as line 3 of the DB
+        const A_REG2: &str = "CTCACCAGGAAA";
+        const B_REG1: &str = "AGTGGGCACC"; // 10 bp, as line 2 of the DB
+        const B_REG2: &str = "GGCGGCCACG";
+        write_hap_bam(
+            &bam_path,
+            READ_LEN,
+            &[
+                // 0-based start 907: site A at qpos 93, site B at qpos 140, so
+                // 140 + 10 == 150 == seq.len() and the bound has ZERO slack.
+                (
+                    "site_at_read_end",
+                    907,
+                    &[(93, A_REG1), (140, B_REG2)],
+                ),
+                // 0-based start 1000: site A at qpos 0, site B at qpos 47, so
+                // 93 bases of slack past the 10 bp site.
+                ("roomy", 1000, &[(0, A_REG2), (47, B_REG1)]),
+            ],
+        );
+
+        let base_db = hap_lookup(&[
+            (1001, 2001, "GTCACCAGGAAA_CTCACCAGGAAA"),
+            (1048, 2048, "AGTGGGCACC_GGCGGCCACG"),
+        ]);
+        let mut reader = bam::IndexedReader::from_path(&bam_path).unwrap();
+        let haps = get_haplotypes_from_bam_single_region(&mut reader, &base_db, &[0, 1]);
+        let counts = extract_hap(&haps, &[0, 1]);
+
+        // Close the BAM before asserting; `dir` unlinks itself on drop,
+        // including when an assertion below panics.
+        drop(reader);
+
+        assert_eq!(
+            haps.get("site_at_read_end").map(String::as_str),
+            Some("12"),
+            "the 10 bp site is this read's final 10 stored bases, so \
+             `end_pos == seq.len()` and `seq[qpos..end_pos]` is a valid slice; \
+             under the old `>=` the site was dropped and the haplotype became \
+             \"1x\"; got {:?}",
+            haps.get("site_at_read_end")
+        );
+        assert_eq!(
+            haps.get("roomy").map(String::as_str),
+            Some("21"),
+            "control read with 93 bases of slack past the 10 bp site; got {:?}",
+            haps.get("roomy")
+        );
+        assert_eq!(
+            counts.get("12").map(|v| v.iter().sum::<u32>()),
+            Some(1),
+            "the read ending exactly at the 10 bp site must reach the '12' \
+             count; got {counts:?}"
+        );
+        assert_eq!(
+            counts.get("21").map(|v| v.iter().sum::<u32>()),
+            Some(1),
+            "the roomy read must reach the '21' count; got {counts:?}"
+        );
+    }
+
+    #[test]
+    fn both_regions_comma_separated_with_equal_length_alleles_are_still_scored() {
+        // The case that makes the comma SPLIT strictly better than the raw
+        // `min(|reg1_allele|, |reg2_allele|)`, and the justification for
+        // keeping that half of the change.
+        //
+        // When both regions are comma'd and every allele has the same length,
+        // the raw minimum matches NO allele length at all: here 'A,G' and
+        // 'C,T' are both 3 bytes, so `raw == 3` while every allele is 1 bp. The
+        // 3 bp slice can never equal a 1 bp allele, so every read at the site
+        // scores 'x', `extract_hap` returns EMPTY, the whole panel reads as "no
+        // reads", and every gate built on it defaults false -- a silent, total
+        // loss of the site rather than a marginal miscount.
+        //
+        // Measured by running this function under the raw bound:
+        //   haps   = {"carries_a": "x", "carries_t": "x"}
+        //   counts = {}
+        // and under the split bound (asserted below):
+        //   haps   = {"carries_a": "1", "carries_t": "2"}
+        //   counts = {"1": [1], "2": [1]}
+        //
+        // HONEST SCOPE: ZERO of the 285 rows across the four shipped position
+        // DBs have both regions comma'd, and the haplotype DB this function
+        // reads has no commas at all, so this is trap removal, not a bug
+        // reproduction. No benchmark number can move because of it.
+        let dir = Scratch::new("both_comma");
+        let bam_path = dir.join("hap_both_comma.bam");
+        const READ_LEN: usize = 50;
+        write_hap_bam(
+            &bam_path,
+            READ_LEN,
+            &[
+                // Only the site base is set; the rest of the read is 'N', so a
+                // 3 bp slice reads "ANN" / "TNN" and matches nothing.
+                ("carries_a", 980, &[(20, "A")]),
+                ("carries_t", 990, &[(10, "T")]),
+            ],
+        );
+
+        //   raw   min_len = min("A,G".len(), "C,T".len()) = 3  (matches nothing)
+        //   split min_len = min(1, 1, 1, 1)               = 1  (right)
+        let base_db = hap_lookup(&[(1001, 2001, "A,G_C,T")]);
+        let mut reader = bam::IndexedReader::from_path(&bam_path).unwrap();
+        let haps = get_haplotypes_from_bam_single_region(&mut reader, &base_db, &[0]);
+        let counts = extract_hap(&haps, &[0]);
+
+        // Close the BAM before asserting; `dir` unlinks itself on drop,
+        // including when an assertion below panics.
+        drop(reader);
+
+        assert_eq!(
+            haps.get("carries_a").map(String::as_str),
+            Some("1"),
+            "this read carries reg1's 1 bp 'A'; under the raw 3 bp bound the \
+             slice was \"ANN\" and the read scored 'x'; got {:?}",
+            haps.get("carries_a")
+        );
+        assert_eq!(
+            haps.get("carries_t").map(String::as_str),
+            Some("2"),
+            "this read carries reg2's 1 bp 'T'; under the raw 3 bp bound the \
+             slice was \"TNN\" and the read scored 'x'; got {:?}",
+            haps.get("carries_t")
+        );
+        assert_eq!(
+            counts.get("1").map(|v| v.iter().sum::<u32>()),
+            Some(1),
+            "under the raw bound `extract_hap` was EMPTY here -- the entire \
+             site read as 'no reads'; got {counts:?}"
+        );
+        assert_eq!(
+            counts.get("2").map(|v| v.iter().sum::<u32>()),
+            Some(1),
+            "under the raw bound `extract_hap` was EMPTY here -- the entire \
+             site read as 'no reads'; got {counts:?}"
         );
     }
 }
