@@ -71,6 +71,28 @@ pub fn get_reads_by_region(
         // fractions were biased (review finding #6). The bound is taken over
         // the union of both regions' alleles, so a read without room for the
         // longest allele at the site is counted for neither.
+        //
+        // Exposure: 24 sites in the shipped DBs have alleles of unequal
+        // length -- 22 in `data/CYP2D6_target_variant_38.txt`, 1 in
+        // `data/CYP2D6_target_variant_homology_region_38.txt`, and 1 in
+        // `data/CYP2D6_haplotype_38.txt` (line 10, pos 42130653: reg1
+        // `GCAGG` 5 bp vs reg2 `GCAAGG` 6 bp). `data/CYP2D6_SNP_38.txt` has
+        // none. The haplotype DB is the THIRD consumer of this bound and the
+        // only one the 62-BAM before/after measurement does not cover. Its
+        // row reaches here through `call_var42130655ins_a`, but the resulting
+        // count never lands in the JSON: `main.rs` writes it with
+        // `raw_count.entry("g.42130655-42130656insA").or_insert_with(..)`,
+        // and the variant DB -- which carries the same site with the lengths
+        // the other way round -- has already filled that key. The one gate it
+        // does feed is
+        //     has_long_insert_size_reads = d7_count >= 5 && d6_count <= 2
+        // where `d6_count` is the count of the SHORTER (5 bp) allele under an
+        // UPPER bound, so dropping reads from the shorter allele can only make
+        // that condition EASIER to satisfy -- i.e. this change can only ever
+        // turn the `*15.003` insA call ON, never off. On the 62 benchmark BAMs
+        // `g.42130655-42130656insA` appears in `Variants_called` for 0 samples
+        // under both flag sets, so the branch is never entered there and the
+        // "no call moved" evidence says nothing about it.
         let max_allele_len = reg1_allele
             .split(',')
             .chain(reg2_allele.split(','))
@@ -141,6 +163,19 @@ pub fn get_reads_by_region(
 
                 // Check reg1 alleles
                 for allele in reg1_allele.split(',') {
+                    // The slice below has no bound of its own any more: it
+                    // relies entirely on `max_allele_len` being the max over
+                    // BOTH regions' alleles, checked ~70 lines up. Pin that
+                    // here -- a per-region max turns this into an out-of-range
+                    // panic on arbitrary BAM input. NOTE: compiled out in
+                    // release, so this documents and tests the invariant, it
+                    // does not enforce it in the shipped binary.
+                    debug_assert!(
+                        allele.len() <= max_allele_len,
+                        "reg1 allele {allele:?} is {} bp, longer than the site's \
+                         max_allele_len of {max_allele_len} bp",
+                        allele.len()
+                    );
                     let read_seq =
                         String::from_utf8_lossy(&seq[qpos..qpos + allele.len()]);
                     if read_seq == allele {
@@ -154,6 +189,19 @@ pub fn get_reads_by_region(
 
                 // Check reg2 alleles
                 for allele in reg2_allele.split(',') {
+                    // The slice below has no bound of its own any more: it
+                    // relies entirely on `max_allele_len` being the max over
+                    // BOTH regions' alleles, checked ~70 lines up. Pin that
+                    // here -- a per-region max turns this into an out-of-range
+                    // panic on arbitrary BAM input. NOTE: compiled out in
+                    // release, so this documents and tests the invariant, it
+                    // does not enforce it in the shipped binary.
+                    debug_assert!(
+                        allele.len() <= max_allele_len,
+                        "reg2 allele {allele:?} is {} bp, longer than the site's \
+                         max_allele_len of {max_allele_len} bp",
+                        allele.len()
+                    );
                     let read_seq =
                         String::from_utf8_lossy(&seq[qpos..qpos + allele.len()]);
                     if read_seq == allele {
@@ -327,14 +375,23 @@ mod tests {
     /// read carrying ALT can never be mistaken for REF on its first 13 bases.
     const ALT_22: &str = "TCCAGTGGGCACAGTGGGCACC";
     const REF_13: &str = "TCCAGTGGGCACC";
-    /// 1-based site position, matching the `dsnp` key below.
+    /// 1-based site position, matching the `dsnp` keys below.
     const SITE_1BASED: i64 = 1001;
     /// Every fixture read is 50M, so there is room for the 22 bp allele only
-    /// when the site sits at least 22 bases from the read's 3' end.
+    /// when the site sits at least 22 bases from the end of the read's STORED
+    /// sequence. `record.seq()` returns the reference-forward stored sequence,
+    /// so for a reverse-strand read that end is the original read's 5' end --
+    /// the bound, and the bias it fixes, are strand-agnostic in stored
+    /// coordinates.
     const READ_LEN: usize = 50;
 
-    /// Write an indexed single-site BAM holding three 50M reads.
+    /// Write an indexed single-position BAM holding four 50M reads.
     ///
+    /// * `site_at_last_base` — the site is this read's FINAL stored base
+    ///   (`qpos = READ_LEN - 1`), so a 1 bp allele ends at exactly
+    ///   `seq.len()` and the bound has zero slack. It carries `T`, the 1 bp
+    ///   allele used by `equal_length_alleles_are_unaffected_by_the_read_end_bound`,
+    ///   and it is the read that pins the `>` in the new bound.
     /// * `ref_at_end` — positioned so exactly 13 bases remain from the site:
     ///   enough for the 13 bp REF, not for the 22 bp ALT. This is the biased
     ///   read; it must be counted for neither allele.
@@ -375,7 +432,9 @@ mod tests {
                 writer.write(&rec).unwrap();
             };
 
-            // Sorted by start position: qpos 37 starts at 963, qpos 10 at 990.
+            // Sorted by start position: qpos 49 starts at 951, qpos 37 at 963,
+            // qpos 10 at 990.
+            emit(b"site_at_last_base", READ_LEN - 1, &REF_13[..1]);
             emit(b"ref_at_end", READ_LEN - REF_13.len(), REF_13);
             emit(b"ref_roomy", 10, REF_13);
             emit(b"alt_roomy", 10, ALT_22);
@@ -385,10 +444,11 @@ mod tests {
         path
     }
 
-    fn names(sets: &[&Vec<HashSet<String>>]) -> Vec<String> {
+    /// Sorted read names recorded for one site index across the given sets.
+    fn names(sets: &[&Vec<HashSet<String>>], site: usize) -> Vec<String> {
         let mut v: Vec<String> = sets
             .iter()
-            .flat_map(|s| s[0].iter().cloned())
+            .flat_map(|s| s[site].iter().cloned())
             .collect();
         v.sort();
         v
@@ -401,47 +461,83 @@ mod tests {
         // `max_len` of the site could match the SHORTER allele and never the
         // longer one. `ref_at_end` has exactly 13 bases left: it matched the
         // 13 bp REF while the 22 bp ALT was never even tested, so reads near
-        // their 3' end were counted only for the shorter allele and the
-        // allele fractions were biased. The bound must be taken over the
-        // union of BOTH regions' alleles, because the two lengths that differ
-        // here belong to different regions.
+        // the end of their stored sequence were counted only for the shorter
+        // allele and the allele fractions were biased.
+        //
+        // TWO dsnp entries at the same position (the key is `{pos}_{index}`,
+        // exactly as `get_snp_position` builds it), differing only in which
+        // region holds the longer allele:
+        //
+        //   site 0 — 22 bp ALT in reg1, 13 bp REF in reg2 (the real
+        //            `g.42126656-42126657insAGTGGGCAC` layout);
+        //   site 1 — the same two alleles SWAPPED, so the longer one is in
+        //            reg2.
+        //
+        // Site 1 is what makes the UNION mandatory rather than a per-region
+        // max: narrowing `max_allele_len` to `reg1_allele` alone gives 13
+        // there, so `ref_at_end` (qpos 37) passes the bound and the reg2 loop
+        // then slices `seq[37..59]` out of a 50 bp read. That is the same
+        // `range end index out of range` panic a reg1-only max produces on
+        // the first production BAM, where 13 of the 24 unequal-length DB
+        // sites have reg2 longer (`g.42128242delT`, `g.42128445delCTGCC`,
+        // `g.42127963delG`, ...).
         let dir = std::env::temp_dir()
             .join(format!("cyrius_indel_end_bias_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let bam_path = write_indel_end_bias_bam(&dir);
         let mut reader = bam::IndexedReader::from_path(&bam_path).unwrap();
 
-        let key = format!("{SITE_1BASED}_0");
+        let key_longer_in_reg1 = format!("{SITE_1BASED}_0");
+        let key_longer_in_reg2 = format!("{SITE_1BASED}_1");
         let mut dsnp: indexmap::IndexMap<String, String> = indexmap::IndexMap::new();
-        dsnp.insert(key.clone(), format!("{ALT_22}_{REF_13}"));
+        dsnp.insert(key_longer_in_reg1.clone(), format!("{ALT_22}_{REF_13}"));
+        dsnp.insert(key_longer_in_reg2.clone(), format!("{REF_13}_{ALT_22}"));
         let mut dindex: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
-        dindex.insert(key, 0);
+        dindex.insert(key_longer_in_reg1, 0);
+        dindex.insert(key_longer_in_reg2, 1);
 
         let (reg1_fwd, reg1_rev, reg2_fwd, reg2_rev) =
             get_reads_by_region(&mut reader, "chr22", &dsnp, &dindex, 0, None, false);
 
-        let reg1 = names(&[&reg1_fwd, &reg1_rev]);
-        let reg2 = names(&[&reg2_fwd, &reg2_rev]);
+        let s0_reg1 = names(&[&reg1_fwd, &reg1_rev], 0);
+        let s0_reg2 = names(&[&reg2_fwd, &reg2_rev], 0);
+        let s1_reg1 = names(&[&reg1_fwd, &reg1_rev], 1);
+        let s1_reg2 = names(&[&reg2_fwd, &reg2_rev], 1);
 
         // Clean up before asserting so a failure leaves nothing behind.
         drop(reader);
         let _ = std::fs::remove_dir_all(&dir);
 
+        // Site 0: longer allele in reg1.
         assert_eq!(
-            reg1,
+            s0_reg1,
             vec!["alt_roomy".to_string()],
-            "only the read with room for the 22 bp ALT may support reg1; got {reg1:?}"
+            "only the read with room for the 22 bp ALT may support reg1; got {s0_reg1:?}"
         );
         assert_eq!(
-            reg2,
+            s0_reg2,
             vec!["ref_roomy".to_string()],
             "`ref_at_end` has exactly {} bases left from the site -- enough for \
              the {} bp REF but not for the {} bp ALT -- so it must be counted \
-             for NEITHER allele, not for the shorter one; got {reg2:?}",
+             for NEITHER allele, not for the shorter one; got {s0_reg2:?}",
             REF_13.len(),
             REF_13.len(),
             ALT_22.len()
+        );
+
+        // Site 1: the mirror image. A reg1-only `max_allele_len` would be 13
+        // here and never reach these assertions -- it panics in the reg2 loop.
+        assert_eq!(
+            s1_reg1,
+            vec!["ref_roomy".to_string()],
+            "with the 13 bp allele in reg1 the bound must STILL be 22, so \
+             `ref_at_end` is excluded from reg1 too; got {s1_reg1:?}"
+        );
+        assert_eq!(
+            s1_reg2,
+            vec!["alt_roomy".to_string()],
+            "the 22 bp allele is in reg2 at this site; got {s1_reg2:?}"
         );
     }
 
@@ -449,14 +545,28 @@ mod tests {
     fn equal_length_alleles_are_unaffected_by_the_read_end_bound() {
         // Guard against over-correcting: when both regions' alleles are the
         // same length (every site in `data/CYP2D6_SNP_38.txt`), a read whose
-        // last base is the site must still be counted.
+        // last stored base IS the site must still be counted.
+        //
+        // `site_at_last_base` builds exactly that case -- `qpos = READ_LEN - 1`
+        // against a 1 bp allele, so `qpos + max_allele_len == seq.len()` and
+        // the bound has ZERO slack. It is the read that pins the `>` in
+        // `qpos + max_allele_len > seq.len()`: flipping it to `>=` drops this
+        // read and the assertion below goes red. Without such a read the test
+        // could not go red at all -- the next-closest fixture read,
+        // `ref_at_end` at qpos 37, still has 12 bases of slack against a 1 bp
+        // allele, and a `>=` left the whole suite green while, measured on
+        // the 62 benchmark BAMs, moving 7-102 `Variant_raw_count` sites per
+        // sample (median 49), `d67_snp_raw` on 61 samples, `d67_snp_call` on
+        // 26 (HG00111 among them) and `Confidence` on 2 -- identically under
+        // both flag sets, and `d67_snp_call` feeds the CNV consensus.
         let dir = std::env::temp_dir()
             .join(format!("cyrius_indel_end_bias_eq_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let bam_path = write_indel_end_bias_bam(&dir);
         let mut reader = bam::IndexedReader::from_path(&bam_path).unwrap();
 
-        // 1 bp alleles: `ref_at_end` carries 'T' (REF_13[0]) at the site.
+        // 1 bp alleles: every fixture read carries 'T' at the site (it is
+        // `REF_13[0]` and `ALT_22[0]`), and none carries 'G'.
         let key = format!("{SITE_1BASED}_0");
         let mut dsnp: indexmap::IndexMap<String, String> = indexmap::IndexMap::new();
         dsnp.insert(key.clone(), "G_T".to_string());
@@ -467,22 +577,23 @@ mod tests {
         let (reg1_fwd, reg1_rev, reg2_fwd, reg2_rev) =
             get_reads_by_region(&mut reader, "chr22", &dsnp, &dindex, 0, None, false);
 
-        let reg1 = names(&[&reg1_fwd, &reg1_rev]);
-        let reg2 = names(&[&reg2_fwd, &reg2_rev]);
+        let reg1 = names(&[&reg1_fwd, &reg1_rev], 0);
+        let reg2 = names(&[&reg2_fwd, &reg2_rev], 0);
 
         drop(reader);
         let _ = std::fs::remove_dir_all(&dir);
 
-        // `alt_roomy` has 'T' too (ALT_22[0]), `ref_roomy` has 'T'.
         assert_eq!(
             reg2,
             vec![
                 "alt_roomy".to_string(),
                 "ref_at_end".to_string(),
-                "ref_roomy".to_string()
+                "ref_roomy".to_string(),
+                "site_at_last_base".to_string()
             ],
-            "all three reads carry 'T' at the site, and a 1 bp allele fits in \
-             every one of them; got {reg2:?}"
+            "all four reads carry 'T' at the site and a 1 bp allele fits in \
+             every one of them -- including `site_at_last_base`, whose allele \
+             ends at exactly seq.len(); got {reg2:?}"
         );
         assert!(reg1.is_empty(), "no read carries 'G' at the site; got {reg1:?}");
     }
