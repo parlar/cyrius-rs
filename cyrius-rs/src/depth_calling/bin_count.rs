@@ -1,4 +1,4 @@
-use crate::depth_calling::utilities::open_alignment_file_with_index;
+use crate::depth_calling::utilities::{fetch_region, open_alignment_file_with_index};
 use crate::stats;
 use crate::types::{NormalizedDepth, Region, RegionDic};
 use indexmap::IndexMap;
@@ -6,27 +6,17 @@ use rust_htslib::bam::{self, Read as BamRead};
 
 /// Return the number of reads that align to a region.
 /// Keep duplicate reads. Keep unmapped reads with mapped mates.
-pub fn get_read_count(reader: &mut bam::IndexedReader, region: &Region, mapq_cutoff: u8) -> u64 {
+pub fn get_read_count(
+    reader: &mut bam::IndexedReader,
+    region: &Region,
+    mapq_cutoff: u8,
+) -> Result<u64, String> {
     let tid = match reader.header().tid(region.0.as_bytes()) {
         Some(t) => t,
-        None => return 0,
+        None => return Ok(0),
     };
-    if reader
-        .fetch(bam::FetchDefinition::Region(
-            tid as i32,
-            region.1,
-            region.2,
-        ))
-        .is_err()
-    {
-        log::warn!(
-            "get_read_count: failed to fetch region {}:{}-{}",
-            region.0,
-            region.1,
-            region.2
-        );
-        return 0;
-    }
+    let what = format!("{}:{}-{}", region.0, region.1, region.2);
+    fetch_region(reader, tid, region.1, region.2, &what)?;
 
     let mut nreads: u64 = 0;
     let mut record = bam::Record::new();
@@ -43,40 +33,33 @@ pub fn get_read_count(reader: &mut bam::IndexedReader, region: &Region, mapq_cut
             nreads += 1;
         }
     }
-    nreads
+    Ok(nreads)
 }
 
 /// Return the median read length from a set of reads (fetches all reads).
-pub fn get_read_length(reader: &mut bam::IndexedReader) -> f64 {
+pub fn get_read_length(reader: &mut bam::IndexedReader) -> Result<f64, String> {
     // Unlike a region fetch, FetchDefinition::All cannot fail for a missing
     // contig -- it has no contig to look up. It can still fail on a broken
-    // or stale index, so handle it the same way as the region fetches below.
-    if reader.fetch(bam::FetchDefinition::All).is_err() {
-        log::warn!("get_read_length: failed to fetch all reads");
-        return 150.0;
-    }
-    get_read_length_from_fetched(reader)
+    // or stale index; like the region fetches, that is an error (E1), not a
+    // guessed read length.
+    reader
+        .fetch(bam::FetchDefinition::All)
+        .map_err(|e| format!("BAM fetch failed for all reads: {e}"))?;
+    Ok(get_read_length_from_fetched(reader))
 }
 
 /// Return the median read length from a region.
-fn get_read_length_from_region(reader: &mut bam::IndexedReader, region: &Region) -> f64 {
+fn get_read_length_from_region(
+    reader: &mut bam::IndexedReader,
+    region: &Region,
+) -> Result<f64, String> {
     let tid = match reader.header().tid(region.0.as_bytes()) {
         Some(t) => t,
-        None => return 150.0,
+        None => return Ok(150.0),
     };
-    if reader
-        .fetch(bam::FetchDefinition::Region(tid as i32, region.1, region.2))
-        .is_err()
-    {
-        log::warn!(
-            "get_read_length_from_region: failed to fetch region {}:{}-{}",
-            region.0,
-            region.1,
-            region.2
-        );
-        return 150.0;
-    }
-    get_read_length_from_fetched(reader)
+    let what = format!("{}:{}-{}", region.0, region.1, region.2);
+    fetch_region(reader, tid, region.1, region.2, &what)?;
+    Ok(get_read_length_from_fetched(reader))
 }
 
 fn get_read_length_from_fetched(reader: &mut bam::IndexedReader) -> f64 {
@@ -300,7 +283,7 @@ pub fn get_normed_depth(
         let mut hap_cn: Option<f64> = None;
 
         for (region, gc) in regions {
-            let nreads = get_read_count(&mut reader, region, 0);
+            let nreads = get_read_count(&mut reader, region, 0)?;
             lcount.push(nreads);
             if region.3.contains("_hapcn") {
                 region_length = Some(region.2 - region.1);
@@ -332,7 +315,7 @@ pub fn get_normed_depth(
 
     // Get read length from the last region
     let read_length = if let Some(ref region) = last_region {
-        get_read_length_from_region(&mut reader, region)
+        get_read_length_from_region(&mut reader, region)?
     } else {
         150.0
     };
@@ -348,7 +331,7 @@ pub fn get_normed_depth(
 
     if n_cores <= 1 {
         for (region, gc) in &norm_regions {
-            let nreads = get_read_count(&mut reader, region, 0);
+            let nreads = get_read_count(&mut reader, region, 0)?;
             let region_length = (region.2 - region.1) as f64;
             let norm_depth = nreads as f64 / region_length;
             control_counts.push(norm_depth);
@@ -384,14 +367,14 @@ pub fn get_normed_depth(
             .par_chunks(chunk_len)
             .map(|chunk| {
                 let mut r = open()?;
-                Ok(chunk
+                chunk
                     .iter()
                     .map(|(region, gc)| {
-                        let nreads = get_read_count(&mut r, region, 0);
+                        let nreads = get_read_count(&mut r, region, 0)?;
                         let region_length = (region.2 - region.1) as f64;
-                        (nreads as f64 / region_length, *gc)
+                        Ok((nreads as f64 / region_length, *gc))
                     })
-                    .collect())
+                    .collect::<Result<Vec<_>, String>>()
             })
             .collect();
         for (norm_depth, gc) in results?.into_iter().flatten() {
@@ -833,7 +816,7 @@ mod tests {
     }
 
     #[test]
-    fn get_read_length_with_broken_index_warns_instead_of_panicking() {
+    fn get_read_length_with_broken_index_is_an_error() {
         // get_read_length() fetches FetchDefinition::All, not a region, so it
         // cannot fail the way a missing-contig region fetch does. But a broken
         // index can still make the underlying htslib fetch return Err: pairing
@@ -867,10 +850,65 @@ mod tests {
         let _ = std::fs::remove_file(&bai_path);
         let _ = std::fs::remove_dir(&dir);
 
-        assert_eq!(
-            read_len, 150.0,
-            "a fetch failure (broken/mismatched index) must degrade to the 150.0 \
-             fallback read length, not panic"
+        // Task 4 made this degrade to the 150.0 fallback instead of panicking;
+        // E1 (see below) makes it an error: a guessed read length on a BAM
+        // whose index cannot be used is not a basis for a call.
+        assert!(
+            read_len.is_err(),
+            "a fetch failure (broken/mismatched index) must be an error, not a \
+             fallback read length: got {:?}",
+            read_len
         );
+    }
+
+    // ---- E1: a failed BAM fetch is a no-call, not zero reads ----
+    //
+    // Escalation E1 of review batch 4, decided by the human 2026-10-07: when
+    // htslib cannot position the reader (broken or stale index, CRAM reference
+    // that cannot be resolved, invalid interval) the reads were never looked
+    // at. Returning zero counts makes that look like evidence, and the sample
+    // gets a confident call. It must surface as an Err, which main.rs turns
+    // into a no-call. An inverted interval is the input used here because it
+    // is the one that reliably drives `fetch` into Err through the public API
+    // (measured: Region(tid, 100, 50) errs; an out-of-range tid or a negative
+    // start does not, they just return no reads).
+
+    fn benchmark_bam() -> Option<std::path::PathBuf> {
+        let bam = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../benchmark/HG00096_pgx_regions.bam");
+        if bam.exists() {
+            Some(bam)
+        } else {
+            eprintln!("skipping: benchmark BAM not present");
+            None
+        }
+    }
+
+    #[test]
+    fn get_read_count_is_an_error_when_the_fetch_fails() {
+        let Some(bam) = benchmark_bam() else { return };
+        let mut reader = bam::IndexedReader::from_path(&bam).unwrap();
+        let inverted: Region = ("chr22".to_string(), 42_130_000, 42_129_000, "inverted".to_string());
+        let err = get_read_count(&mut reader, &inverted, 0)
+            .expect_err("a failed fetch must be an error, not Ok(0)");
+        assert!(err.contains("chr22:42130000-42129000"), "error must name the region: {err}");
+    }
+
+    #[test]
+    fn get_normed_depth_is_an_error_when_one_control_region_fetch_fails() {
+        // One failed control region out of 50: zero counts would be dropped
+        // by `select_usable_control_regions` (49/50 usable) and the sample
+        // would be called. It must be an error on both the serial and the
+        // chunked parallel path instead.
+        let Some(bam) = benchmark_bam() else { return };
+        let bam = bam.to_str().unwrap();
+        let mut regions =
+            crate::depth_calling::utilities::parse_region_file(crate::data::REGION_BED, "chr38");
+        let control = &mut regions.get_mut("norm").expect("norm regions")[7].0;
+        std::mem::swap(&mut control.1, &mut control.2);
+        for n_cores in [1usize, 4] {
+            let r = get_normed_depth(bam, &regions, n_cores, None, None);
+            assert!(r.is_err(), "n_cores={n_cores}: a failed control-region fetch must be an error");
+        }
     }
 }

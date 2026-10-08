@@ -18,6 +18,7 @@ use std::collections::{HashMap, HashSet};
 use rayon::prelude::*;
 use rust_htslib::bam::{self, Read as BamRead};
 
+use crate::depth_calling::utilities::fetch_region;
 use crate::types::StarCombinations;
 
 // ---------------------------------------------------------------------------
@@ -375,11 +376,12 @@ fn collect_reads_dual_region(
     // Fetch from both regions
     let regions = [(d6_start, d6_end), (d7_start, d7_end)];
     for &(start, end) in &regions {
-        if reader
-            .fetch(bam::FetchDefinition::Region(tid as i32, start, end))
-            .is_err()
-        {
-            continue;
+        // A failed fetch means part of the evidence was never looked at;
+        // scoring the rest could narrow a call it should not (E1). No reads
+        // -> not scorable -> the call stays ambiguous.
+        if let Err(e) = fetch_region(reader, tid, start, end, &format!("{nchr}:{start}-{end}")) {
+            log::warn!("resolver: {e}; leaving the call unresolved");
+            return Vec::new();
         }
 
         for result in reader.records() {
@@ -1365,5 +1367,36 @@ mod tests {
         assert_eq!(split_copy_suffix("*36x2"), ("*36".to_string(), 2));
         assert_eq!(split_copy_suffix("*4.013"), ("*4.013".to_string(), 1));
         assert_eq!(split_copy_suffix("*1x"), ("*1x".to_string(), 1));
+    }
+
+    // E1 (decided by the human 2026-10-07): a failed BAM fetch must not be
+    // read as evidence. The resolver only narrows `;`-ambiguous calls, so its
+    // safe answer to a failed fetch is "no reads" -- not scorable, the call
+    // stays ambiguous -- rather than scoring the half of the reads it did get.
+    #[test]
+    fn collect_reads_dual_region_returns_nothing_when_one_fetch_fails() {
+        use crate::depth_calling::utilities::get_var_names;
+        let bam = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../benchmark/HG00096_pgx_regions.bam");
+        if !bam.exists() {
+            eprintln!("skipping: benchmark BAM not present");
+            return;
+        }
+        let mut var_list = get_var_names(crate::data::TARGET_VARIANT);
+        var_list.extend(get_var_names(crate::data::TARGET_VARIANT_HOMO));
+        let sites = build_unified_sites(&var_list, crate::data::SNP_FILE);
+        let ((d6s, d6e), (d7s, d7e)) = fetch_windows(&sites);
+        let mut reader = bam::IndexedReader::from_path(&bam).unwrap();
+
+        let both = collect_reads_dual_region(&mut reader, "chr22", &sites, d6s, d6e, d7s, d7e);
+        assert!(!both.is_empty(), "control: the real windows must yield reads");
+
+        // D7 window inverted: its fetch fails, the D6 fetch succeeds.
+        let d7_failed = collect_reads_dual_region(&mut reader, "chr22", &sites, d6s, d6e, d7e, d7s);
+        assert!(
+            d7_failed.is_empty(),
+            "a failed D7 fetch must yield no reads, not the D6 half: got {}",
+            d7_failed.len()
+        );
     }
 }

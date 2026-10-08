@@ -1,3 +1,4 @@
+use crate::depth_calling::utilities::fetch_region;
 use crate::types::SnpLookup;
 use rust_htslib::bam::{self, Read as BamRead};
 use std::collections::HashSet;
@@ -28,12 +29,15 @@ pub fn get_reads_by_region(
     min_mapq: u8,
     min_insert_size: Option<i64>,
     stringent: bool,
-) -> (
-    Vec<HashSet<String>>,
-    Vec<HashSet<String>>,
-    Vec<HashSet<String>>,
-    Vec<HashSet<String>>,
-) {
+) -> Result<
+    (
+        Vec<HashSet<String>>,
+        Vec<HashSet<String>>,
+        Vec<HashSet<String>>,
+        Vec<HashSet<String>>,
+    ),
+    String,
+> {
     let n = dsnp.len();
     let mut lsnp1_forward: Vec<HashSet<String>> = (0..n).map(|_| HashSet::new()).collect();
     let mut lsnp1_reverse: Vec<HashSet<String>> = (0..n).map(|_| HashSet::new()).collect();
@@ -43,7 +47,7 @@ pub fn get_reads_by_region(
     // Get the target ID for the chromosome
     let tid = match reader.header().tid(nchr.as_bytes()) {
         Some(t) => t,
-        None => return (lsnp1_forward, lsnp1_reverse, lsnp2_forward, lsnp2_reverse),
+        None => return Ok((lsnp1_forward, lsnp1_reverse, lsnp2_forward, lsnp2_reverse)),
     };
 
     for (snp_position_ori, alleles) in dsnp.iter() {
@@ -100,18 +104,9 @@ pub fn get_reads_by_region(
             .max()
             .unwrap_or(0);
 
-        // Pileup at this position. A fetch failure (bad region / corrupt index)
-        // means no reads here — skip rather than aborting the whole caller.
-        if reader
-            .fetch(bam::FetchDefinition::Region(
-                tid as i32,
-                snp_position as i64 - 1,
-                snp_position as i64,
-            ))
-            .is_err()
-        {
-            continue;
-        }
+        // Pileup at this position. A failed fetch is not "no reads here": the
+        // reads were never looked at, so the caller must no-call (E1).
+        fetch_region(reader, tid, snp_position - 1, snp_position, &format!("{nchr}:{snp_position}"))?;
 
         let mut pileups = reader.pileup();
         pileups.set_max_depth(i32::MAX as u32);
@@ -216,7 +211,7 @@ pub fn get_reads_by_region(
         }
     }
 
-    (lsnp1_forward, lsnp1_reverse, lsnp2_forward, lsnp2_reverse)
+    Ok((lsnp1_forward, lsnp1_reverse, lsnp2_forward, lsnp2_reverse))
 }
 
 /// Merge sets of reads (forward/reverse, region1/region2).
@@ -305,16 +300,16 @@ fn compute_crossing(d6_reads: &[HashSet<String>], d7_reads: &[HashSet<String>]) 
 pub fn get_supporting_reads(
     reader: &mut bam::IndexedReader,
     snp_db: &SnpLookup,
-) -> (Vec<usize>, Vec<usize>, CrossingStats) {
+) -> Result<(Vec<usize>, Vec<usize>, CrossingStats), String> {
     if snp_db.dsnp1.len() != snp_db.dsnp2.len() {
         log::warn!("SNP database region sizes differ: {} vs {}", snp_db.dsnp1.len(), snp_db.dsnp2.len());
-        return (Vec::new(), Vec::new(), CrossingStats { n_consistent: 0, n_crossing: 0, crossing_fraction: 0.0 });
+        return Ok((Vec::new(), Vec::new(), CrossingStats { n_consistent: 0, n_crossing: 0, crossing_fraction: 0.0 }));
     }
 
     let (lsnp1_reg1_for, lsnp1_reg1_rev, lsnp2_reg1_for, lsnp2_reg1_rev) =
-        get_reads_by_region(reader, &snp_db.nchr, &snp_db.dsnp1, &snp_db.dindex, 0, None, false);
+        get_reads_by_region(reader, &snp_db.nchr, &snp_db.dsnp1, &snp_db.dindex, 0, None, false)?;
     let (lsnp1_reg2_for, lsnp1_reg2_rev, lsnp2_reg2_for, lsnp2_reg2_rev) =
-        get_reads_by_region(reader, &snp_db.nchr, &snp_db.dsnp2, &snp_db.dindex, 0, None, false);
+        get_reads_by_region(reader, &snp_db.nchr, &snp_db.dsnp2, &snp_db.dindex, 0, None, false)?;
 
     let lsnp1 = merge_reads(&[
         &lsnp1_reg1_for,
@@ -331,19 +326,23 @@ pub fn get_supporting_reads(
 
     let crossing = compute_crossing(&lsnp1, &lsnp2);
 
-    (
+    Ok((
         lsnp1.iter().map(|s| s.len()).collect(),
         lsnp2.iter().map(|s| s.len()).collect(),
         crossing,
-    )
+    ))
 }
+
+/// Per-site read counts from region 1: (allele 1, allele 2, allele 1 forward,
+/// allele 1 reverse).
+pub type SingleRegionCounts = (Vec<usize>, Vec<usize>, Vec<usize>, Vec<usize>);
 
 /// Return the number of supporting reads at each position only in region1.
 pub fn get_supporting_reads_single_region(
     reader: &mut bam::IndexedReader,
     snp_db: &SnpLookup,
     min_insert_size: Option<i64>,
-) -> (Vec<usize>, Vec<usize>, Vec<usize>, Vec<usize>) {
+) -> Result<SingleRegionCounts, String> {
     let (lsnp1_for, lsnp1_rev, lsnp2_for, lsnp2_rev) = get_reads_by_region(
         reader,
         &snp_db.nchr,
@@ -352,17 +351,17 @@ pub fn get_supporting_reads_single_region(
         10,
         min_insert_size,
         false,
-    );
+    )?;
 
     let lsnp1 = merge_reads(&[&lsnp1_for, &lsnp1_rev]);
     let lsnp2 = merge_reads(&[&lsnp2_for, &lsnp2_rev]);
 
-    (
+    Ok((
         lsnp1.iter().map(|s| s.len()).collect(),
         lsnp2.iter().map(|s| s.len()).collect(),
         lsnp1_for.iter().map(|s| s.len()).collect(),
         lsnp1_rev.iter().map(|s| s.len()).collect(),
-    )
+    ))
 }
 
 #[cfg(test)]
@@ -498,7 +497,7 @@ mod tests {
         dindex.insert(key_longer_in_reg2, 1);
 
         let (reg1_fwd, reg1_rev, reg2_fwd, reg2_rev) =
-            get_reads_by_region(&mut reader, "chr22", &dsnp, &dindex, 0, None, false);
+            get_reads_by_region(&mut reader, "chr22", &dsnp, &dindex, 0, None, false).unwrap();
 
         let s0_reg1 = names(&[&reg1_fwd, &reg1_rev], 0);
         let s0_reg2 = names(&[&reg2_fwd, &reg2_rev], 0);
@@ -575,7 +574,7 @@ mod tests {
         dindex.insert(key, 0);
 
         let (reg1_fwd, reg1_rev, reg2_fwd, reg2_rev) =
-            get_reads_by_region(&mut reader, "chr22", &dsnp, &dindex, 0, None, false);
+            get_reads_by_region(&mut reader, "chr22", &dsnp, &dindex, 0, None, false).unwrap();
 
         let reg1 = names(&[&reg1_fwd, &reg1_rev], 0);
         let reg2 = names(&[&reg2_fwd, &reg2_rev], 0);
@@ -596,5 +595,37 @@ mod tests {
              ends at exactly seq.len(); got {reg2:?}"
         );
         assert!(reg1.is_empty(), "no read carries 'G' at the site; got {reg1:?}");
+    }
+
+    // ---- E1: a failed BAM fetch is a no-call, not zero reads ----
+    //
+    // Escalation E1 of review batch 4, decided by the human 2026-10-07: when
+    // htslib cannot position the reader (broken or stale index, CRAM reference
+    // that cannot be resolved, invalid interval) the reads were never looked
+    // at. Returning zero counts makes that look like evidence, and the sample
+    // gets a confident call. It must surface as an Err, which main.rs turns
+    // into a no-call. An inverted interval is the input used here because it
+    // is the one that reliably drives `fetch` into Err through the public API
+    // (measured: Region(tid, 100, 50) errs; an out-of-range tid or a negative
+    // start does not, they just return no reads).
+
+    #[test]
+    fn get_reads_by_region_is_an_error_when_the_fetch_fails() {
+        // A site at position -5 asks htslib for the interval [-6, -5), which
+        // after it clamps the start to 0 is inverted.
+        let dir = std::env::temp_dir().join(format!("cyrius_fetch_err_snp_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bam_path = write_indel_end_bias_bam(&dir);
+        let mut reader = bam::IndexedReader::from_path(&bam_path).unwrap();
+        let mut dsnp: indexmap::IndexMap<String, String> = indexmap::IndexMap::new();
+        dsnp.insert("-5_0".to_string(), "A_G".to_string());
+        let mut dindex: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        dindex.insert("-5_0".to_string(), 0);
+
+        let r = get_reads_by_region(&mut reader, "chr22", &dsnp, &dindex, 0, None, false);
+        drop(reader);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(r.is_err(), "a failed fetch must be an error, not empty read sets");
     }
 }

@@ -1,4 +1,5 @@
 use crate::depth_calling::snp_count::passing_read;
+use crate::depth_calling::utilities::fetch_region;
 use crate::types::SnpLookup;
 use rust_htslib::bam::{self, Read as BamRead};
 use std::collections::HashMap;
@@ -8,10 +9,10 @@ pub fn get_haplotypes_from_bam(
     reader: &mut bam::IndexedReader,
     base_db: &SnpLookup,
     target_positions: &[usize],
-) -> HashMap<String, String> {
-    let dread = get_bases_per_read(reader, base_db, target_positions, None, 0);
+) -> Result<HashMap<String, String>, String> {
+    let dread = get_bases_per_read(reader, base_db, target_positions, None, 0)?;
     let (base1, base2) = get_base1_base2(base_db, target_positions);
-    get_hap_counts(&dread, &base1, &base2, target_positions)
+    Ok(get_hap_counts(&dread, &base1, &base2, target_positions))
 }
 
 /// Get haplotypes for each read at a set of target positions (single region only).
@@ -19,10 +20,10 @@ pub fn get_haplotypes_from_bam_single_region(
     reader: &mut bam::IndexedReader,
     base_db: &SnpLookup,
     target_positions: &[usize],
-) -> HashMap<String, String> {
-    let dread = get_bases_per_read(reader, base_db, target_positions, Some(0), 10);
+) -> Result<HashMap<String, String>, String> {
+    let dread = get_bases_per_read(reader, base_db, target_positions, Some(0), 10)?;
     let (base1, base2) = get_base1_base2(base_db, target_positions);
-    get_hap_counts(&dread, &base1, &base2, target_positions)
+    Ok(get_hap_counts(&dread, &base1, &base2, target_positions))
 }
 
 /// Get bases per read at target positions from pileup data.
@@ -33,7 +34,7 @@ fn get_bases_per_read(
     target_positions: &[usize],
     region: Option<usize>,
     min_mapq: u8,
-) -> HashMap<String, HashMap<usize, Option<String>>> {
+) -> Result<HashMap<String, HashMap<usize, Option<String>>>, String> {
     let mut dread: HashMap<String, HashMap<usize, Option<String>>> = HashMap::new();
     let nchr = &base_db.nchr;
     let dindex = &base_db.dindex;
@@ -46,7 +47,7 @@ fn get_bases_per_read(
 
     let tid = match reader.header().tid(nchr.as_bytes()) {
         Some(t) => t,
-        None => return dread,
+        None => return Ok(dread),
     };
 
     for dsnp in &dsnps {
@@ -64,18 +65,9 @@ fn get_bases_per_read(
                 continue;
             }
 
-            // A fetch failure (bad region / corrupt index) means no reads
-            // here — skip rather than aborting the whole caller.
-            if reader
-                .fetch(bam::FetchDefinition::Region(
-                    tid as i32,
-                    snp_position - 1,
-                    snp_position,
-                ))
-                .is_err()
-            {
-                continue;
-            }
+            // A failed fetch is not "no reads here": the reads were never
+            // looked at, so the caller must no-call (E1).
+            fetch_region(reader, tid, snp_position - 1, snp_position, &format!("{nchr}:{snp_position}"))?;
 
             let mut pileups = reader.pileup();
             pileups.set_max_depth(i32::MAX as u32);
@@ -272,7 +264,7 @@ fn get_bases_per_read(
             }
         }
     }
-    dread
+    Ok(dread)
 }
 
 /// Translate bases into haplotype strings (1 = reg1 allele, 2 = reg2 allele, x = unknown).
@@ -510,7 +502,7 @@ mod tests {
 
         let base_db = hap_lookup(&[(1001, 2001, "C_T"), (1139, 2139, "G_A")]);
         let mut reader = bam::IndexedReader::from_path(&bam_path).unwrap();
-        let haps = get_haplotypes_from_bam_single_region(&mut reader, &base_db, &[0, 1]);
+        let haps = get_haplotypes_from_bam_single_region(&mut reader, &base_db, &[0, 1]).unwrap();
         let counts = extract_hap(&haps, &[0, 1]);
 
         // Close the BAM before asserting; `dir` unlinks itself on drop,
@@ -593,7 +585,7 @@ mod tests {
         //   split min_len = min(1 /*A*/, 1 /*G*/, 2 /*AC*/)    = 1  (right)
         let base_db = hap_lookup(&[(1001, 2001, "A,G_AC")]);
         let mut reader = bam::IndexedReader::from_path(&bam_path).unwrap();
-        let haps = get_haplotypes_from_bam_single_region(&mut reader, &base_db, &[0]);
+        let haps = get_haplotypes_from_bam_single_region(&mut reader, &base_db, &[0]).unwrap();
 
         // Close the BAM before asserting; `dir` unlinks itself on drop,
         // including when an assertion below panics.
@@ -673,7 +665,7 @@ mod tests {
         // those three components is 0.
         let base_db = hap_lookup(&[(1001, 2001, "A,_AC")]);
         let mut reader = bam::IndexedReader::from_path(&bam_path).unwrap();
-        let haps = get_haplotypes_from_bam_single_region(&mut reader, &base_db, &[0]);
+        let haps = get_haplotypes_from_bam_single_region(&mut reader, &base_db, &[0]).unwrap();
         let counts = extract_hap(&haps, &[0]);
 
         // Close the BAM before asserting; `dir` unlinks itself on drop,
@@ -756,7 +748,7 @@ mod tests {
             (1048, 2048, "AGTGGGCACC_GGCGGCCACG"),
         ]);
         let mut reader = bam::IndexedReader::from_path(&bam_path).unwrap();
-        let haps = get_haplotypes_from_bam_single_region(&mut reader, &base_db, &[0, 1]);
+        let haps = get_haplotypes_from_bam_single_region(&mut reader, &base_db, &[0, 1]).unwrap();
         let counts = extract_hap(&haps, &[0, 1]);
 
         // Close the BAM before asserting; `dir` unlinks itself on drop,
@@ -834,7 +826,7 @@ mod tests {
         //   split min_len = min(1, 1, 1, 1)               = 1  (right)
         let base_db = hap_lookup(&[(1001, 2001, "A,G_C,T")]);
         let mut reader = bam::IndexedReader::from_path(&bam_path).unwrap();
-        let haps = get_haplotypes_from_bam_single_region(&mut reader, &base_db, &[0]);
+        let haps = get_haplotypes_from_bam_single_region(&mut reader, &base_db, &[0]).unwrap();
         let counts = extract_hap(&haps, &[0]);
 
         // Close the BAM before asserting; `dir` unlinks itself on drop,
@@ -867,5 +859,32 @@ mod tests {
             "under the raw bound `extract_hap` was EMPTY here -- the entire \
              site read as 'no reads'; got {counts:?}"
         );
+    }
+
+    // ---- E1: a failed BAM fetch is a no-call, not zero reads ----
+    //
+    // Escalation E1 of review batch 4, decided by the human 2026-10-07: when
+    // htslib cannot position the reader (broken or stale index, CRAM reference
+    // that cannot be resolved, invalid interval) the reads were never looked
+    // at. Returning zero counts makes that look like evidence, and the sample
+    // gets a confident call. It must surface as an Err, which main.rs turns
+    // into a no-call. An inverted interval is the input used here because it
+    // is the one that reliably drives `fetch` into Err through the public API
+    // (measured: Region(tid, 100, 50) errs; an out-of-range tid or a negative
+    // start does not, they just return no reads).
+
+    #[test]
+    fn get_haplotypes_is_an_error_when_the_fetch_fails() {
+        // As in snp_count: a site at -5 makes the pileup interval inverted.
+        let dir = Scratch::new("fetch_err");
+        let bam_path = dir.join("fetch_err.bam");
+        write_hap_bam(&bam_path, 150, &[("r1", 1000, &[(0, "C")])]);
+        let base_db = hap_lookup(&[(-5, 2001, "C_T")]);
+        let mut reader = bam::IndexedReader::from_path(&bam_path).unwrap();
+
+        let r = get_haplotypes_from_bam_single_region(&mut reader, &base_db, &[0]);
+        drop(reader);
+
+        assert!(r.is_err(), "a failed fetch must be an error, not an empty haplotype map");
     }
 }

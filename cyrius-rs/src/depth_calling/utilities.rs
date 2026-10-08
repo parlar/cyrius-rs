@@ -69,6 +69,25 @@ pub fn parse_gmm_file(content: &str) -> GmmParameter {
     dpar
 }
 
+/// Position `reader` on `[start, end)` of reference `tid`.
+///
+/// A failed fetch (a broken or stale index, a CRAM reference that cannot be
+/// resolved, an inverted interval) means the reads were never looked at, which
+/// is not the same as there being none. Return an Err naming `what` so the
+/// caller can turn it into a no-call instead of counting zero reads
+/// (escalation E1 of review batch 4).
+pub fn fetch_region(
+    reader: &mut bam::IndexedReader,
+    tid: u32,
+    start: i64,
+    end: i64,
+    what: &str,
+) -> Result<(), String> {
+    reader
+        .fetch(bam::FetchDefinition::Region(tid as i32, start, end))
+        .map_err(|e| format!("BAM fetch failed for {what}: {e}"))
+}
+
 /// Open a BAM or CRAM alignment file using rust-htslib.
 pub fn open_alignment_file(
     alignment_file: &str,

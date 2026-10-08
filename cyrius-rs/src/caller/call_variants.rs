@@ -4,6 +4,7 @@ use crate::depth_calling::copy_number_call::{
 use crate::depth_calling::haplotype::{
     extract_hap, get_haplotypes_from_bam, get_haplotypes_from_bam_single_region,
 };
+use crate::depth_calling::utilities::fetch_region;
 use crate::depth_calling::snp_count::{
     get_supporting_reads, get_supporting_reads_single_region,
 };
@@ -85,6 +86,14 @@ const fn tags_of<'a, const N: usize>(entries: &[(&'a str, u32, u32, u32, u32); N
 /// what produces them -- see the note on `CNVTAG_ENTRIES`. Stays `pub` (not
 /// `pub(crate)`) because `main.rs` is a separate bin crate.
 pub const CNV_ACCEPTED: [&str; CNVTAG_ENTRIES.len()] = tags_of(&CNVTAG_ENTRIES);
+
+/// The tag to report as `CNV_group`: `tag` if it is in the accepted vocabulary,
+/// otherwise `None`. A tag outside the vocabulary is a no-call (main.rs) and
+/// must not be printed as if it were a CNV group (escalation E2 of review
+/// batch 4).
+pub fn reportable_cnvtag(tag: Option<&str>) -> Option<String> {
+    tag.filter(|t| CNV_ACCEPTED.contains(t)).map(str::to_string)
+}
 
 /// CNVTAG lookup table mapping cnv tags to CN regions.
 pub fn cnvtag_lookup_table() -> HashMap<String, CnRegions> {
@@ -255,7 +264,7 @@ fn good_read(record: &bam::Record) -> bool {
 pub fn get_allele_counts_var42128936(
     reader: &mut bam::IndexedReader,
     genome: &str,
-) -> (usize, usize, usize) {
+) -> Result<(usize, usize, usize), String> {
     let (chr, start, end) = if genome == "chr38" {
         ("chr22", 42128848i64, 42128978i64)
     } else {
@@ -268,20 +277,10 @@ pub fn get_allele_counts_var42128936(
 
     let tid = match reader.header().tid(chr.as_bytes()) {
         Some(t) => t,
-        None => return (0, 0, 0),
+        None => return Ok((0, 0, 0)),
     };
-    if reader
-        .fetch(bam::FetchDefinition::Region(tid as i32, start, end))
-        .is_err()
-    {
-        log::warn!(
-            "get_allele_counts_var42128936: failed to fetch region {}:{}-{}",
-            chr,
-            start,
-            end
-        );
-        return (0, 0, 0);
-    }
+    // A failed fetch is not "no reads here": the caller must no-call (E1).
+    fetch_region(reader, tid, start, end, &format!("{chr}:{start}-{end}"))?;
 
     let mut record = bam::Record::new();
     while let Some(result) = reader.read(&mut record) {
@@ -299,7 +298,7 @@ pub fn get_allele_counts_var42128936(
             }
         }
     }
-    (ref_read, long_ins_read, short_ins_read)
+    Ok((ref_read, long_ins_read, short_ins_read))
 }
 
 /// Update variant read counts for g42128936.
@@ -399,13 +398,13 @@ pub fn call_var42126938(
     reader: &mut bam::IndexedReader,
     full_length_cn: u32,
     base_db: &SnpLookup,
-) -> (Vec<usize>, Vec<String>, bool) {
+) -> Result<(Vec<usize>, Vec<String>, bool), String> {
     let mut var_called = Vec::new();
     let mut g_haplotype = false;
 
-    let (snp_d6, snp_d7, _) = get_supporting_reads(reader, base_db);
+    let (snp_d6, snp_d7, _) = get_supporting_reads(reader, base_db)?;
     if snp_d6.is_empty() || snp_d7.is_empty() {
-        return (vec![], Vec::new(), false);
+        return Ok((vec![], Vec::new(), false));
     }
     let d6_d7_base_count = vec![*snp_d6.last().unwrap(), *snp_d7.last().unwrap()];
 
@@ -415,7 +414,7 @@ pub fn call_var42126938(
         if full_length_cn >= 2 && cn < full_length_cn - 2 {
             let n_positions = base_db.dsnp1.len();
             let positions: Vec<usize> = (0..n_positions).collect();
-            let haplotype_per_read = get_haplotypes_from_bam(reader, base_db, &positions);
+            let haplotype_per_read = get_haplotypes_from_bam(reader, base_db, &positions)?;
             let recombinant_read_count = extract_hap(&haplotype_per_read, &[0, 2]);
             if let Some(count_12) = recombinant_read_count.get("12") {
                 if count_12.iter().sum::<u32>() > 1 {
@@ -433,25 +432,28 @@ pub fn call_var42126938(
         }
     }
 
-    (d6_d7_base_count, var_called, g_haplotype)
+    Ok((d6_d7_base_count, var_called, g_haplotype))
 }
+
+/// (g.42127526 counts, g.42127556 counts, variants called).
+type TwoSiteCall = (Vec<usize>, Vec<usize>, Vec<String>);
 
 /// Call variant g.42127526C>T based on read depth and phased haplotypes.
 pub fn call_var42127526_var42127556(
     reader: &mut bam::IndexedReader,
     cnvtag: &str,
     base_db: &SnpLookup,
-) -> (Vec<usize>, Vec<usize>, Vec<String>) {
+) -> Result<TwoSiteCall, String> {
     let mut var_called = Vec::new();
     let lookup = cnvtag_lookup_table();
 
     let (var_ref, var_alt, _var_ref_forward, _var_ref_reverse) =
-        get_supporting_reads_single_region(reader, base_db, None);
+        get_supporting_reads_single_region(reader, base_db, None)?;
 
     // This caller expects exactly the two diagnostic sites (42127526, 42127556).
     // If the panel returns fewer, bail out with no calls rather than panicking.
     if var_ref.len() < 2 || var_alt.len() < 2 {
-        return (Vec::new(), Vec::new(), Vec::new());
+        return Ok((Vec::new(), Vec::new(), Vec::new()));
     }
 
     let var7526_count = vec![var_ref[0], var_alt[0]];
@@ -467,7 +469,7 @@ pub fn call_var42127526_var42127556(
         let n_positions = base_db.dsnp1.len();
         let positions: Vec<usize> = (0..n_positions).collect();
         let haplotype_per_read =
-            get_haplotypes_from_bam_single_region(reader, base_db, &positions);
+            get_haplotypes_from_bam_single_region(reader, base_db, &positions)?;
         let recombinant_read_count = extract_hap(&haplotype_per_read, &[0, 1, 2]);
 
         let has_211 = recombinant_read_count
@@ -490,7 +492,7 @@ pub fn call_var42127526_var42127556(
         }
     }
 
-    (var7526_count, var7556_count, var_called)
+    Ok((var7526_count, var7556_count, var_called))
 }
 
 /// Call haplotype with regard to g.42127803C>T and g.42127941G>A.
@@ -498,13 +500,13 @@ pub fn call_var42127803hap(
     reader: &mut bam::IndexedReader,
     cnvtag: &str,
     base_db: &SnpLookup,
-) -> bool {
+) -> Result<bool, String> {
     let mut diff_haplotype = false;
     if cnvtag == "cn2" {
         let n_positions = base_db.dsnp1.len();
         let positions: Vec<usize> = (0..n_positions).collect();
         let haplotype_per_read =
-            get_haplotypes_from_bam_single_region(reader, base_db, &positions);
+            get_haplotypes_from_bam_single_region(reader, base_db, &positions)?;
         let recombinant_read_count = extract_hap(&haplotype_per_read, &[0, 1]);
         if let (Some(c12), Some(c21)) = (
             recombinant_read_count.get("12"),
@@ -515,7 +517,7 @@ pub fn call_var42127803hap(
             }
         }
     }
-    diff_haplotype
+    Ok(diff_haplotype)
 }
 
 /// Call haplotype for g.42130655-42130656insA (for *15.003).
@@ -523,7 +525,7 @@ pub fn call_var42130655ins_a(
     reader: &mut bam::IndexedReader,
     _full_length_cn: u32,
     base_db: &SnpLookup,
-) -> (Vec<usize>, Vec<String>) {
+) -> Result<(Vec<usize>, Vec<String>), String> {
     let mut var_called = Vec::new();
     let length_between_d67_regions: i64 = 13000;
     let mut no_aa_on_d6: usize;
@@ -538,7 +540,7 @@ pub fn call_var42130655ins_a(
             dindex: base_db.dindex.clone(),
         },
         Some(length_between_d67_regions),
-    );
+    )?;
     no_aa_on_d6 = *var_aa_d7.last().unwrap_or(&0);
 
     let has_long_insert_size_reads = *var_aa_d7.last().unwrap_or(&0) >= 5
@@ -554,11 +556,11 @@ pub fn call_var42130655ins_a(
                 dindex: base_db.dindex.clone(),
             },
             None,
-        );
+        )?;
         no_aa_on_d6 += *var_aa_d6_2.last().unwrap_or(&0);
 
         let (var_a_d6, _var_a_d7, _, _) =
-            get_supporting_reads_single_region(reader, base_db, None);
+            get_supporting_reads_single_region(reader, base_db, None)?;
         no_a_on_d6 = *var_a_d6.last().unwrap_or(&0);
 
         if no_a_on_d6 >= no_aa_on_d6 {
@@ -569,7 +571,7 @@ pub fn call_var42130655ins_a(
         }
     }
 
-    (vec![no_a_on_d6, no_aa_on_d6], var_called)
+    Ok((vec![no_a_on_d6, no_aa_on_d6], var_called))
 }
 
 /// Return called variants based on called copy number and list of variant names.
@@ -718,5 +720,23 @@ mod tests {
     #[test]
     fn cnvtag_lookup_table_has_one_entry_per_const_entry() {
         assert_eq!(cnvtag_lookup_table().len(), CNVTAG_ENTRIES.len());
+    }
+
+    // ---- E2: an out-of-vocabulary CNV tag must not reach CNV_group ----
+    //
+    // Escalation E2 of review batch 4, decided by the human 2026-10-07.
+    // `transform_cnvtag` builds tags by string join and can mint one outside
+    // CNV_ACCEPTED; measured twice during batch 4's Task 9 review:
+    // "exon9hyb_star13intron1_star5_star5" -> "star13intron1_star5". main.rs
+    // already no-calls such a tag, but used to print it as the CNV_group, as if
+    // it were a real CNV group. The no-call must look like an honest no-call.
+    #[test]
+    fn an_out_of_vocabulary_cnv_tag_is_not_reportable() {
+        assert_eq!(reportable_cnvtag(Some("star13intron1_star5")), None);
+        assert_eq!(reportable_cnvtag(Some("")), None);
+        assert_eq!(reportable_cnvtag(None), None);
+        for tag in CNV_ACCEPTED {
+            assert_eq!(reportable_cnvtag(Some(tag)), Some(tag.to_string()), "{tag}");
+        }
     }
 }

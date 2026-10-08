@@ -7,7 +7,7 @@ use std::path::Path;
 use cyrius_rs::caller::call_variants::{
     call_cn_snp, call_cn_var, call_cn_var_homo, call_exon9gc, call_var42126938,
     call_var42127526_var42127556, call_var42127803hap, call_var42130655ins_a,
-    get_allele_counts_var42128936, get_called_variants, update_var42128936, CNV_ACCEPTED,
+    get_allele_counts_var42128936, get_called_variants, reportable_cnvtag, update_var42128936,
     NOISY_VAR,
 };
 use cyrius_rs::caller::cnv_hybrid::get_cnvtag;
@@ -240,9 +240,8 @@ fn d6_star_caller(
                 return D6Call::no_call(0.0, 0.0);
             }
         };
-        let read_length =
-            cyrius_rs::depth_calling::bin_count::get_read_length(&mut reader);
-        get_normed_depth_from_count(cf, &params.region_dic, read_length)
+        cyrius_rs::depth_calling::bin_count::get_read_length(&mut reader)
+            .and_then(|read_length| get_normed_depth_from_count(cf, &params.region_dic, read_length))
     } else {
         get_normed_depth(bam_path, &params.region_dic, threads, reference_fasta, index_name)
     };
@@ -290,55 +289,46 @@ fn d6_star_caller(
     };
 
     // 3. Get allele counts (parallel when threads > 1). Each worker opens its
-    // own reader; a failed open yields `None` and a no-call rather than a panic.
-    let allele_counts = if threads > 1 {
+    // own reader. A failed open or a failed BAM fetch is a no-call: reads that
+    // could not be looked at are not the same as zero reads.
+    let open = || {
+        open_alignment_file_with_index(bam_path, reference_fasta, index_name)
+            .map_err(|e| format!("cannot open alignment file {}: {}", bam_path, e))
+    };
+    let allele_counts: Result<_, String> = if threads > 1 {
         std::thread::scope(|s| {
-            let h_snp = s.spawn(|| {
-                let mut r = open_alignment_file_with_index(bam_path, reference_fasta, index_name).ok()?;
-                Some(get_supporting_reads(&mut r, &params.snp_db))
-            });
-            let h_var = s.spawn(|| {
-                let mut r = open_alignment_file_with_index(bam_path, reference_fasta, index_name).ok()?;
-                Some(get_supporting_reads_single_region(&mut r, &params.var_db, None))
-            });
-            let h_ins = s.spawn(|| {
-                let mut r = open_alignment_file_with_index(bam_path, reference_fasta, index_name).ok()?;
-                Some(get_allele_counts_var42128936(&mut r, &params.genome))
-            });
-            let h_homo = s.spawn(|| {
-                let mut r = open_alignment_file_with_index(bam_path, reference_fasta, index_name).ok()?;
-                Some(get_supporting_reads(&mut r, &params.var_homo_db))
-            });
+            let h_snp = s.spawn(|| get_supporting_reads(&mut open()?, &params.snp_db));
+            let h_var = s.spawn(|| get_supporting_reads_single_region(&mut open()?, &params.var_db, None));
+            let h_ins = s.spawn(|| get_allele_counts_var42128936(&mut open()?, &params.genome));
+            let h_homo = s.spawn(|| get_supporting_reads(&mut open()?, &params.var_homo_db));
 
             let (snp_d6, snp_d7, snp_crossing) = h_snp.join().unwrap()?;
             let (var_alt, var_ref, var_alt_forward, var_alt_reverse) = h_var.join().unwrap()?;
             let (ref_read, long_ins_read, short_ins_read) = h_ins.join().unwrap()?;
             let (var_homo_alt, var_homo_ref, _) = h_homo.join().unwrap()?;
-            Some((snp_d6, snp_d7, snp_crossing, var_alt, var_ref, var_alt_forward, var_alt_reverse,
+            Ok((snp_d6, snp_d7, snp_crossing, var_alt, var_ref, var_alt_forward, var_alt_reverse,
              ref_read, long_ins_read, short_ins_read, var_homo_alt, var_homo_ref))
         })
     } else {
-        match open_alignment_file_with_index(bam_path, reference_fasta, index_name) {
-            Ok(mut reader) => {
-                let (snp_d6, snp_d7, snp_crossing) = get_supporting_reads(&mut reader, &params.snp_db);
-                let (var_alt, var_ref, var_alt_forward, var_alt_reverse) =
-                    get_supporting_reads_single_region(&mut reader, &params.var_db, None);
-                let (ref_read, long_ins_read, short_ins_read) =
-                    get_allele_counts_var42128936(&mut reader, &params.genome);
-                let (var_homo_alt, var_homo_ref, _) = get_supporting_reads(&mut reader, &params.var_homo_db);
-                Some((snp_d6, snp_d7, snp_crossing, var_alt, var_ref, var_alt_forward, var_alt_reverse,
-                 ref_read, long_ins_read, short_ins_read, var_homo_alt, var_homo_ref))
-            }
-            Err(e) => {
-                log::error!("Cannot open alignment file {}: {}", bam_path, e);
-                None
-            }
-        }
+        (|| {
+            let mut reader = open()?;
+            let (snp_d6, snp_d7, snp_crossing) = get_supporting_reads(&mut reader, &params.snp_db)?;
+            let (var_alt, var_ref, var_alt_forward, var_alt_reverse) =
+                get_supporting_reads_single_region(&mut reader, &params.var_db, None)?;
+            let (ref_read, long_ins_read, short_ins_read) =
+                get_allele_counts_var42128936(&mut reader, &params.genome)?;
+            let (var_homo_alt, var_homo_ref, _) = get_supporting_reads(&mut reader, &params.var_homo_db)?;
+            Ok((snp_d6, snp_d7, snp_crossing, var_alt, var_ref, var_alt_forward, var_alt_reverse,
+             ref_read, long_ins_read, short_ins_read, var_homo_alt, var_homo_ref))
+        })()
     };
     let (snp_d6, snp_d7, snp_crossing, mut var_alt, mut var_ref, var_alt_forward, var_alt_reverse,
      ref_read, long_ins_read, short_ins_read, var_homo_alt, var_homo_ref) = match allele_counts {
-        Some(v) => v,
-        None => return D6Call::no_call(normalized_depth.mad, normalized_depth.mediandepth),
+        Ok(v) => v,
+        Err(e) => {
+            log::error!("Cannot read allele counts: {}", e);
+            return D6Call::no_call(normalized_depth.mad, normalized_depth.mediandepth);
+        }
     };
 
     update_var42128936(
@@ -573,14 +563,18 @@ fn d6_star_caller(
         }
     }
 
-    // No-call due to CNV group
-    if cnvtag.is_none() || !CNV_ACCEPTED.contains(&cnvtag.as_deref().unwrap_or("")) {
+    // No-call due to CNV group. A tag outside the accepted vocabulary is
+    // logged, never reported as the CNV_group (escalation E2).
+    if reportable_cnvtag(cnvtag.as_deref()).is_none() {
+        if let Some(tag) = &cnvtag {
+            log::warn!("CNV tag \"{}\" is not in the accepted vocabulary -- no-call", tag);
+        }
         return D6Call {
             coverage_mad: normalized_depth.mad,
             median_depth: normalized_depth.mediandepth,
             total_cn: Some(total_cn), spacer_cn: raw_cn_call.spacer_cn,
             total_cn_raw: Some(raw_cn_call.d67_depth), spacer_cn_raw: Some(raw_cn_call.spacer_depth),
-            variants_called: None, cnv_group: cnvtag, genotype: None, filter: None,
+            variants_called: None, cnv_group: None, genotype: None, filter: None,
             raw_star_allele: None, call_info: None,
             exon9_cn: exon9gc_call_stringent,
             cnv_consensus: Some(consensus_str),
@@ -677,41 +671,42 @@ fn d6_star_caller(
     // Call haplotype variants (parallel when threads > 1)
     let hap_db = &params.haplotype_db;
 
+    let hap_calls: Result<_, String> = if threads > 1 {
+        std::thread::scope(|s| {
+            let h1 = s.spawn(|| call_var42126938(&mut open()?, total_cn, &hap_db["g.42126938C>T"]));
+            let h2 = s.spawn(|| {
+                call_var42127526_var42127556(&mut open()?, &cnvtag_str, &hap_db["g.42127526C>T_g.42127556T>C"])
+            });
+            let h3 = s.spawn(|| call_var42127803hap(&mut open()?, &cnvtag_str, &hap_db["g.42127803C>T"]));
+            let h4 = s.spawn(|| {
+                call_var42130655ins_a(&mut open()?, total_cn, &hap_db["g.42130655-42130656insA"])
+            });
+
+            let (c1, v1, g1) = h1.join().unwrap()?;
+            let (c2a, c2b, v2) = h2.join().unwrap()?;
+            let v3 = h3.join().unwrap()?;
+            let (c4, v4) = h4.join().unwrap()?;
+            Ok((c1, v1, g1, c2a, c2b, v2, v3, c4, v4))
+        })
+    } else {
+        (|| {
+            let mut reader = open()?;
+            let (c1, v1, g1) = call_var42126938(&mut reader, total_cn, &hap_db["g.42126938C>T"])?;
+            let (c2a, c2b, v2) = call_var42127526_var42127556(&mut reader, &cnvtag_str, &hap_db["g.42127526C>T_g.42127556T>C"])?;
+            let v3 = call_var42127803hap(&mut reader, &cnvtag_str, &hap_db["g.42127803C>T"])?;
+            let (c4, v4) = call_var42130655ins_a(&mut reader, total_cn, &hap_db["g.42130655-42130656insA"])?;
+            Ok((c1, v1, g1, c2a, c2b, v2, v3, c4, v4))
+        })()
+    };
     let (site42126938_count, var42126938, var42126938_g_haplotype,
      site42127526_count, site42127556_count, var42127526,
      var42127803_diff_haplotype,
-     var42130655_count, var42130655ins_a) = if threads > 1 {
-        std::thread::scope(|s| {
-            let h1 = s.spawn(|| {
-                let mut r = open_alignment_file_with_index(bam_path, reference_fasta, index_name).unwrap();
-                call_var42126938(&mut r, total_cn, &hap_db["g.42126938C>T"])
-            });
-            let h2 = s.spawn(|| {
-                let mut r = open_alignment_file_with_index(bam_path, reference_fasta, index_name).unwrap();
-                call_var42127526_var42127556(&mut r, &cnvtag_str, &hap_db["g.42127526C>T_g.42127556T>C"])
-            });
-            let h3 = s.spawn(|| {
-                let mut r = open_alignment_file_with_index(bam_path, reference_fasta, index_name).unwrap();
-                call_var42127803hap(&mut r, &cnvtag_str, &hap_db["g.42127803C>T"])
-            });
-            let h4 = s.spawn(|| {
-                let mut r = open_alignment_file_with_index(bam_path, reference_fasta, index_name).unwrap();
-                call_var42130655ins_a(&mut r, total_cn, &hap_db["g.42130655-42130656insA"])
-            });
-
-            let (c1, v1, g1) = h1.join().unwrap();
-            let (c2a, c2b, v2) = h2.join().unwrap();
-            let v3 = h3.join().unwrap();
-            let (c4, v4) = h4.join().unwrap();
-            (c1, v1, g1, c2a, c2b, v2, v3, c4, v4)
-        })
-    } else {
-        let mut reader = open_alignment_file_with_index(bam_path, reference_fasta, index_name).unwrap();
-        let (c1, v1, g1) = call_var42126938(&mut reader, total_cn, &hap_db["g.42126938C>T"]);
-        let (c2a, c2b, v2) = call_var42127526_var42127556(&mut reader, &cnvtag_str, &hap_db["g.42127526C>T_g.42127556T>C"]);
-        let v3 = call_var42127803hap(&mut reader, &cnvtag_str, &hap_db["g.42127803C>T"]);
-        let (c4, v4) = call_var42130655ins_a(&mut reader, total_cn, &hap_db["g.42130655-42130656insA"]);
-        (c1, v1, g1, c2a, c2b, v2, v3, c4, v4)
+     var42130655_count, var42130655ins_a) = match hap_calls {
+        Ok(v) => v,
+        Err(e) => {
+            log::error!("Cannot read haplotype evidence: {}", e);
+            return D6Call::no_call(normalized_depth.mad, normalized_depth.mediandepth);
+        }
     };
 
     raw_count.entry("g.42126938C>T".to_string()).or_insert_with(||
