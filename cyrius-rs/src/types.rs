@@ -33,6 +33,9 @@ pub struct NormalizedDepth {
     pub normalized: HashMap<String, Option<f64>>,
     pub mediandepth: f64,
     pub mad: f64,
+    /// Fraction of mapped reads starting in REP7 that have MAPQ 0 (None when
+    /// not measured, e.g. from a count file, or when REP7 has no mapped reads).
+    pub rep7_mapq0_fraction: Option<f64>,
 }
 
 /// Raw copy number call (d67 + spacer)
@@ -155,6 +158,8 @@ pub struct D6Call {
     /// Every differentiating pair the phase step counted (None if the phase
     /// step did not run).
     pub phase_pairs: Option<Vec<PairEvidence>>,
+    /// See `NormalizedDepth::rep7_mapq0_fraction`.
+    pub rep7_mapq0_fraction: Option<f64>,
 }
 
 impl D6Call {
@@ -184,6 +189,7 @@ impl D6Call {
             resolver_posterior: None,
             resolved_by: None,
             phase_pairs: None,
+            rep7_mapq0_fraction: None,
         }
     }
 }

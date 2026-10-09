@@ -332,7 +332,10 @@ fn d6_star_caller(
 
     // No-call after normalization
     if normalized_depth.normalized.get("d67").and_then(|v| *v).is_none() {
-        return D6Call::no_call(normalized_depth.mad, normalized_depth.mediandepth);
+        return D6Call {
+                rep7_mapq0_fraction: normalized_depth.rep7_mapq0_fraction,
+                ..D6Call::no_call(normalized_depth.mad, normalized_depth.mediandepth)
+            };
     }
 
     // 2. GMM and CN call
@@ -404,7 +407,10 @@ fn d6_star_caller(
         Ok(v) => v,
         Err(e) => {
             log::error!("Cannot read allele counts: {}", e);
-            return D6Call::no_call(normalized_depth.mad, normalized_depth.mediandepth);
+            return D6Call {
+                rep7_mapq0_fraction: normalized_depth.rep7_mapq0_fraction,
+                ..D6Call::no_call(normalized_depth.mad, normalized_depth.mediandepth)
+            };
         }
     };
 
@@ -454,6 +460,7 @@ fn d6_star_caller(
             d67_snp_call: None, d67_snp_raw: None, variant_raw_count: Some(raw_count),
             kmer_validation: None, resolver_posterior: None,
             resolved_by: None, phase_pairs: None,
+            rep7_mapq0_fraction: normalized_depth.rep7_mapq0_fraction,
         };
     }
 
@@ -661,6 +668,7 @@ fn d6_star_caller(
             variant_raw_count: Some(raw_count),
             kmer_validation: None, resolver_posterior: None,
             resolved_by: None, phase_pairs: None,
+            rep7_mapq0_fraction: normalized_depth.rep7_mapq0_fraction,
         };
     }
 
@@ -784,7 +792,10 @@ fn d6_star_caller(
         Ok(v) => v,
         Err(e) => {
             log::error!("Cannot read haplotype evidence: {}", e);
-            return D6Call::no_call(normalized_depth.mad, normalized_depth.mediandepth);
+            return D6Call {
+                rep7_mapq0_fraction: normalized_depth.rep7_mapq0_fraction,
+                ..D6Call::no_call(normalized_depth.mad, normalized_depth.mediandepth)
+            };
         }
     };
 
@@ -1036,6 +1047,7 @@ fn d6_star_caller(
         resolver_posterior,
         resolved_by,
         phase_pairs,
+        rep7_mapq0_fraction: normalized_depth.rep7_mapq0_fraction,
     }
 }
 
@@ -1182,6 +1194,31 @@ fn main() {
         );
     }
 
+    // Input guard: an aligner that dropped the reads fitting CYP2D6 and CYP2D7
+    // equally well (MAPQ 0) changed the evidence, so the call is not a PASS.
+    // The header says whether a pipeline step dropped them.
+    let header_drops_multimappers =
+        open_alignment_file_with_index(&bam_name, cli.reference.as_deref(), index_name.as_deref())
+            .ok()
+            .map(|reader| {
+                cyrius_rs::depth_calling::bin_count::header_drops_multimappers(
+                    &String::from_utf8_lossy(rust_htslib::bam::Read::header(&reader).as_bytes()),
+                )
+            });
+    let guarded_filter = cyrius_rs::depth_calling::bin_count::downgrade_filter_for_multimapper_depletion(
+        cyp2d6_call.filter.clone(),
+        header_drops_multimappers,
+    );
+    if guarded_filter != cyp2d6_call.filter {
+        log::warn!(
+            "Sample {}: the BAM header shows a step that drops multi-mapped reads (novoalign \
+             without -r, or samtools view -q); REP7 MAPQ-0 fraction {:.3}. The call is not reliable.",
+            sample_id,
+            cyp2d6_call.rep7_mapq0_fraction.unwrap_or(f64::NAN),
+        );
+        cyp2d6_call.filter = guarded_filter;
+    }
+
     // Compute confidence score
     let confidence = cyrius_rs::caller::confidence::compute_confidence(
         &cyrius_rs::caller::confidence::ConfidenceInput {
@@ -1259,6 +1296,8 @@ fn main() {
     let call_json = serde_json::json!({
         "Coverage_MAD": cyp2d6_call.coverage_mad,
         "Median_depth": cyp2d6_call.median_depth,
+        "REP7_MAPQ0_fraction": cyp2d6_call.rep7_mapq0_fraction,
+        "Header_drops_multimappers": header_drops_multimappers,
         "Total_CN": cyp2d6_call.total_cn,
         "Spacer_CN": cyp2d6_call.spacer_cn,
         "Total_CN_raw": cyp2d6_call.total_cn_raw,
