@@ -287,27 +287,45 @@ pub fn mapq0_fraction((mapped, mapq0): (u64, u64)) -> Option<f64> {
 }
 
 /// cyrius-rs reads copy number from reads that fit CYP2D6 and CYP2D7 equally
-/// well, which aligners report with MAPQ 0. Pipelines that keep them put
-/// 0.58-0.91 of REP7's reads at MAPQ 0 (about 289 BAMs: NYGC bwa, bwa-mem2,
-/// minimap2, strobealign, DRAGEN 3.7.6); pipelines that drop them put 0 there
-/// (GIAB novoalign, `samtools view -q`), and their calls can be wrong at PASS.
-/// Fixed before looking at any data in the locked plan
-/// (/home/parlar_ai/cyrius-research/exp-guard, research idea P1 / H4).
-pub const MIN_REP7_MAPQ0_FRACTION: f64 = 0.40;
+/// well, which aligners report with MAPQ 0. An `@PG` line in the header shows
+/// a pipeline step that drops them: novoalign without `-r` (GIAB's 3.02.07
+/// BAMs: multi-mapped reads are not reported), or `samtools view -q N` with
+/// N >= 1. Their calls can be wrong at PASS.
+///
+/// This header check, not the REP7 MAPQ-0 fraction, drives the filter: in
+/// the guard experiment (/home/parlar_ai/cyrius-research/exp-guard, stage 2,
+/// result e70d315) the fraction flagged 3 correct calls from pipelines that
+/// reassign or rescore ties (10x Long Ranger, DRAGEN 4.4.7, vg giraffe) and
+/// caught nothing the header missed. The fraction is still reported.
+pub fn header_drops_multimappers(header_text: &str) -> bool {
+    let no_repeat_option = regex::Regex::new(r"\s-r\s").unwrap();
+    let mapq_filter = regex::Regex::new(r"\s-q\s*[1-9]\d*").unwrap();
+    header_text.lines().filter(|l| l.starts_with("@PG\t")).any(|line| {
+        let field = |key: &str| {
+            line.split('\t')
+                .skip(1)
+                .find_map(|f| f.strip_prefix(key).and_then(|v| v.strip_prefix(':')))
+                .unwrap_or("")
+        };
+        let name = format!("{} {}", field("ID"), field("PN")).to_lowercase();
+        let cl = field("CL");
+        (name.contains("novoalign") && !no_repeat_option.is_match(cl))
+            || (cl.contains("samtools view") && mapq_filter.is_match(cl))
+    })
+}
 
 /// Replace a PASS or Fuzzy_match filter with `"Multimapper_depleted"` when
-/// the REP7 MAPQ-0 fraction is below [`MIN_REP7_MAPQ0_FRACTION`]: the input
-/// does not meet the caller's assumption, so the call must not read as a
-/// clean pass. The genotype is still reported. Not measured (None), other
-/// filters and no-calls are left untouched.
+/// the header shows a step that drops multi-mapped reads
+/// ([`header_drops_multimappers`]): the input does not meet the caller's
+/// assumption, so the call must not read as a clean pass. The genotype is
+/// still reported. Header not read (None), other filters and no-calls are
+/// left untouched.
 pub fn downgrade_filter_for_multimapper_depletion(
     filter: Option<String>,
-    rep7_mapq0_fraction: Option<f64>,
+    header_drops_multimappers: Option<bool>,
 ) -> Option<String> {
-    match (filter.as_deref(), rep7_mapq0_fraction) {
-        (Some("PASS" | "Fuzzy_match"), Some(m)) if m < MIN_REP7_MAPQ0_FRACTION => {
-            Some("Multimapper_depleted".to_string())
-        }
+    match (filter.as_deref(), header_drops_multimappers) {
+        (Some("PASS" | "Fuzzy_match"), Some(true)) => Some("Multimapper_depleted".to_string()),
         _ => filter,
     }
 }
@@ -1075,24 +1093,66 @@ mod tests {
     }
 
     #[test]
-    fn multimapper_guard_flags_pass_and_fuzzy_match_below_the_threshold() {
-        let flag = |f: Option<&str>, m: Option<f64>| {
-            downgrade_filter_for_multimapper_depletion(f.map(str::to_string), m)
+    fn multimapper_guard_flags_pass_and_fuzzy_match_when_the_header_shows_a_drop() {
+        let flag = |f: Option<&str>, h: Option<bool>| {
+            downgrade_filter_for_multimapper_depletion(f.map(str::to_string), h)
         };
         let depleted = Some("Multimapper_depleted".to_string());
-        assert_eq!(flag(Some("PASS"), Some(0.0)), depleted);
-        assert_eq!(flag(Some("Fuzzy_match"), Some(0.399)), depleted);
-        // The threshold is strict: in-domain iff M >= 0.40 (locked plan).
-        assert_eq!(flag(Some("PASS"), Some(0.40)), Some("PASS".to_string()));
-        assert_eq!(flag(Some("PASS"), Some(0.84)), Some("PASS".to_string()));
-        // Not measured: no flag.
+        assert_eq!(flag(Some("PASS"), Some(true)), depleted);
+        assert_eq!(flag(Some("Fuzzy_match"), Some(true)), depleted);
+        assert_eq!(flag(Some("PASS"), Some(false)), Some("PASS".to_string()));
+        // Header not read: no flag.
         assert_eq!(flag(Some("PASS"), None), Some("PASS".to_string()));
         // Filters that already explain a non-clean call, and no-calls, stay.
         assert_eq!(
-            flag(Some("More_than_one_possible_genotype"), Some(0.0)),
+            flag(Some("More_than_one_possible_genotype"), Some(true)),
             Some("More_than_one_possible_genotype".to_string())
         );
-        assert_eq!(flag(None, Some(0.0)), None);
+        assert_eq!(flag(None, Some(true)), None);
+    }
+
+    #[test]
+    fn header_check_flags_novoalign_without_a_repeat_option_and_samtools_mapq_filters() {
+        let pg = |id: &str, pn: &str, cl: &str| format!("@HD\tVN:1.6\n@PG\tID:{id}\tPN:{pn}\tCL:{cl}\n");
+        // GIAB novoalign 3.02.07: no -r, so multi-mapped reads are not reported.
+        assert!(header_drops_multimappers(&pg(
+            "novoalign",
+            "novoalign",
+            "novoalign -d ref.ndx -f r1.fq.gz r2.fq.gz -F STDFQ --Q2Off -t 400 -o SAM -c 10"
+        )));
+        // samtools merge renames clashing IDs; the PN still says novoalign.
+        assert!(header_drops_multimappers(&pg("novoalign-4EFE4A6B", "novoalign", "novoalign -d ref.ndx")));
+        // novoalign with -r reports multi-mapped reads.
+        assert!(!header_drops_multimappers(&pg("novoalign", "novoalign", "novoalign -d ref.ndx -r Random -f r1.fq")));
+        // A MAPQ filter of 1 or more drops MAPQ-0 reads; -q 0 drops nothing.
+        assert!(header_drops_multimappers(&pg("samtools", "samtools", "samtools view -b -q 10 in.bam")));
+        assert!(header_drops_multimappers(&pg("samtools", "samtools", "samtools view -b -q1 in.bam")));
+        assert!(!header_drops_multimappers(&pg("samtools", "samtools", "samtools view -b -q 0 in.bam")));
+        assert!(!header_drops_multimappers(&pg("samtools", "samtools", "samtools sort -o out.bam in.bam")));
+        // bwa, region extraction and no @PG at all: no flag.
+        assert!(!header_drops_multimappers(&pg("bwa", "bwa", "bwa mem -Y -K 100000000 -t 16 ref.fa r1.fq r2.fq")));
+        assert!(!header_drops_multimappers(&pg("samtools", "samtools", "samtools view -b -h -T ref.fa in.cram chr22:1-2")));
+        assert!(!header_drops_multimappers("@HD\tVN:1.6\n@SQ\tSN:chr22\tLN:50818468\n"));
+    }
+
+    #[test]
+    fn header_check_flags_the_novoalign_benchmark_bams_and_not_the_nygc_ones() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../benchmark");
+        if !dir.join("HG003_pgx_regions.bam").exists() {
+            eprintln!("skipping: benchmark BAM not present");
+            return;
+        }
+        let header = |s: &str| {
+            let p = dir.join(format!("{s}_pgx_regions.bam"));
+            let r = bam::Reader::from_path(&p).unwrap();
+            String::from_utf8_lossy(r.header().as_bytes()).to_string()
+        };
+        for s in ["HG003", "HG004", "HG006", "HG007"] {
+            assert!(header_drops_multimappers(&header(s)), "{s}");
+        }
+        for s in ["HG00096", "NA12878", "HG00589"] {
+            assert!(!header_drops_multimappers(&header(s)), "{s}");
+        }
     }
 
     #[test]
