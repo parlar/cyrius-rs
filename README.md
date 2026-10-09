@@ -187,6 +187,7 @@ These flags change the genotype, filter, or CNV tag. They are the default benchm
 |---|---|
 | `--strand-bias-all` | Strand-bias filtering on all variant sites (not just the small known-noisy set). Removes more variant-calling artifacts. |
 | `--fuzzy-match` | Edit-distance fallback when no exact star allele match is found. Recovers near-matches at the cost of a `Fuzzy_match` filter label. **On by default**; the flag is accepted for compatibility and `--no-fuzzy-match` turns it off. |
+| `--phase-disambiguate` | Use read-level phasing to resolve ambiguous CN=2 multi-match calls into a single diplotype. **On by default**; the flag is accepted for compatibility and `--no-phase-disambiguate` turns it off. |
 | `--changepoint-hybrid` | Circular binary segmentation on the D6/(D6+D7) ratio profile, used as a CNV-tag fallback when the standard region-consensus rule produces no tag. |
 | `--het-check` | Diagnostic logging of D6/D7 hemizygosity (zero het sites). Currently QC-only — kept in the recommended set because it is a useful log signal during review. |
 
@@ -197,8 +198,7 @@ These also affect the genotype or filter, but are off by default because they ar
 | Flag | Effect on output |
 |---|---|
 | `--hmm-cnv` | HMM segmentation on the per-position CN profile, used as a second CNV-tag fallback after changepoint detection. |
-| `--phase-disambiguate` | Use read-level phasing to resolve ambiguous CN=2 multi-match calls into a single diplotype. |
-| `--phase-readpair` | Extend phasing to mate-pair distance (requires `--phase-disambiguate`). |
+| `--phase-readpair` | Extend phasing to mate-pair distance (no effect with `--no-phase-disambiguate`). |
 | `--spacer-cn-check` | Flag calls with `Spacer_CN_inconsistent` when the observed spacer-vs-total-CN difference does not match the CNV group. |
 | `--consistency-check` | Post-hoc validation; sets the filter to `Conversion_map_inconsistent`, `Mismatch_rate_high`, etc. if checks fail. |
 

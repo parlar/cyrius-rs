@@ -13,6 +13,7 @@ use cyrius_rs::caller::call_variants::{
 use cyrius_rs::caller::cnv_hybrid::get_cnvtag;
 use cyrius_rs::caller::construct_star_table::{combination_table_for, get_hap_table};
 use cyrius_rs::caller::match_star_allele::match_star;
+use cyrius_rs::caller::phase_disambiguate::PairEvidence;
 use cyrius_rs::caller::strand_bias_all;
 use cyrius_rs::data;
 use cyrius_rs::types::FeatureFlags;
@@ -111,8 +112,17 @@ struct Cli {
     #[arg(long = "no-fuzzy-match", help = "Turn off fuzzy matching when exact star allele lookup fails")]
     no_fuzzy_match: bool,
 
-    #[arg(long = "phase-disambiguate", help = "Use physical phasing to disambiguate multiple-match diplotypes")]
+    #[arg(
+        long = "phase-disambiguate",
+        help = "Use physical phasing to disambiguate multiple-match diplotypes (default; kept for compatibility)",
+        conflicts_with = "no_phase_disambiguate"
+    )]
+    // Accepted so existing command lines keep working; phasing is on unless
+    // --no-phase-disambiguate is given, so `feature_flags` ignores this value.
     phase_disambiguate: bool,
+
+    #[arg(long = "no-phase-disambiguate", help = "Turn off physical phasing of multiple-match diplotypes")]
+    no_phase_disambiguate: bool,
 
     #[arg(long = "phase-readpair", help = "Use read-pair (mate-pair) phasing for longer-range disambiguation")]
     phase_readpair: bool,
@@ -148,7 +158,8 @@ fn feature_flags(cli: &Cli) -> FeatureFlags {
         strand_bias_all: cli.strand_bias_all,
         // On by default; --fuzzy-match is a no-op kept for compatibility.
         fuzzy_match: !cli.no_fuzzy_match,
-        phase_disambiguate: cli.phase_disambiguate,
+        // On by default; --phase-disambiguate is a no-op kept for compatibility.
+        phase_disambiguate: !cli.no_phase_disambiguate,
         phase_readpair: cli.phase_readpair,
         changepoint_hybrid: cli.changepoint_hybrid,
         het_check: cli.het_check,
@@ -165,6 +176,34 @@ fn feature_flags(cli: &Cli) -> FeatureFlags {
 /// Derived from the struct (`Serialize`), so a new flag cannot be left out.
 fn feature_flags_json(features: &FeatureFlags) -> serde_json::Value {
     serde_json::to_value(features).expect("FeatureFlags is a struct of bools")
+}
+
+/// The JSON `Phase_pairs`: null when the phase step did not run, else one
+/// object per pair it counted, in the order it evaluated them. `cis` includes
+/// the anchored both-REF fragments, which `rr` reports on their own.
+fn phase_pairs_json(pairs: Option<&[PairEvidence]>) -> serde_json::Value {
+    match pairs {
+        None => serde_json::Value::Null,
+        Some(pairs) => pairs
+            .iter()
+            .map(|p| {
+                serde_json::json!({
+                    "a": p.va,
+                    "b": p.vb,
+                    "distance_bp": p.distance_bp(),
+                    "cis": p.counts.cis(),
+                    "trans": p.counts.trans(),
+                    "rr": p.counts.rr_anchored,
+                })
+            })
+            .collect(),
+    }
+}
+
+/// Whether a step that turned the `;`-joined call `before` into `after`
+/// narrowed it, i.e. left fewer options.
+fn narrows_call(before: &str, after: &str) -> bool {
+    after.split(';').count() < before.split(';').count()
 }
 
 /// Write a file, exiting with a clear error message on failure.
@@ -414,6 +453,7 @@ fn d6_star_caller(
             raw_star_allele: None, call_info: None, exon9_cn: None, cnv_consensus: None,
             d67_snp_call: None, d67_snp_raw: None, variant_raw_count: Some(raw_count),
             kmer_validation: None, resolver_posterior: None,
+            resolved_by: None, phase_pairs: None,
         };
     }
 
@@ -620,6 +660,7 @@ fn d6_star_caller(
             d67_snp_raw: Some(raw_d6_cn_str),
             variant_raw_count: Some(raw_count),
             kmer_validation: None, resolver_posterior: None,
+            resolved_by: None, phase_pairs: None,
         };
     }
 
@@ -789,6 +830,8 @@ fn d6_star_caller(
     let mut genotype_filter = None;
     let mut final_star_allele_call = None;
     let mut resolver_posterior: Option<f64> = None;
+    let mut resolved_by: Option<&'static str> = None;
+    let mut phase_pairs: Option<Vec<PairEvidence>> = None;
     let is_fuzzy = star_called
         .call_info
         .as_deref()
@@ -810,7 +853,7 @@ fn d6_star_caller(
             {
                 if call.contains(';') {
                     let variant_lookup = cyrius_rs::caller::phase_disambiguate::VariantLookup::from_target_file(data::TARGET_VARIANT);
-                    if let Some(resolved) = cyrius_rs::caller::phase_disambiguate::disambiguate(
+                    let outcome = cyrius_rs::caller::phase_disambiguate::disambiguate(
                         call,
                         raw_call,
                         &params.star_combinations,
@@ -820,9 +863,12 @@ fn d6_star_caller(
                         reference_fasta,
                         index_name,
                         features.phase_readpair,
-                    ) {
+                    );
+                    phase_pairs = Some(outcome.pairs);
+                    if let Some(resolved) = outcome.resolved {
                         log::info!("phase_disambiguate: {} -> {}", call, resolved);
                         final_star_allele_call = Some(resolved);
+                        resolved_by = Some("fragment_phase");
                     }
                 }
             }
@@ -861,6 +907,9 @@ fn d6_star_caller(
                             call, outcome.genotype, outcome.ambiguous, outcome.top_posterior
                         );
                         resolver_posterior = Some(outcome.top_posterior);
+                        if narrows_call(call, &outcome.genotype) {
+                            resolved_by = Some("resolver");
+                        }
                         final_star_allele_call = Some(outcome.genotype);
                     } else {
                         log::info!(
@@ -985,6 +1034,8 @@ fn d6_star_caller(
         variant_raw_count: Some(raw_count),
         kmer_validation: kmer_validation_summary,
         resolver_posterior,
+        resolved_by,
+        phase_pairs,
     }
 }
 
@@ -1088,7 +1139,7 @@ fn main() {
 
     // Every flag with its effective value, from the same serialization as the
     // JSON `Flags` record, so no flag can be left out. Logged on every run now
-    // that fuzzy matching is on by default.
+    // that fuzzy matching and phase disambiguation are on by default.
     let flag_summary = flags_json
         .as_object()
         .map(|flags| {
@@ -1230,6 +1281,10 @@ fn main() {
         "Variant_raw_count": cyp2d6_call.variant_raw_count,
         "Kmer_validation": kmer_validation_json,
         "Resolver_posterior": cyp2d6_call.resolver_posterior,
+        // Which step narrowed a `;` call, and the fragment counts behind the
+        // phase step (null when it did not run).
+        "Resolved_by": cyp2d6_call.resolved_by,
+        "Phase_pairs": phase_pairs_json(cyp2d6_call.phase_pairs.as_deref()),
         // Provenance: which build and which configuration produced this record.
         "Tool_version": TOOL_VERSION,
         "Tool_commit": TOOL_COMMIT,
@@ -1457,6 +1512,81 @@ mod tests {
     fn fuzzy_match_and_no_fuzzy_match_conflict() {
         let err = parse(&["--fuzzy-match", "--no-fuzzy-match"]).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::ArgumentConflict, "{err}");
+    }
+
+    #[test]
+    fn phase_disambiguation_is_on_by_default() {
+        let cli = parse(&[]).unwrap();
+        assert!(feature_flags(&cli).phase_disambiguate);
+    }
+
+    #[test]
+    fn no_phase_disambiguate_turns_phasing_off() {
+        let cli = parse(&["--no-phase-disambiguate"]).unwrap();
+        assert!(!feature_flags(&cli).phase_disambiguate);
+    }
+
+    #[test]
+    fn phase_disambiguate_is_still_accepted_and_changes_nothing() {
+        let cli = parse(&["--phase-disambiguate"]).unwrap();
+        assert!(feature_flags(&cli).phase_disambiguate);
+    }
+
+    #[test]
+    fn phase_disambiguate_and_no_phase_disambiguate_conflict() {
+        let err = parse(&["--phase-disambiguate", "--no-phase-disambiguate"]).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict, "{err}");
+    }
+
+    #[test]
+    fn phase_pairs_json_is_null_when_the_phase_step_did_not_run() {
+        assert_eq!(phase_pairs_json(None), serde_json::Value::Null);
+        assert_eq!(phase_pairs_json(Some(&[])), serde_json::json!([]));
+    }
+
+    #[test]
+    fn phase_pairs_json_reports_each_pair_in_order_with_rr_inside_cis() {
+        use cyrius_rs::caller::phase_disambiguate::{PairEvidence, PhaseCounts};
+        let pair = |va: &str, vb: &str, pos_a, pos_b, counts| PairEvidence {
+            va: va.to_string(),
+            vb: vb.to_string(),
+            pos_a,
+            pos_b,
+            counts,
+        };
+        let pairs = [
+            pair(
+                "g.42129754G>A",
+                "g.42126611C>G",
+                42_129_753,
+                42_126_610,
+                PhaseCounts { aa: 4, ar: 1, ra: 0, rr_all: 5, rr_anchored: 3 },
+            ),
+            pair(
+                "g.42126611C>G",
+                "g.42127941G>A",
+                42_126_610,
+                42_127_940,
+                PhaseCounts { aa: 0, ar: 2, ra: 6, rr_all: 1, rr_anchored: 0 },
+            ),
+        ];
+        assert_eq!(
+            phase_pairs_json(Some(&pairs)),
+            serde_json::json!([
+                {"a": "g.42129754G>A", "b": "g.42126611C>G", "distance_bp": 3143,
+                 "cis": 7, "trans": 1, "rr": 3},
+                {"a": "g.42126611C>G", "b": "g.42127941G>A", "distance_bp": 1330,
+                 "cis": 0, "trans": 8, "rr": 0},
+            ])
+        );
+    }
+
+    #[test]
+    fn a_step_narrows_a_call_only_when_it_leaves_fewer_options() {
+        assert!(narrows_call("*1/*21;*2/*21", "*1/*21"));
+        assert!(narrows_call("*1/*2;*1/*3;*2/*3", "*1/*3;*1/*2"));
+        // The resolver reorders a near-tie it keeps whole; that is not narrowing.
+        assert!(!narrows_call("*1/*21;*2/*21", "*2/*21;*1/*21"));
     }
 
     #[test]

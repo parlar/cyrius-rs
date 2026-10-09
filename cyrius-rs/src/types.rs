@@ -1,3 +1,4 @@
+use crate::caller::phase_disambiguate::PairEvidence;
 use indexmap::IndexMap;
 use std::collections::HashMap;
 
@@ -148,6 +149,12 @@ pub struct D6Call {
     pub kmer_validation: Option<KmerValidationSummary>,
     /// Top posterior from the likelihood resolver (None if it didn't run).
     pub resolver_posterior: Option<f64>,
+    /// Which step narrowed a `;` call: `"fragment_phase"` or `"resolver"`
+    /// (None if neither did).
+    pub resolved_by: Option<&'static str>,
+    /// Every differentiating pair the phase step counted (None if the phase
+    /// step did not run).
+    pub phase_pairs: Option<Vec<PairEvidence>>,
 }
 
 impl D6Call {
@@ -175,6 +182,8 @@ impl D6Call {
             variant_raw_count: None,
             kmer_validation: None,
             resolver_posterior: None,
+            resolved_by: None,
+            phase_pairs: None,
         }
     }
 }
@@ -237,7 +246,7 @@ pub struct FeatureFlags {
     pub strand_bias_all: bool,
     /// Use fuzzy matching when exact star allele lookup fails (on by default)
     pub fuzzy_match: bool,
-    /// Use physical phasing to disambiguate multiple-match diplotypes
+    /// Use physical phasing to disambiguate multiple-match diplotypes (on by default)
     pub phase_disambiguate: bool,
     /// Use read-pair (mate-pair) phasing for longer-range disambiguation
     pub phase_readpair: bool,

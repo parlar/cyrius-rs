@@ -102,10 +102,11 @@ fn json_records_tool_version_commit_and_every_effective_flag() {
 
     assert_eq!(record["Tool_version"], "1.0.5");
     assert_eq!(record["Tool_commit"], build_commit());
-    // Every flag, with its effective value: fuzzy matching is the default.
+    // Every flag, with its effective value: fuzzy matching and phase
+    // disambiguation are the defaults.
     let expected: Vec<(String, bool)> = FLAG_NAMES
         .iter()
-        .map(|&n| (n.to_string(), n == "fuzzy_match"))
+        .map(|&n| (n.to_string(), n == "fuzzy_match" || n == "phase_disambiguate"))
         .collect();
     assert_eq!(flags_of(&record), expected);
 
@@ -117,8 +118,22 @@ fn json_records_tool_version_commit_and_every_effective_flag() {
 }
 
 #[test]
+fn json_has_resolved_by_and_phase_pairs_as_null_when_no_step_ran() {
+    // A depth no-call: neither the phase step nor the resolver ran, yet both
+    // keys are present.
+    let (record, _) = run_on_empty_bam("phasekeys", &[]);
+    let fields = record.as_object().unwrap_or_else(|| panic!("not an object: {record}"));
+    for key in ["Resolved_by", "Phase_pairs"] {
+        assert_eq!(fields.get(key), Some(&serde_json::Value::Null), "{key} in {record}");
+    }
+}
+
+#[test]
 fn json_flags_follow_the_command_line() {
-    let (record, _) = run_on_empty_bam("someflags", &["--no-fuzzy-match", "--het-check"]);
+    let (record, _) = run_on_empty_bam(
+        "someflags",
+        &["--no-fuzzy-match", "--no-phase-disambiguate", "--het-check"],
+    );
     let expected: Vec<(String, bool)> = FLAG_NAMES
         .iter()
         .map(|&n| (n.to_string(), n == "het_check"))
