@@ -6,6 +6,13 @@
 //! the flag, `--diplotype-caller -t 1` ran rayon on a pool of one worker per
 //! core (72 on the development node); after, it runs on one.
 //!
+//! `--diplotype-caller` has since been deleted, and with it the only rayon user
+//! that ran at `-t 1` (the control-region loop in `bin_count` goes parallel
+//! only at `-t >= 2`). So this test now runs the default pipeline: it still
+//! pins the whole-process budget at `-t 1` -- and with it finding #41's
+//! one-table property below -- but it no longer exercises an unsized rayon
+//! pool. `tests/rayon_global_pool.rs` pins the pool sizing directly.
+//!
 //! Linux-only (it reads `/proc/<pid>/status`) and skipped elsewhere, skipped
 //! when the benchmark BAM is absent, and skipped on machines too small for the
 //! bound to discriminate.
@@ -32,11 +39,13 @@ use std::time::Duration;
 ///
 /// With the pool unsized the same run peaks at 75. An unbounded rayon pool adds one
 /// worker per core, so on any machine with more than `BUDGET` cores this bound
-/// still separates the two states by a wide margin in both directions.
+/// still separates the two states by a wide margin in both directions. (Those
+/// figures were measured with `--diplotype-caller`, now deleted; see the module
+/// comment.)
 const BUDGET: usize = 8;
 
 #[test]
-fn diplotype_caller_at_one_thread_stays_within_the_thread_budget() {
+fn default_run_at_one_thread_stays_within_the_thread_budget() {
     if !Path::new("/proc/self/status").exists() {
         eprintln!("skipping: needs /proc/<pid>/status (Linux)");
         return;
@@ -69,7 +78,6 @@ fn diplotype_caller_at_one_thread_stays_within_the_thread_budget() {
             out_dir.to_str().unwrap(),
             "-t",
             "1",
-            "--diplotype-caller",
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -101,8 +109,7 @@ fn diplotype_caller_at_one_thread_stays_within_the_thread_budget() {
     assert!(peak > 0, "never sampled a thread count from {}", status_path);
     assert!(
         peak <= BUDGET,
-        "--diplotype-caller -t 1 peaked at {} threads on a {}-CPU machine, \
-         over the budget of {}: --threads is not bounding rayon's global pool",
+        "-t 1 peaked at {} threads on a {}-CPU machine, over the budget of {}",
         peak,
         available,
         BUDGET

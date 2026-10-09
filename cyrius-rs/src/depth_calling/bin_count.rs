@@ -117,29 +117,15 @@ pub fn gc_correction(counts: &[f64], gc: &[f64], scale_coefficient: f64) -> Vec<
     gc_corrected
 }
 
-/// Median correction (simple normalization by median).
-pub fn median_correction(counts: &[f64]) -> Vec<f64> {
-    let med = stats::median(counts);
-    if med == 0.0 {
-        return counts.to_vec();
-    }
-    counts.iter().map(|&c| c / med).collect()
-}
-
 /// Normalize depth values and return normalized depth, median depth, and MAD.
+/// Depths are always GC-corrected.
 pub fn normalize(
     counts_for_normalization: &[f64],
     gc_for_normalization: &[f64],
     region_type_cn: &IndexMap<String, f64>,
     read_length: f64,
-    gc_correct: bool,
 ) -> NormalizedDepth {
     let gc_corrected_depth = gc_correction(counts_for_normalization, gc_for_normalization, 0.9);
-    let corrected_depth = if gc_correct {
-        gc_corrected_depth.clone()
-    } else {
-        median_correction(counts_for_normalization)
-    };
 
     let vmedian = stats::median(counts_for_normalization) * read_length;
     let gc_med = stats::median(&gc_corrected_depth);
@@ -156,7 +142,7 @@ pub fn normalize(
         } else {
             norm_count.insert(
                 region_type.clone(),
-                Some(2.0 * hap_cn * corrected_depth[i]),
+                Some(2.0 * hap_cn * gc_corrected_depth[i]),
             );
         }
     }
@@ -394,7 +380,6 @@ pub fn get_normed_depth(
         &gc_for_normalization,
         &region_type_cn,
         read_length,
-        true,
     ))
 }
 
@@ -459,7 +444,6 @@ pub fn get_normed_depth_from_count(
         &gc_for_normalization,
         &region_type_cn,
         read_length,
-        true,
     ))
 }
 

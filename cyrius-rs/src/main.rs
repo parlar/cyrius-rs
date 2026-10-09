@@ -30,7 +30,17 @@ use cyrius_rs::phenotype;
 use cyrius_rs::types::*;
 
 const TOOL_NAME: &str = "BCyrius";
-const TOOL_VERSION: &str = "1.0.5";
+/// A macro, not a const, so `--version` can `concat!` it with the commit.
+macro_rules! tool_version {
+    () => {
+        "1.0.5"
+    };
+}
+const TOOL_VERSION: &str = tool_version!();
+/// Git commit this binary was built from (set by build.rs).
+const TOOL_COMMIT: &str = env!("CYRIUS_GIT_COMMIT");
+/// What `--version` prints after the tool name: "1.0.5 (<commit>)".
+const TOOL_VERSION_LONG: &str = concat!(tool_version!(), " (", env!("CYRIUS_GIT_COMMIT"), ")");
 const MAD_THRESHOLD: f64 = 0.11;
 const EXON9_SITE1: usize = 7;
 const EXON9_SITE2: usize = 8;
@@ -43,7 +53,7 @@ const HAPLOTYPE_VAR: &[&str] = &[
 ];
 
 #[derive(Parser, Debug)]
-#[command(name = TOOL_NAME, version = TOOL_VERSION, about = "CYP2D6 genotyping tool")]
+#[command(name = TOOL_NAME, version = TOOL_VERSION_LONG, about = "CYP2D6 genotyping tool")]
 struct Cli {
     #[arg(short = 'i', long = "input", help = "Input BAM/CRAM file")]
     input: String,
@@ -89,11 +99,17 @@ struct Cli {
     #[arg(long = "strand-bias-all", help = "Apply strand bias filtering to all variant sites")]
     strand_bias_all: bool,
 
-    #[arg(long = "fuzzy-match", help = "Use fuzzy matching when exact star allele lookup fails")]
+    #[arg(
+        long = "fuzzy-match",
+        help = "Use fuzzy matching when exact star allele lookup fails (default; kept for compatibility)",
+        conflicts_with = "no_fuzzy_match"
+    )]
+    // Accepted so existing command lines keep working; fuzzy matching is on
+    // unless --no-fuzzy-match is given, so `feature_flags` ignores this value.
     fuzzy_match: bool,
 
-    #[arg(long = "quality-aware", help = "[EXPERIMENTAL/INACTIVE] base-quality-aware likelihoods — module present but not yet wired into the calling path; output is unchanged")]
-    quality_aware: bool,
+    #[arg(long = "no-fuzzy-match", help = "Turn off fuzzy matching when exact star allele lookup fails")]
+    no_fuzzy_match: bool,
 
     #[arg(long = "phase-disambiguate", help = "Use physical phasing to disambiguate multiple-match diplotypes")]
     phase_disambiguate: bool,
@@ -104,7 +120,7 @@ struct Cli {
     #[arg(long = "changepoint-hybrid", help = "Use paralog ratio changepoint detection for hybrid identification")]
     changepoint_hybrid: bool,
 
-    #[arg(long = "het-check", help = "Use hemizygosity detection (zero het sites = deletion allele)")]
+    #[arg(long = "het-check", help = "[DIAGNOSTIC, log-only] report *5/*5 hemizygosity in the log; never changes the call")]
     het_check: bool,
 
     #[arg(long = "spacer-cn-check", help = "Flag calls as uncertain when spacer CN is inconsistent with CNV group")]
@@ -116,9 +132,6 @@ struct Cli {
     #[arg(long = "hmm-cnv", help = "Use HMM-based CNV segmentation as fallback when consensus fails")]
     hmm_cnv: bool,
 
-    #[arg(long = "diplotype-caller", help = "Run likelihood-based diplotype caller (D6+D7 mixture model)")]
-    diplotype_caller: bool,
-
     #[arg(long = "clip-evidence", help = "Detect soft-clip clusters as structural breakpoint evidence")]
     clip_evidence: bool,
 
@@ -127,6 +140,31 @@ struct Cli {
 
     #[arg(long = "kmer-validation", help = "Use alignment-free k-mer paralog ratio validation")]
     kmer_validation: bool,
+}
+
+/// The effective feature flags for a parsed command line.
+fn feature_flags(cli: &Cli) -> FeatureFlags {
+    FeatureFlags {
+        strand_bias_all: cli.strand_bias_all,
+        // On by default; --fuzzy-match is a no-op kept for compatibility.
+        fuzzy_match: !cli.no_fuzzy_match,
+        phase_disambiguate: cli.phase_disambiguate,
+        phase_readpair: cli.phase_readpair,
+        changepoint_hybrid: cli.changepoint_hybrid,
+        het_check: cli.het_check,
+        spacer_cn_check: cli.spacer_cn_check,
+        consistency_check: cli.consistency_check,
+        hmm_cnv: cli.hmm_cnv,
+        clip_evidence: cli.clip_evidence,
+        d7_depth: cli.d7_depth,
+        kmer_validation: cli.kmer_validation,
+    }
+}
+
+/// Every `FeatureFlags` field name -> its effective value, as a JSON object.
+/// Derived from the struct (`Serialize`), so a new flag cannot be left out.
+fn feature_flags_json(features: &FeatureFlags) -> serde_json::Value {
+    serde_json::to_value(features).expect("FeatureFlags is a struct of bools")
 }
 
 /// Write a file, exiting with a clear error message on failure.
@@ -924,35 +962,6 @@ fn d6_star_caller(
         }
     }
 
-    // Feature: diplotype_caller — likelihood-based diplotype calling with D6+D7 mixture model
-    if features.diplotype_caller {
-        let mut dc_reader =
-            open_alignment_file_with_index(bam_path, reference_fasta, index_name).unwrap();
-        let dc_result = cyrius_rs::caller::diplotype_caller::call_diplotype(
-            &mut dc_reader,
-            &params.snp_db.nchr,
-            &params.var_list,
-            data::SNP_FILE,
-            &params.star_combinations,
-            total_cn,
-            20,
-        );
-        if !dc_result.top_diplotypes.is_empty() {
-            let best = &dc_result.top_diplotypes[0];
-            log::info!(
-                "diplotype_caller: best={}/{} (posterior={:.4}, ll={:.1}), \
-                 pileup_call={:?}, reads={} (filtered={})",
-                best.allele_a,
-                best.allele_b,
-                best.posterior,
-                best.log10_likelihood,
-                final_star_allele_call,
-                dc_result.n_informative_reads,
-                dc_result.n_filtered_reads,
-            );
-        }
-    }
-
     D6Call {
         coverage_mad: normalized_depth.mad,
         median_depth: normalized_depth.mediandepth,
@@ -993,7 +1002,7 @@ fn main() {
     };
 
     // Derive the default sample id from the BAM half of "input##idx##index".
-    let sample_id = cli.id.unwrap_or_else(|| {
+    let sample_id = cli.id.clone().unwrap_or_else(|| {
         Path::new(&bam_name)
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
@@ -1025,8 +1034,8 @@ fn main() {
     // Size rayon's global pool from --threads before any rayon work can start.
     // A global pool can only be built once, and whichever rayon call runs first
     // builds the default all-cores pool if we have not, so this has to happen
-    // upstream of every rayon user. There are exactly two -- the control-region
-    // loop in `bin_count` and `diplotype_caller`'s `par_chunks` -- and both sit
+    // upstream of every rayon user. There is exactly one -- the control-region
+    // loop in `bin_count`, which goes parallel only at `-t >= 2` -- and it sits
     // inside `d6_star_caller`, below. Nothing between `Cli::parse()` and here
     // touches rayon either (string splitting, the sample-id default,
     // `create_dir_all`, path formatting, the existence check and, on the
@@ -1074,49 +1083,23 @@ fn main() {
         }
     }
 
-    let features = FeatureFlags {
-        strand_bias_all: cli.strand_bias_all,
-        fuzzy_match: cli.fuzzy_match,
-        quality_aware: cli.quality_aware,
-        phase_disambiguate: cli.phase_disambiguate,
-        phase_readpair: cli.phase_readpair,
-        changepoint_hybrid: cli.changepoint_hybrid,
-        het_check: cli.het_check,
-        spacer_cn_check: cli.spacer_cn_check,
-        consistency_check: cli.consistency_check,
-        hmm_cnv: cli.hmm_cnv,
-        diplotype_caller: cli.diplotype_caller,
-        clip_evidence: cli.clip_evidence,
-        d7_depth: cli.d7_depth,
-        kmer_validation: cli.kmer_validation,
-    };
+    let features = feature_flags(&cli);
+    let flags_json = feature_flags_json(&features);
 
-    if features.strand_bias_all || features.fuzzy_match || features.quality_aware
-        || features.phase_disambiguate || features.phase_readpair
-        || features.changepoint_hybrid || features.het_check || features.spacer_cn_check
-        || features.consistency_check || features.hmm_cnv
-        || features.diplotype_caller || features.d7_depth
-        || features.kmer_validation
-    {
-        log::info!(
-            "Experimental features: strand_bias_all={}, fuzzy_match={}, quality_aware={}, \
-             phase_disambiguate={}, phase_readpair={}, changepoint_hybrid={}, het_check={}, \
-             spacer_cn_check={}, consistency_check={}, hmm_cnv={}, \
-             diplotype_caller={}, d7_depth={}, kmer_validation={}",
-            features.strand_bias_all, features.fuzzy_match, features.quality_aware,
-            features.phase_disambiguate, features.phase_readpair,
-            features.changepoint_hybrid, features.het_check, features.spacer_cn_check,
-            features.consistency_check, features.hmm_cnv,
-            features.diplotype_caller, features.d7_depth, features.kmer_validation
-        );
-    }
-
-    if features.quality_aware {
-        log::warn!(
-            "--quality-aware: module is present but not yet wired into the calling path; \
-             outputs are identical to runs without this flag."
-        );
-    }
+    // Every flag with its effective value, from the same serialization as the
+    // JSON `Flags` record, so no flag can be left out. Logged on every run now
+    // that fuzzy matching is on by default.
+    let flag_summary = flags_json
+        .as_object()
+        .map(|flags| {
+            flags
+                .iter()
+                .map(|(name, value)| format!("{}={}", name, value))
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    log::info!("Experimental features: {}", flag_summary);
 
     match pool_threads {
         Some(n) => log::info!("Processing sample {} with {} rayon thread(s)", sample_id, n),
@@ -1124,20 +1107,6 @@ fn main() {
             "Processing sample {} (rayon thread pool size unknown)",
             sample_id
         ),
-    }
-
-    // Now that --threads really bounds rayon, --diplotype-caller at the default
-    // -t 1 is single-threaded where it used to borrow every core by accident:
-    // ~2.5x slower in wall time (for ~28% less total CPU). Say so here, before
-    // the slow part starts, rather than leaving the user to infer it from the
-    // "1 rayon thread(s)" line above. No CLI surface change: --help still reads
-    // "Number of threads".
-    if features.diplotype_caller && pool_threads == Some(1) {
-        log::info!(
-            "--diplotype-caller scores diplotypes on rayon's thread pool, which \
-             --threads has bounded to 1 here; pass -t N to use more cores (-t 8 \
-             is roughly 2.5x faster in wall time on a large sample)."
-        );
     }
 
     let mut cyp2d6_call = d6_star_caller(
@@ -1261,6 +1230,10 @@ fn main() {
         "Variant_raw_count": cyp2d6_call.variant_raw_count,
         "Kmer_validation": kmer_validation_json,
         "Resolver_posterior": cyp2d6_call.resolver_posterior,
+        // Provenance: which build and which configuration produced this record.
+        "Tool_version": TOOL_VERSION,
+        "Tool_commit": TOOL_COMMIT,
+        "Flags": flags_json,
     });
     json_map.insert(sample_id.clone(), call_json);
     let json_output = serde_json::to_string(&json_map).unwrap();
@@ -1448,6 +1421,49 @@ fn main() {
                     }
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::error::ErrorKind;
+
+    fn parse(flags: &[&str]) -> Result<Cli, clap::Error> {
+        let base = ["cyrius-rs", "-i", "in.bam", "-o", "out"];
+        Cli::try_parse_from(base.iter().chain(flags.iter()))
+    }
+
+    #[test]
+    fn fuzzy_matching_is_on_by_default() {
+        let cli = parse(&[]).unwrap();
+        assert!(feature_flags(&cli).fuzzy_match);
+    }
+
+    #[test]
+    fn no_fuzzy_match_turns_fuzzy_matching_off() {
+        let cli = parse(&["--no-fuzzy-match"]).unwrap();
+        assert!(!feature_flags(&cli).fuzzy_match);
+    }
+
+    #[test]
+    fn fuzzy_match_is_still_accepted_and_changes_nothing() {
+        let cli = parse(&["--fuzzy-match"]).unwrap();
+        assert!(feature_flags(&cli).fuzzy_match);
+    }
+
+    #[test]
+    fn fuzzy_match_and_no_fuzzy_match_conflict() {
+        let err = parse(&["--fuzzy-match", "--no-fuzzy-match"]).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict, "{err}");
+    }
+
+    #[test]
+    fn removed_flags_are_rejected() {
+        for flag in ["--diplotype-caller", "--quality-aware"] {
+            let err = parse(&[flag]).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::UnknownArgument, "{flag}: {err}");
         }
     }
 }

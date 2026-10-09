@@ -13,12 +13,6 @@ pub fn passing_read(record: &bam::Record, is_del: bool, is_refskip: bool) -> boo
         && !record.is_duplicate()
 }
 
-/// Check whether a read passes more stringent filters.
-pub fn passing_read_stringent(record: &bam::Record) -> bool {
-    let insert_size = record.insert_size();
-    insert_size.unsigned_abs() < 1000
-}
-
 /// Return the number of reads supporting region1 and region2, forward and reverse.
 /// Matches Python get_reads_by_region().
 pub fn get_reads_by_region(
@@ -28,7 +22,6 @@ pub fn get_reads_by_region(
     dindex: &std::collections::HashMap<String, usize>,
     min_mapq: u8,
     min_insert_size: Option<i64>,
-    stringent: bool,
 ) -> Result<
     (
         Vec<HashSet<String>>,
@@ -137,9 +130,6 @@ pub fn get_reads_by_region(
                         continue;
                     }
                 }
-                if stringent && !passing_read_stringent(&record) {
-                    continue;
-                }
 
                 let qpos = match alignment.qpos() {
                     Some(p) => p,
@@ -162,9 +152,10 @@ pub fn get_reads_by_region(
                     // relies entirely on `max_allele_len` being the max over
                     // BOTH regions' alleles, checked ~70 lines up. Pin that
                     // here -- a per-region max turns this into an out-of-range
-                    // panic on arbitrary BAM input. NOTE: compiled out in
-                    // release, so this documents and tests the invariant, it
-                    // does not enforce it in the shipped binary.
+                    // panic on arbitrary BAM input. NOTE: checked only in
+                    // debug builds (`cargo test` without `--release`); it is
+                    // compiled out of release builds, `cargo test --release`
+                    // included, and does not guard the shipped binary.
                     debug_assert!(
                         allele.len() <= max_allele_len,
                         "reg1 allele {allele:?} is {} bp, longer than the site's \
@@ -188,9 +179,10 @@ pub fn get_reads_by_region(
                     // relies entirely on `max_allele_len` being the max over
                     // BOTH regions' alleles, checked ~70 lines up. Pin that
                     // here -- a per-region max turns this into an out-of-range
-                    // panic on arbitrary BAM input. NOTE: compiled out in
-                    // release, so this documents and tests the invariant, it
-                    // does not enforce it in the shipped binary.
+                    // panic on arbitrary BAM input. NOTE: checked only in
+                    // debug builds (`cargo test` without `--release`); it is
+                    // compiled out of release builds, `cargo test --release`
+                    // included, and does not guard the shipped binary.
                     debug_assert!(
                         allele.len() <= max_allele_len,
                         "reg2 allele {allele:?} is {} bp, longer than the site's \
@@ -307,9 +299,9 @@ pub fn get_supporting_reads(
     }
 
     let (lsnp1_reg1_for, lsnp1_reg1_rev, lsnp2_reg1_for, lsnp2_reg1_rev) =
-        get_reads_by_region(reader, &snp_db.nchr, &snp_db.dsnp1, &snp_db.dindex, 0, None, false)?;
+        get_reads_by_region(reader, &snp_db.nchr, &snp_db.dsnp1, &snp_db.dindex, 0, None)?;
     let (lsnp1_reg2_for, lsnp1_reg2_rev, lsnp2_reg2_for, lsnp2_reg2_rev) =
-        get_reads_by_region(reader, &snp_db.nchr, &snp_db.dsnp2, &snp_db.dindex, 0, None, false)?;
+        get_reads_by_region(reader, &snp_db.nchr, &snp_db.dsnp2, &snp_db.dindex, 0, None)?;
 
     let lsnp1 = merge_reads(&[
         &lsnp1_reg1_for,
@@ -350,7 +342,6 @@ pub fn get_supporting_reads_single_region(
         &snp_db.dindex,
         10,
         min_insert_size,
-        false,
     )?;
 
     let lsnp1 = merge_reads(&[&lsnp1_for, &lsnp1_rev]);
@@ -497,7 +488,7 @@ mod tests {
         dindex.insert(key_longer_in_reg2, 1);
 
         let (reg1_fwd, reg1_rev, reg2_fwd, reg2_rev) =
-            get_reads_by_region(&mut reader, "chr22", &dsnp, &dindex, 0, None, false).unwrap();
+            get_reads_by_region(&mut reader, "chr22", &dsnp, &dindex, 0, None).unwrap();
 
         let s0_reg1 = names(&[&reg1_fwd, &reg1_rev], 0);
         let s0_reg2 = names(&[&reg2_fwd, &reg2_rev], 0);
@@ -574,7 +565,7 @@ mod tests {
         dindex.insert(key, 0);
 
         let (reg1_fwd, reg1_rev, reg2_fwd, reg2_rev) =
-            get_reads_by_region(&mut reader, "chr22", &dsnp, &dindex, 0, None, false).unwrap();
+            get_reads_by_region(&mut reader, "chr22", &dsnp, &dindex, 0, None).unwrap();
 
         let reg1 = names(&[&reg1_fwd, &reg1_rev], 0);
         let reg2 = names(&[&reg2_fwd, &reg2_rev], 0);
@@ -622,7 +613,7 @@ mod tests {
         let mut dindex: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         dindex.insert("-5_0".to_string(), 0);
 
-        let r = get_reads_by_region(&mut reader, "chr22", &dsnp, &dindex, 0, None, false);
+        let r = get_reads_by_region(&mut reader, "chr22", &dsnp, &dindex, 0, None);
         drop(reader);
         let _ = std::fs::remove_dir_all(&dir);
 

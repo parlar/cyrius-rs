@@ -2,8 +2,9 @@
 //!
 //! Review finding #10: `--threads` claimed to bound the tool's parallelism but
 //! nothing in `src` ever called `rayon::ThreadPoolBuilder`, so every rayon user
-//! -- the control-region loop in `depth_calling::bin_count` and the
-//! `par_chunks` in `caller::diplotype_caller` -- ran on rayon's *global* pool,
+//! -- the control-region loop in `depth_calling::bin_count` and, until the
+//! `--diplotype-caller` path was deleted, the `par_chunks` in
+//! `caller::diplotype_caller` -- ran on rayon's *global* pool,
 //! which sizes itself to every core on the machine. On a 72-core node `-t 2`
 //! spawned ~72 rayon workers. `init_rayon_global_pool` sizes that global pool
 //! from the flag, so `--threads` bounds **rayon's** parallelism.

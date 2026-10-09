@@ -227,22 +227,23 @@ pub struct FrequencyRow {
     pub values: IndexMap<String, String>,
 }
 
-/// Feature flags for toggling experimental improvements
-#[derive(Debug, Clone, Copy)]
+/// Feature flags for toggling experimental improvements.
+///
+/// Serialized as-is into each sample's JSON record (`Flags`), so every field
+/// added here is reported there with its effective value.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
 pub struct FeatureFlags {
     /// Apply strand bias filtering to ALL variant sites (not just NOISY_VAR)
     pub strand_bias_all: bool,
-    /// Use fuzzy matching when exact star allele lookup fails
+    /// Use fuzzy matching when exact star allele lookup fails (on by default)
     pub fuzzy_match: bool,
-    /// Use base-quality-aware likelihoods instead of fixed error rate
-    pub quality_aware: bool,
     /// Use physical phasing to disambiguate multiple-match diplotypes
     pub phase_disambiguate: bool,
     /// Use read-pair (mate-pair) phasing for longer-range disambiguation
     pub phase_readpair: bool,
     /// Use paralog ratio changepoint detection for hybrid identification
     pub changepoint_hybrid: bool,
-    /// Use hemizygosity detection (zero het sites = deletion allele)
+    /// Diagnostic, log-only: report *5/*5 hemizygosity; never changes the call
     pub het_check: bool,
     /// Flag calls as uncertain when spacer CN is inconsistent with CNV group
     pub spacer_cn_check: bool,
@@ -250,8 +251,6 @@ pub struct FeatureFlags {
     pub consistency_check: bool,
     /// Use HMM-based CNV segmentation as fallback when consensus fails
     pub hmm_cnv: bool,
-    /// Run likelihood-based diplotype caller (D6+D7 mixture model)
-    pub diplotype_caller: bool,
     /// Detect soft-clip clusters as structural breakpoint evidence
     pub clip_evidence: bool,
     /// Compute CYP2D7 sub-region depth profile for hybrid confirmation

@@ -186,7 +186,7 @@ These flags change the genotype, filter, or CNV tag. They are the default benchm
 | Flag | Effect on output |
 |---|---|
 | `--strand-bias-all` | Strand-bias filtering on all variant sites (not just the small known-noisy set). Removes more variant-calling artifacts. |
-| `--fuzzy-match` | Edit-distance fallback when no exact star allele match is found. Recovers near-matches at the cost of a `Fuzzy_match` filter label. |
+| `--fuzzy-match` | Edit-distance fallback when no exact star allele match is found. Recovers near-matches at the cost of a `Fuzzy_match` filter label. **On by default**; the flag is accepted for compatibility and `--no-fuzzy-match` turns it off. |
 | `--changepoint-hybrid` | Circular binary segmentation on the D6/(D6+D7) ratio profile, used as a CNV-tag fallback when the standard region-consensus rule produces no tag. |
 | `--het-check` | Diagnostic logging of D6/D7 hemizygosity (zero het sites). Currently QC-only — kept in the recommended set because it is a useful log signal during review. |
 
@@ -211,13 +211,6 @@ These flags add **independent observations** to the output without modifying the
 | `--kmer-validation` | Alignment-free paralog-dosage check (189 diagnostic 31-mers). Emits a `Kmer_validation` JSON block with AGREE/DISAGREE. |
 | `--clip-evidence` | Soft-clip cluster scan in the D6+D7+spacer region; flags candidate structural breakpoints. |
 | `--d7-depth` | Per-region CYP2D7 depth profile; logs elevation/depletion signals consistent with `*36` and `*13` hybrids. |
-| `--diplotype-caller` | Run a likelihood-based D6+D7 mixture model and log its top diplotype for comparison. |
-
-#### Tier 4 — Not yet wired
-
-| Flag | Status |
-|---|---|
-| `--quality-aware` | CLI flag accepted; `quality_aware.rs` module exists; not yet routed into the calling path. Emits a warning when set. |
 
 ## Output
 
@@ -239,7 +232,7 @@ When the data does not uniquely determine a single diplotype, the output contain
 
 The JSON output additionally includes `Clinical_equivalence` (`same_effect` or `different_effect`) for ambiguous calls.
 
-The JSON output also includes: total copy number, spacer copy number, raw depth values, CNV group, called variants, confidence score, and the full variant count table.
+The JSON output also includes: total copy number, spacer copy number, raw depth values, CNV group, called variants, confidence score, and the full variant count table. Every record carries its provenance: `Tool_version`, `Tool_commit` (the git commit the binary was built from, `-dirty` if the crate had uncommitted changes) and `Flags` (every feature flag with its effective value). `--version` prints the same version and commit.
 
 When `--kmer-validation` is enabled, the JSON additionally contains a `Kmer_validation` object summarizing an alignment-free paralog-dosage check:
 

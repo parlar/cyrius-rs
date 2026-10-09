@@ -26,11 +26,6 @@ impl ClipCluster {
     pub fn total(&self) -> u32 {
         self.left_count + self.right_count
     }
-
-    /// Dominant clip side: true if mostly left clips.
-    pub fn is_left_dominant(&self) -> bool {
-        self.left_count > self.right_count
-    }
 }
 
 /// Summary of clip evidence across the CYP2D6 region.
@@ -43,21 +38,6 @@ pub struct ClipEvidence {
 }
 
 impl ClipEvidence {
-    /// Check if there's a breakpoint cluster near a specific position (within tolerance).
-    pub fn has_cluster_near(&self, pos: i64, tolerance: i64) -> bool {
-        self.clusters
-            .iter()
-            .any(|c| (c.position - pos).abs() <= tolerance)
-    }
-
-    /// Get the strongest cluster (most reads) in a genomic range.
-    pub fn strongest_cluster_in_range(&self, start: i64, end: i64) -> Option<&ClipCluster> {
-        self.clusters
-            .iter()
-            .filter(|c| c.position >= start && c.position <= end)
-            .max_by_key(|c| c.total())
-    }
-
     /// Count clusters in a genomic range.
     pub fn clusters_in_range(&self, start: i64, end: i64) -> Vec<&ClipCluster> {
         self.clusters

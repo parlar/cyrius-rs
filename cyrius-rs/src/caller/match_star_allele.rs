@@ -890,8 +890,9 @@ pub fn match_star(
     // all ten empty, is still in scope, and nothing in the type distinguishes them.
     // Reaching for the wrong one would leave `get_star` with no matching key, so it
     // would return `no_match` -- no panic, no log, one silently changed call.
-    // Compiled out in release, so this catches the mistake in tests and debug runs,
-    // not in production.
+    // Checked only in debug builds: `cargo test` without `--release` and debug runs
+    // catch the mistake; release builds, `cargo test --release` included, compile
+    // it out, and production does not panic on it.
     debug_assert!(
         !dic.is_empty(),
         "combination table for CNV tag {} is empty: this StarCombinations was built \

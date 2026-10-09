@@ -1,21 +1,20 @@
-//! Likelihood-based diplotype caller.
+//! Likelihood scoring of candidate diplotypes, for the resolver.
 //!
-//! Enumerates all valid diplotype combinations (constrained by copy number)
-//! and scores each against per-read evidence. Reads are collected from both
-//! the CYP2D6 and CYP2D7 regions; CYP2D7 is modelled as an additional
-//! pseudo-allele so that mismapped reads are properly accounted for.
+//! `score_candidates` scores an explicit set of candidate diplotypes (the
+//! `;`-ambiguous calls the matcher left) against per-read evidence. Reads are
+//! collected from both the CYP2D6 and CYP2D7 regions; CYP2D7 is modelled as an
+//! additional pseudo-allele so that mismapped reads are properly accounted for.
 //!
-//! The model for a single read under a diplotype (allele_i, allele_j) with
-//! one copy of D7 always present:
+//! The model for a single read under a diplotype given as D6 alleles with copy
+//! counts summing to CN, with one copy of D7 always present:
 //!
-//!   P(read | i, j) = w_d7 * P(read | D7) + w_i * P(read | i) + w_j * P(read | j)
+//!   P(read | dip) = w_d7 * P(read | D7) + sum_k w_k * P(read | allele_k)
 //!
-//! where w_d7 = 1/(CN+1), w_d6 = CN/(CN+1) split equally between the two
-//! D6 alleles (for CN=2: w_d7 = 1/3, w_i = w_j = 1/3).
+//! where w_d7 = 1/(CN+1) and w_k = copies_k/(CN+1) (for CN=2 with two
+//! distinct alleles: w_d7 = w_i = w_j = 1/3).
 
 use std::collections::{HashMap, HashSet};
 
-use rayon::prelude::*;
 use rust_htslib::bam::{self, Read as BamRead};
 
 use crate::depth_calling::utilities::fetch_region;
@@ -74,41 +73,6 @@ pub struct CandidateScore {
     /// Reads whose likelihood under this candidate beats every other
     /// candidate by more than DECISIVE_LOG10_LR.
     pub decisive_reads: usize,
-}
-
-/// A scored diplotype candidate.
-#[derive(Debug, Clone)]
-pub struct ScoredDiplotype {
-    pub allele_a: String,
-    pub allele_b: String,
-    /// Joint log10-likelihood across all reads.
-    pub log10_likelihood: f64,
-    /// Posterior probability, normalised over the retained top-N candidates
-    /// (an approximation of the full posterior when mass lies outside top-N).
-    pub posterior: f64,
-}
-
-/// Order scored diplotypes best-first: descending log10-likelihood, NaN-safe,
-/// with a deterministic tiebreak on allele names so equal-likelihood
-/// candidates (which are common) resolve identically across runs/threads.
-fn sort_scored(a: &ScoredDiplotype, b: &ScoredDiplotype) -> std::cmp::Ordering {
-    b.log10_likelihood
-        .total_cmp(&a.log10_likelihood)
-        .then_with(|| a.allele_a.cmp(&b.allele_a))
-        .then_with(|| a.allele_b.cmp(&b.allele_b))
-}
-
-/// Full result from the diplotype caller.
-#[derive(Debug, Clone)]
-pub struct DiplotypeLikelihoodResult {
-    /// Top diplotypes sorted by likelihood (descending).
-    pub top_diplotypes: Vec<ScoredDiplotype>,
-    /// Number of reads used (informative, covering ≥1 variant site).
-    pub n_informative_reads: usize,
-    /// Number of reads filtered as likely mismapped (low lik under all hypotheses).
-    pub n_filtered_reads: usize,
-    /// Total number of reads fetched before filtering.
-    pub n_total_reads: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -284,22 +248,8 @@ fn parse_target_variant(name: &str) -> Option<UnifiedSite> {
 }
 
 // ---------------------------------------------------------------------------
-// D7 pseudo-allele + D6 allele definitions
+// D6 allele definitions (CYP2D7 is scored directly by `score_read_d7`)
 // ---------------------------------------------------------------------------
-
-/// Build the CYP2D7 pseudo-allele definition.
-/// At D6/D7 diagnostic sites, D7 carries the D7 base (not the D6 ref).
-/// At star-allele-defining sites, D7 carries the D6 reference (since those
-/// variants are specific to D6 sub-alleles, not D6-vs-D7 differences).
-fn build_d7_allele(_sites: &[UnifiedSite]) -> AlleleDef {
-    // D7 doesn't carry any star-allele ALT variants — those are D6-internal.
-    // At diagnostic sites where d7_base differs from d6_ref, we handle
-    // scoring specially in score_read_for_allele().
-    AlleleDef {
-        name: "CYP2D7".to_string(),
-        alt_sites: HashSet::new(), // D7 carries none of the D6 ALT alleles
-    }
-}
 
 /// Build D6 star-allele definitions from the dstar map.
 fn build_d6_allele_defs(
@@ -588,7 +538,7 @@ fn filter_mismapped(
 }
 
 // ---------------------------------------------------------------------------
-// Diplotype enumeration + scoring
+// Allele-label helpers
 // ---------------------------------------------------------------------------
 
 /// Split "*36x2" -> ("*36", 2); "*36" -> ("*36", 1). Only strips a trailing
@@ -605,155 +555,8 @@ fn split_copy_suffix(s: &str) -> (String, usize) {
     (s.to_string(), 1)
 }
 
-
-/// Score all diplotype pairs and return the top_n.
-///
-/// The mixture model includes one copy of D7 plus the D6 alleles:
-///   P(read | i, j, copies_i, copies_j) =
-///       w_d7 * P(read|D7) + w_i * P(read|i) + w_j * P(read|j)
-///
-/// For CN=2: w_d7 = 1/3, w_i = 1/3, w_j = 1/3.
-/// For CN=3 with assignment (2 copies of i, 1 of j):
-///   w_d7 = 1/4, w_i = 2/4 = 0.5, w_j = 1/4 = 0.25.
-///
-/// For CN >= 3, we try all valid copy-count splits and take the best.
-fn score_diplotypes(
-    reads: &[ReadObs],
-    d6_alleles: &[AlleleDef],
-    sites: &[UnifiedSite],
-    total_cn: u32,
-    top_n: usize,
-    lut: &QualLookup,
-) -> Vec<ScoredDiplotype> {
-    let n_alleles = d6_alleles.len();
-    let n_reads = reads.len();
-    if n_reads == 0 || n_alleles == 0 {
-        return Vec::new();
-    }
-
-    let cn = total_cn as usize;
-    let denom = (cn + 1) as f64; // +1 for D7
-
-    // Precompute per-read per-allele scores as flat array [read * n_alleles + allele]
-    // Work in natural-log domain: exp() is ~3x faster than 10.0_f64.powf()
-    let ln10 = std::f64::consts::LN_10;
-    let mut d6_scores_ln = vec![0.0f64; n_reads * n_alleles];
-    for (r, obs) in reads.iter().enumerate() {
-        let base = r * n_alleles;
-        for (a, allele) in d6_alleles.iter().enumerate() {
-            d6_scores_ln[base + a] = score_read_d6(obs, allele, sites, lut) * ln10;
-        }
-    }
-
-    // Precompute per-read D7 scores (ln domain)
-    let d7_scores_ln: Vec<f64> = reads
-        .iter()
-        .map(|obs| score_read_d7(obs, sites, lut) * ln10)
-        .collect();
-
-    let ln_w_d7 = (1.0 / denom).ln();
-
-    // Build all (i, j) pairs for parallel iteration
-    let pairs: Vec<(usize, usize)> = (0..n_alleles)
-        .flat_map(|i| (i..n_alleles).map(move |j| (i, j)))
-        .collect();
-
-    // Score diplotype pairs in parallel using thread-local top-N lists
-    let thread_results: Vec<Vec<ScoredDiplotype>> = pairs
-        .par_chunks(256)
-        .map(|chunk| {
-            let mut local_best: Vec<ScoredDiplotype> = Vec::new();
-            let mut local_min = f64::NEG_INFINITY;
-
-            for &(i, j) in chunk {
-                // A heterozygous pair needs at least one copy of each allele.
-                // When cn < 2 no such split exists, so skip it rather than
-                // leaving best_total at -inf (which would poison the posterior).
-                if i != j && cn < 2 {
-                    continue;
-                }
-                let splits: Vec<(usize, usize)> = if i == j {
-                    vec![(cn, 0)]
-                } else {
-                    (1..cn).map(|ci| (ci, cn - ci)).collect()
-                };
-
-                let mut best_total = f64::NEG_INFINITY;
-                for &(copies_i, copies_j) in &splits {
-                    let ln_w_i = (copies_i as f64 / denom).ln();
-                    let ln_w_j = if copies_j > 0 {
-                        (copies_j as f64 / denom).ln()
-                    } else {
-                        f64::NEG_INFINITY
-                    };
-
-                    let mut total = 0.0;
-                    for r in 0..n_reads {
-                        let base = r * n_alleles;
-                        let s_d7 = ln_w_d7 + d7_scores_ln[r];
-                        let s_i = ln_w_i + d6_scores_ln[base + i];
-                        let s_j = if copies_j > 0 {
-                            ln_w_j + d6_scores_ln[base + j]
-                        } else {
-                            f64::NEG_INFINITY
-                        };
-
-                        // log-sum-exp in natural log (exp() is much faster than powf())
-                        let max_s = s_d7.max(s_i).max(s_j);
-                        let lse = max_s
-                            + ((s_d7 - max_s).exp()
-                                + (s_i - max_s).exp()
-                                + (s_j - max_s).exp())
-                            .ln();
-                        total += lse;
-                    }
-
-                    if total > best_total {
-                        best_total = total;
-                    }
-                }
-
-                // Convert back to log10 for storage
-                let best_total_log10 = best_total / ln10;
-
-                if local_best.len() < top_n || best_total_log10 > local_min {
-                    local_best.push(ScoredDiplotype {
-                        allele_a: d6_alleles[i].name.clone(),
-                        allele_b: d6_alleles[j].name.clone(),
-                        log10_likelihood: best_total_log10,
-                        posterior: 0.0,
-                    });
-                    local_best.sort_by(|a, b| sort_scored(a, b));
-                    local_best.truncate(top_n);
-                    local_min = local_best
-                        .last()
-                        .map_or(f64::NEG_INFINITY, |x| x.log10_likelihood);
-                }
-            }
-            local_best
-        })
-        .collect();
-
-    // Merge thread-local results
-    let mut best: Vec<ScoredDiplotype> = thread_results.into_iter().flatten().collect();
-    best.sort_by(|a, b| sort_scored(a, b));
-    best.truncate(top_n);
-
-    // Normalise posteriors over the top-N (approximate)
-    if !best.is_empty() {
-        let lls: Vec<f64> = best.iter().map(|d| d.log10_likelihood).collect();
-        if let Some(posts) = posteriors_from_log10(&lls) {
-            for (d, p) in best.iter_mut().zip(posts) {
-                d.posterior = p;
-            }
-        }
-    }
-
-    best
-}
-
 // ---------------------------------------------------------------------------
-// Shared posterior normalization helper
+// Posterior normalization helper
 // ---------------------------------------------------------------------------
 
 /// Convert a slice of log10-likelihoods into a `Vec<f64>` of posteriors,
@@ -796,7 +599,7 @@ fn read_log10_likelihoods(
     for obs in reads {
         let s_d7 = ln_w_d7 + score_read_d7(obs, sites, lut) * ln10;
         // Per-read Vec allocation is fine here: the resolver scores only a tiny
-        // explicit candidate set, not the full O(n^2) enumeration of score_diplotypes.
+        // explicit candidate set, not an O(n^2) enumeration of allele pairs.
         let mut terms: Vec<f64> = Vec::with_capacity(assignment.len() + 1);
         terms.push(s_d7);
         for &(idx, copies) in assignment {
@@ -1034,7 +837,7 @@ pub fn score_candidates(
 }
 
 // ---------------------------------------------------------------------------
-// Public entry point
+// Fetch windows
 // ---------------------------------------------------------------------------
 
 /// CYP2D6 region coordinates (GRCh38).
@@ -1056,101 +859,6 @@ fn fetch_windows(sites: &[UnifiedSite]) -> ((i64, i64), (i64, i64)) {
         }
     }
     (d6, d7)
-}
-
-/// Run the likelihood-based diplotype caller.
-///
-/// This is an independent caller that uses per-read evidence from both D6
-/// and D7 regions. It does not replace the existing pileup-based caller
-/// but can be used alongside it for validation or as a primary caller.
-pub fn call_diplotype(
-    reader: &mut bam::IndexedReader,
-    nchr: &str,
-    var_list: &[String],
-    snp_file: &str,
-    star_combinations: &StarCombinations,
-    total_cn: u32,
-    top_n: usize,
-) -> DiplotypeLikelihoodResult {
-    // Build qual lookup table once
-    let lut = QualLookup::new();
-
-    // 1. Build unified site list
-    let sites = build_unified_sites(var_list, snp_file);
-    log::info!(
-        "diplotype_caller: {} unified sites ({} with D7 info)",
-        sites.len(),
-        sites.iter().filter(|s| s.d7_base.is_some()).count(),
-    );
-
-    if sites.is_empty() {
-        return DiplotypeLikelihoodResult {
-            top_diplotypes: Vec::new(),
-            n_informative_reads: 0,
-            n_filtered_reads: 0,
-            n_total_reads: 0,
-        };
-    }
-
-    // 2. Build allele definitions
-    let d6_alleles = build_d6_allele_defs(&star_combinations.dstar, &sites);
-    let _d7_allele = build_d7_allele(&sites);
-
-    log::info!(
-        "diplotype_caller: {} D6 alleles + 1 D7 pseudo-allele",
-        d6_alleles.len(),
-    );
-
-    // 3. Collect reads from both regions
-    let all_reads = collect_reads_dual_region(
-        reader, nchr, &sites, D6_START, D6_END, D7_START, D7_END,
-    );
-    let n_total = all_reads.len();
-
-    log::info!("diplotype_caller: {} reads collected from D6+D7 regions", n_total);
-
-    // 4. Filter mismapped reads
-    // Threshold: average log10-lik per site must be > -1.5
-    // (i.e., average error rate per site < ~3%)
-    let (reads, n_filtered) = filter_mismapped(all_reads, &d6_alleles, &sites, -1.5, &lut);
-    let n_informative = reads.len();
-
-    log::info!(
-        "diplotype_caller: {} informative reads, {} filtered as mismapped",
-        n_informative,
-        n_filtered,
-    );
-
-    if n_informative == 0 {
-        return DiplotypeLikelihoodResult {
-            top_diplotypes: Vec::new(),
-            n_informative_reads: 0,
-            n_filtered_reads: n_filtered,
-            n_total_reads: n_total,
-        };
-    }
-
-    // 5. Score diplotypes
-    let top = score_diplotypes(&reads, &d6_alleles, &sites, total_cn, top_n, &lut);
-
-    // Log top 5
-    for (i, d) in top.iter().take(5).enumerate() {
-        log::info!(
-            "diplotype_caller: #{} {}/{} ll={:.1} posterior={:.4}",
-            i + 1,
-            d.allele_a,
-            d.allele_b,
-            d.log10_likelihood,
-            d.posterior,
-        );
-    }
-
-    DiplotypeLikelihoodResult {
-        top_diplotypes: top,
-        n_informative_reads: n_informative,
-        n_filtered_reads: n_filtered,
-        n_total_reads: n_total,
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1215,24 +923,6 @@ mod tests {
         // Multi-base deletion should be skipped (only single-base supported)
         let site = parse_target_variant("g.42128945delCT");
         assert!(site.is_none());
-    }
-
-    #[test]
-    fn test_d7_allele_has_no_alt_sites() {
-        let sites = vec![
-            UnifiedSite {
-                d6_pos: 100,
-                d7_pos: Some(200),
-                d6_ref_base: b'A',
-                d7_base: Some(b'G'),
-                d6_alt_base: Some(b'T'),
-                name: "test".to_string(),
-                is_deletion: false,
-            },
-        ];
-        let d7 = build_d7_allele(&sites);
-        assert!(d7.alt_sites.is_empty());
-        assert_eq!(d7.name, "CYP2D7");
     }
 
     fn test_site(name: &str, pos: i64, d6: u8, d7: u8) -> UnifiedSite {
