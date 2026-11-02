@@ -169,3 +169,6 @@ NA20803.final.cram.crai
 NA20875.final.cram.crai
 British J Pharmacology - 2026 - Gréen - Development and analytical validation of a targeted short‐read next generation.pdf
 presentation_outline.md
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
