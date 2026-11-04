@@ -426,12 +426,15 @@ fn phase_signal_42127803(c11: u32, c12: u32, c21: u32, c22: u32) -> Option<bool>
     }
 }
 
+/// (D6/D7 base counts, variants called, g.42126938 phase signal).
+type GHaplotypeCall = (Vec<usize>, Vec<String>, Option<bool>);
+
 /// Call variant g.42126938C>T based on read depth and phased haplotypes.
 pub fn call_var42126938(
     reader: &mut bam::IndexedReader,
     full_length_cn: u32,
     base_db: &SnpLookup,
-) -> Result<(Vec<usize>, Vec<String>, Option<bool>), String> {
+) -> Result<GHaplotypeCall, String> {
     let mut var_called = Vec::new();
     let mut g_haplotype: Option<bool> = None;
 
