@@ -981,7 +981,7 @@ pub fn match_star(
                 raw_call: Some(matchtag.candidate),
                 clean_call: final_call_clean,
                 unknown_sites_unmatched,
-            unknown_sites_ambiguous,
+                unknown_sites_ambiguous,
             };
         }
         let mut matchtag = get_star_cn1(var_observed, &unknown, &star_combinations.dhap);
@@ -1015,7 +1015,7 @@ pub fn match_star(
                 raw_call: None,
                 clean_call: None,
                 unknown_sites_unmatched: false,
-            unknown_sites_ambiguous: false,
+                unknown_sites_ambiguous: false,
             }
         }
     };
@@ -1059,7 +1059,7 @@ pub fn match_star(
                     raw_call: Some(mt.candidate),
                     clean_call: final_call_clean,
                     unknown_sites_unmatched,
-            unknown_sites_ambiguous,
+                    unknown_sites_ambiguous,
                 };
             }
         }
@@ -1175,13 +1175,6 @@ mod tests {
             "*10x2/*145;*10x2/*4;*145/*147x2;*145/*4x2;*147x2/*4;*1/*10x2;*1/*147x2;*1/*4x2;*4/*4x2"));
         assert_eq!(masked.call_info.as_deref(), Some("more_than_one_match"));
         assert!(!masked.unknown_sites_unmatched);
-        // (c) the masked call is phasing-ambiguous with an unknown clinical effect.
-        let sorted = crate::phenotype::sort_diplotypes(masked.clean_call.as_deref().unwrap());
-        let predictions = crate::phenotype::match_phenotype(
-            Some(&sorted),
-            &crate::phenotype::load_haplotype_functionality(crate::data::HAPLOTYPE_FUNC));
-        assert!(predictions.len() > 1);
-        assert_eq!(crate::phenotype::clinical_equivalence(&predictions).0, "unknown_effect");
         assert!(masked.unknown_sites_ambiguous);
         // Same sample with no unknown sites: today's single (wrong) answer, unchanged.
         let exact = match_star(&mut na19920.clone(), &[], "cn3", None, &c, &exon9, None, None, &features);
@@ -1409,8 +1402,22 @@ mod tests {
     }
 
     #[test]
+    fn conflicting_or_unknown_effects_block_a_definitive_interpretation() {
+        // The damaged-NA19920 masked call is phasing-ambiguous with an unknown clinical effect.
+        let sorted = crate::phenotype::sort_diplotypes(
+            "*10x2/*145;*10x2/*4;*145/*147x2;*145/*4x2;*147x2/*4;*1/*10x2;*1/*147x2;*1/*4x2;*4/*4x2");
+        let predictions = crate::phenotype::match_phenotype(
+            Some(&sorted),
+            &crate::phenotype::load_haplotype_functionality(crate::data::HAPLOTYPE_FUNC));
+        assert!(predictions.len() > 1);
+        let (equivalence, long_read_recommended) = crate::phenotype::clinical_equivalence(&predictions);
+        assert_eq!(equivalence, "unknown_effect");
+        assert!(long_read_recommended);
+    }
+
+    #[test]
     fn every_key_of_every_table_is_its_own_sorted_token_join_and_keys_are_unique_as_multisets() {
-        // With these two properties the masked lookup (token-subset scan) for an
+        // With these two properties the masked lookup (token-multiset comparison on the known sites) for an
         // irrelevant unknown site equals the exact lookup for every key.
         use crate::caller::construct_star_table::{get_hap_table, TableKind};
         let c = get_hap_table(crate::data::STAR_TABLE, &TableKind::ALL);

@@ -34,7 +34,7 @@ mod tests {
         assert_eq!(genotype_filter("*1/*2;*1/*3", true, true, true, true), "More_than_one_possible_genotype");
         assert_eq!(genotype_filter("*1", true, true, true, true), "Not_assigned_to_haplotypes");
         assert_eq!(genotype_filter("*1/*2", true, true, true, true), "LowQ_high_CN");
-        assert_eq!(genotype_filter("*1/*2", false, true, false, true), "Unknown_sites_unmatched");
+        assert_eq!(genotype_filter("*1/*2", false, true, true, true), "Unknown_sites_unmatched");
         assert_eq!(genotype_filter("*1/*2", false, false, true, true), "Unknown_sites_resolved");
         assert_eq!(genotype_filter("*1/*2", false, false, false, true), "Fuzzy_match");
         assert_eq!(genotype_filter("*1/*2", false, false, false, false), "PASS");
