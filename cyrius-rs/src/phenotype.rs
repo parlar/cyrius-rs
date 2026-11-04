@@ -12,8 +12,8 @@ pub fn load_haplotype_functionality(content: &str) -> HashMap<String, HaplotypeF
         if fields.len() < 5 {
             continue;
         }
-        let haplotype = fields[0].replace("≥", "");
-        let activity = fields[1].replace("≥", "");
+        let haplotype = fields[0].to_string();
+        let activity = fields[1].to_string();
         let function = fields[2].to_string();
         let evidence_strength = fields[3].to_string();
         let evidence_summary = fields[4].to_string();
@@ -40,9 +40,10 @@ fn format_activity(value: f64) -> String {
 }
 
 /// Look up a haplotype's functionality. When there is no exact row:
-/// a sub-allele uses its main allele ("*4.013" -> "*4"); "*AxN" with N >= 3
-/// uses the table's "*Ax≥3" row (stored as "*Ax3"); otherwise "*AxN" gets
-/// N times the single-copy activity of "*A".
+/// a sub-allele uses its main allele ("*4.013" -> "*4"); otherwise "*AxN"
+/// gets N times the single-copy activity of "*A". The table's "*Ax≥3" rows
+/// are lower bounds for an unknown count, so they only give the function
+/// label for N >= 3.
 fn lookup_functionality(
     name: &str,
     table: &HashMap<String, HaplotypeFunctionality>,
@@ -65,16 +66,18 @@ fn lookup_functionality(
         return lookup_functionality(&alt, table);
     }
     let n = copies?;
-    if n >= 3 {
-        if let Some(info) = table.get(&format!("{}x3", base)) {
-            return Some(info.clone());
-        }
-    }
     let single = table.get(base)?;
     let activity: f64 = single.activity.parse().ok()?;
+    // The copy count is exact, so the activity is n times one copy. A
+    // "*Ax≥3" row is a lower bound for an unknown count of 3 or more: it
+    // supplies only the function label, never the activity.
+    let function = match table.get(&format!("{}x≥3", base)) {
+        Some(bucket) if n >= 3 => bucket.function.clone(),
+        _ => single.function.clone(),
+    };
     Some(HaplotypeFunctionality {
         activity: format_activity(activity * n as f64),
-        function: single.function.clone(),
+        function,
         evidence_strength: "n/a".to_string(),
         evidence_summary: format!(
             "No table entry for {}; activity is {} x the {} value.",
@@ -390,8 +393,38 @@ mod tests {
     }
 
     #[test]
-    fn three_or_more_copies_use_the_x3_row() {
-        assert_eq!(activity_of("*1/*2x4", "*2x4"), "3.0");
+    fn an_exact_copy_count_multiplies_the_single_copy_activity() {
+        // *41 is 0.25 per copy; the *41x3 row is an exact 3-copy row, not a
+        // ">= 3" bucket, so 4 and 5 copies must not reuse its 0.75.
+        assert_eq!(activity_of("*10/*41x4", "*41x4"), "1.0");
+        assert_eq!(activity_of("*5/*41x5", "*41x5"), "1.25");
+        // *2x≥3 is a lower bound ("≥3.0"); an exact count of 4 is 4.0.
+        assert_eq!(activity_of("*5/*2x4", "*2x4"), "4.0");
+    }
+
+    #[test]
+    fn an_exact_table_row_still_wins() {
+        assert_eq!(activity_of("*1/*41x3", "*41x3"), "0.75");
+        assert_eq!(activity_of("*1/*2x2", "*2x2"), "2.0");
+    }
+
+    #[test]
+    fn exact_multiplication_sets_the_cpic_phenotype() {
+        let t = table();
+        let p = match_phenotype(Some("*41x4/*10"), &t);
+        assert_eq!(p[0].total_activity, "1.25");
+        assert_eq!(p[0].predicted_phenotype, "Normal Metabolizer");
+        let p = match_phenotype(Some("*41x5/*5"), &t);
+        assert_eq!(p[0].total_activity, "1.25");
+        assert_eq!(p[0].predicted_phenotype, "Normal Metabolizer");
+    }
+
+    #[test]
+    fn three_or_more_normal_copies_keep_the_increased_function_label() {
+        let (details, _) = compare_genotypes("*1x4/*5", &table());
+        let d = details.into_iter().find(|d| d.haplotype == "*1x4").unwrap();
+        assert_eq!(d.activity, "4.0");
+        assert_eq!(d.function, "Increased function");
     }
 
     #[test]
