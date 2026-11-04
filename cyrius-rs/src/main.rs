@@ -950,19 +950,16 @@ fn d6_star_caller(
         }
 
         if let Some(ref call) = final_star_allele_call {
-            if call.contains(';') {
-                genotype_filter = Some("More_than_one_possible_genotype".to_string());
-            } else if !call.contains('/') {
-                genotype_filter = Some("Not_assigned_to_haplotypes".to_string());
-            } else if high_cn_low_confidence {
-                genotype_filter = Some("LowQ_high_CN".to_string());
-            } else if star_called.unknown_sites_unmatched {
-                genotype_filter = Some("Unknown_sites_unmatched".to_string());
-            } else if is_fuzzy {
-                genotype_filter = Some("Fuzzy_match".to_string());
-            } else {
-                genotype_filter = Some("PASS".to_string());
-            }
+            genotype_filter = Some(
+                cyrius_rs::caller::genotype_filter::genotype_filter(
+                    call,
+                    high_cn_low_confidence,
+                    star_called.unknown_sites_unmatched,
+                    star_called.unknown_sites_ambiguous,
+                    is_fuzzy,
+                )
+                .to_string(),
+            );
         }
     }
 
@@ -976,7 +973,7 @@ fn d6_star_caller(
     //   star13/star13intron1 variants: skip (insufficient data)
     if features.spacer_cn_check {
         if let Some(ref filter) = genotype_filter {
-            if filter == "PASS" || filter == "Fuzzy_match" || filter == "Unknown_sites_unmatched" {
+            if filter == "PASS" || filter == "Fuzzy_match" || filter == "Unknown_sites_unmatched" || filter == "Unknown_sites_resolved" {
                 if let Some(sp_cn) = raw_cn_call.spacer_cn {
                     let expected_diff: Option<u32> = match cnvtag_str.as_str() {
                         "cn2" => Some(2),
@@ -1015,7 +1012,7 @@ fn d6_star_caller(
     // Feature: consistency_check — post-hoc validation of the final call
     if features.consistency_check {
         if let Some(ref filter) = genotype_filter {
-            if filter == "PASS" || filter == "Fuzzy_match" || filter == "Unknown_sites_unmatched" {
+            if filter == "PASS" || filter == "Fuzzy_match" || filter == "Unknown_sites_unmatched" || filter == "Unknown_sites_resolved" {
                 let consistency = cyrius_rs::caller::consistency::run_consistency_checks(
                     &snp_d6, &snp_d7,
                     &var_alt, &var_ref, &params.var_list,
