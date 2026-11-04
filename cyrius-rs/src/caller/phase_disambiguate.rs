@@ -504,14 +504,17 @@ fn check_allele_pileup(
     // Every base the winning pattern was matched on must be trustworthy.
     //
     // Unavailable quality is NOT high quality (review #5). SAM/BAM stores
-    // "qualities omitted" as 0xFF, which would sail past a `q < 13` test, and
-    // a quality array too short to cover the compared bases means those bases
-    // have no quality at all. Both leave the phase unresolved rather than
-    // deciding it.
+    // "qualities omitted" as 0xFF, which would sail past a `q < 13` test, so
+    // it leaves the phase unresolved rather than deciding it.
+    //
+    // The length check below is UNREACHABLE and kept only so the slice can
+    // never panic: `Record::qual()` returns exactly `seq_len()` bytes, and
+    // `query_span_at_pos` already bounds `qp + len` by `seq.len()`, with
+    // `compared <= len` because the pattern matched inside that span.
     let compared = if is_alt { alt_upper.len() } else { ref_upper.len() };
     let quals = record.qual();
     if quals.len() < qp + compared {
-        return None; // no quality for the bases compared
+        return None; // unreachable; see above
     }
     if quals[qp..qp + compared]
         .iter()
@@ -1369,6 +1372,23 @@ mod tests {
         let b = disambiguate_fixture("conflict_b", order(false));
         assert_eq!(a.resolved, b.resolved, "record order changed the phase decision");
         assert_eq!(a.resolved, None, "a conflicting site is not evidence");
+        // Pin the mechanism, not only the outcome. `None` has other possible
+        // causes (no differentiating pair, an aborted run), so assert that the
+        // pair really was evaluated and that every conflicting fragment was
+        // dropped from the tallies instead of being counted on one side.
+        assert!(!a.pairs_truncated, "the run completed; None is not an abort");
+        assert_eq!(
+            a.pairs.len(),
+            1,
+            "the differentiating pair should have been counted: {:?}",
+            a.pairs
+        );
+        let c = a.pairs[0].counts;
+        assert_eq!(
+            (c.aa, c.ar, c.ra, c.rr_all, c.rr_anchored),
+            (0, 0, 0, 0, 0),
+            "a fragment whose mates disagree must reach no count: {c:?}"
+        );
     }
     #[test]
     fn disambiguate_reports_the_pairs_it_counted_and_an_anchored_rr_decides() {

@@ -79,7 +79,7 @@ This is a synthetic counterexample, not an observed error in the 53 baseline sam
 
 ### 4. [P1] Low-quality bases can supply decisive phasing evidence
 
-**Status (fix/review-p1):** fixed in 323a8c7; test `base_quality_zero_reads_do_not_decide_phase`. The main allele-counting path (`snp_count.rs`) is unchanged; see Out of scope. Omitted qualities (`0xFF`) and a quality array too short to cover the compared bases both leave phase unresolved.
+**Status (fix/review-p1):** fixed in 323a8c7; test `base_quality_zero_reads_do_not_decide_phase`. The main allele-counting path (`snp_count.rs`) is unchanged; see Out of scope. Omitted qualities (`0xFF`) leave phase unresolved. The short-quality-array guards at both call sites are unreachable rather than live rejection conditions: `Record::qual()` returns exactly `seq_len()` bytes (rust-htslib 0.47.1, `record.rs:582-585`) and both sites already bound their slice by `seq.len()`. They are kept so the slice cannot panic, and are labelled as such in the code.
 
 Locations: [phase_disambiguate.rs](../../cyrius-rs/src/caller/phase_disambiguate.rs), `phase_read_passes` and `check_allele_pileup`, around lines 213 and 456; [snp_count.rs](../../cyrius-rs/src/depth_calling/snp_count.rs), around lines 117–146.
 

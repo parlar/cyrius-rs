@@ -245,9 +245,12 @@ fn get_bases_per_read(
                     }
 
                     // Every extracted base must be trustworthy, by the same
-                    // rule the fragment-phasing path uses (review #3/#5).
-                    // A short or omitted quality array is "unknown", never
-                    // "good": both drop the read at this site.
+                    // rule the fragment-phasing path uses (review #3/#5). An
+                    // omitted quality (0xFF) is "unknown", never "good", and
+                    // drops the read at this site. The `quals.len()` test is
+                    // UNREACHABLE and kept only so the slice can never panic:
+                    // `Record::qual()` returns exactly `seq_len()` bytes and
+                    // `end_pos > seq.len()` was already rejected above.
                     let quals = record.qual();
                     if quals.len() < end_pos
                         || quals[qpos..end_pos]

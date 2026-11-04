@@ -751,7 +751,14 @@ pub fn update_variants(
 
 /// Targeted read-phase rules for two cn2 ambiguities. Each rule fires when
 /// both of its diplotypes are among the candidates and drops the one its
-/// haplotype boolean excludes; any other candidates are kept.
+/// haplotype signal excludes; any other candidates are kept.
+///
+/// Each signal is three-state, not a boolean. `Some(true)` and `Some(false)`
+/// are positive evidence for one arrangement; `None` means the phase step
+/// did not decide (too few linked reads, no evidence either way, or it never
+/// ran). On `None` the rule is skipped and neither diplotype is dropped, so
+/// the call stays ambiguous rather than being resolved by an absence of
+/// evidence.
 fn apply_cn2_phase_rules(
     clean_call: &str,
     var42126938_g_haplotype: Option<bool>,
@@ -935,7 +942,8 @@ pub fn match_star(
 
         // Resolve ambiguous cn2 cases with haplotype info
         // These two cn2 ambiguities are resolved by targeted read-phase
-        // signals (var42126938 / var42127803 haplotype booleans), which are
+        // signals (var42126938 / var42127803 three-state haplotype signals,
+        // where `None` means undecided and drops nothing), which are
         // more specific than the general likelihood resolver for these exact
         // allele sets. Kept here pending benchmark coverage that could
         // validate delegating them to the resolver.
