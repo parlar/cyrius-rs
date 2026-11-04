@@ -219,10 +219,11 @@ fn get_star_cn1(var_observed: &[String], unknown: &[String], dic: &HashMap<Strin
 /// Star allele call for star68-related CN=1 cases (dhap dictionary).
 fn call_star68_cn1(
     var_observed: &mut Vec<String>,
+    unknown: &[String],
     cnvcall: &str,
     dic: &HashMap<String, String>,
 ) -> RawStarCall {
-    let mut matchtag = vec![get_star_cn1(var_observed, &[], dic)];
+    let mut matchtag = vec![get_star_cn1(var_observed, unknown, dic)];
     let cn = cnvcall.split('_').filter(|&s| s == "star68").count();
     let count0692 = var_observed
         .iter()
@@ -233,7 +234,7 @@ fn call_star68_cn1(
         if let Some(pos) = var_observed.iter().position(|v| v == "g.42130692G>A") {
             var_observed.remove(pos);
         }
-        matchtag.push(get_star_cn1(var_observed, &[], dic));
+        matchtag.push(get_star_cn1(var_observed, unknown, dic));
     }
 
     if matchtag.len() == 1 {
@@ -265,6 +266,17 @@ fn call_star68_cn1(
         };
     }
 
+    if !unknown.is_empty() {
+        // Unknown sites: report every candidate rather than picking by rule.
+        let mut all: Vec<String> = unique.into_iter().cloned().collect();
+        all.sort();
+        return RawStarCall {
+            call_info: Some("more_than_one_match".to_string()),
+            candidate: hap_list.clone(),
+            star_call: all,
+        };
+    }
+
     let non_rare: Vec<String> = hap_list
         .iter()
         .filter(|hap| !RARE_ALLELES.iter().any(|rare| hap.contains(rare)))
@@ -289,10 +301,11 @@ fn call_star68_cn1(
 /// Star allele call for star68-related cases.
 fn call_star68(
     var_observed: &mut Vec<String>,
+    unknown: &[String],
     cnvcall: &str,
     dic: &HashMap<String, Vec<String>>,
 ) -> RawStarCall {
-    let mut matchtag = vec![get_star(var_observed, &[], dic)];
+    let mut matchtag = vec![get_star(var_observed, unknown, dic)];
     let cn = cnvcall.split('_').filter(|&s| s == "star68").count();
     let count0692 = var_observed
         .iter()
@@ -303,7 +316,7 @@ fn call_star68(
         if let Some(pos) = var_observed.iter().position(|v| v == "g.42130692G>A") {
             var_observed.remove(pos);
         }
-        matchtag.push(get_star(var_observed, &[], dic));
+        matchtag.push(get_star(var_observed, unknown, dic));
     }
 
     if matchtag.len() == 1 {
@@ -339,6 +352,17 @@ fn call_star68(
             call_info: Some("unique_match".to_string()),
             candidate: hap_list.clone(),
             star_call: vec![hap_list[0].clone()],
+        };
+    }
+
+    if !unknown.is_empty() {
+        // Unknown sites: report every candidate rather than picking by rule.
+        let mut all: Vec<String> = unique.into_iter().cloned().collect();
+        all.sort();
+        return RawStarCall {
+            call_info: Some("more_than_one_match".to_string()),
+            candidate: hap_list.clone(),
+            star_call: all,
         };
     }
 
@@ -929,7 +953,7 @@ pub fn match_star(
     if uses_cn1_dic(cnvcall) {
         if cnvcall.contains("star68") {
             // star5_star68, star13_star68: use call_star68_cn1 for iterative matching
-            let mut matchtag = call_star68_cn1(var_observed, cnvcall, &star_combinations.dhap);
+            let mut matchtag = call_star68_cn1(var_observed, &[], cnvcall, &star_combinations.dhap);
             // Feature: fuzzy_match — try fuzzy matching on no_match for star68 CN=1
             if features.fuzzy_match && matchtag.call_info.as_deref() == Some("no_match") {
                 if let Some(fuzzy) = fuzzy_match::fuzzy_match_star_cn1(var_observed, &star_combinations.dhap) {
@@ -1049,7 +1073,7 @@ pub fn match_star(
         }
     } else {
         let mut var_observed_68 = var_observed.clone();
-        let matchtag = call_star68(&mut var_observed_68, cnvcall, dic);
+        let matchtag = call_star68(&mut var_observed_68, &[], cnvcall, dic);
         let final_call_clean =
             get_final_call_clean(&matchtag.star_call, cnvcall, spacer_cn);
         StarCall {
@@ -1201,12 +1225,40 @@ mod tests {
     }
 
     #[test]
+    fn the_star68_paths_do_not_pick_by_habit_when_sites_are_unknown() {
+        // Two different answers after removing one g.42130692G>A copy. Unmasked,
+        // the "last one is most likely" rule picks one; masked, both are kept.
+        let d = dic(&[("g.42130692G>A_g.X", &["*68_*4"]), ("g.X", &["*68_*2"])]);
+        let mut v = obs(&["g.42130692G>A", "g.X"]);
+        let picked = call_star68(&mut v.clone(), &[], "star68", &d);
+        assert_eq!(picked.star_call.len(), 1);
+        let kept = call_star68(&mut v, &obs(&["g.Y"]), "star68", &d);
+        assert_eq!(kept.star_call.len(), 2, "{:?}", kept.star_call);
+        assert_eq!(kept.call_info.as_deref(), Some("more_than_one_match"));
+    }
+
+    #[test]
+    fn the_cn1_star68_path_does_not_pick_by_habit_when_sites_are_unknown() {
+        // Single-copy table: values are one allele each.
+        let d: HashMap<String, String> = [("g.42130692G>A_g.X", "*68"), ("g.X", "*2")]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let v = obs(&["g.42130692G>A", "g.X"]);
+        let picked = call_star68_cn1(&mut v.clone(), &[], "star5_star68", &d);
+        assert_eq!(picked.star_call.len(), 1);
+        let kept = call_star68_cn1(&mut v.clone(), &obs(&["g.Y"]), "star5_star68", &d);
+        assert_eq!(kept.star_call, obs(&["*2", "*68"]));
+        assert_eq!(kept.call_info.as_deref(), Some("more_than_one_match"));
+    }
+
+    #[test]
     fn call_star68_does_not_panic_when_matching_tag_is_all_rare() {
         // Tag 0 (with g.42130692G>A) is no_match; tag 1 (after removing it)
         // matches only rare-allele candidates.
         let d = dic(&[("g.X", &["*34_*1", "*39_*1"])]);
         let mut vars = vec!["g.42130692G>A".to_string(), "g.X".to_string()];
-        let out = call_star68(&mut vars, "star68", &d);
+        let out = call_star68(&mut vars, &[], "star68", &d);
         assert!(!out.star_call.is_empty());
     }
 
