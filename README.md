@@ -6,7 +6,7 @@ A Rust reimplementation of [Cyrius](https://github.com/Illumina/Cyrius), a tool 
 
 53 GeT-RM samples from the 1000 Genomes 30x WGS data (NYGC), as regional BAMs. Truth is the GeT-RM consensus genotype (Pratt et al. 2019, J Mol Diagn 21:1034-1052). A call counts as **exact** when it is a single diplotype equal to the truth, and as **ambiguous** when it lists several `;`-separated diplotypes, one of which is the truth.
 
-Measured at commit `a75638a`:
+Training-set concordance, measured at commit `a75638a`:
 
 | Metric | Value |
 |---|---|
@@ -15,7 +15,9 @@ Measured at commit `a75638a`:
 | Wrong | 0 |
 | No call | 0 |
 
-These 53 samples were also used while developing the calling rules, so this is not a held-out accuracy estimate.
+**This is a training-set result, not a held-out accuracy estimate.** The same 53 samples were used to find and fix errors while the calling rules were developed. For example, the exon-9 threshold in `call_exon9gc` was lowered from 0.75 to 0.70 so that HG00421 is called correctly. Cyrius's own rules were also refined against GeT-RM truth samples (Chen et al. 2021, Pharmacogenomics J).
+
+The GMM parameters (`cyrius-rs/data/CYP2D6_gmm.txt`) are Cyrius's, unchanged since the original 2020 release. The Cyrius paper does not describe how they were derived; its Figure 2 shows the depth distribution of the 2,504 1000 Genomes Project samples, and all 53 benchmark samples are among those 2,504. Whether the parameters were fitted on them is not known.
 
 The 2 ambiguous calls:
 
