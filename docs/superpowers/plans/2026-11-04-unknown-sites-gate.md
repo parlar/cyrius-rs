@@ -163,3 +163,42 @@ the masked lookup with an empty mask returns exactly the table entry for
 every key of every table), the reviewer's five required tests, and decisions
 on the single-copy and `*68` paths, the empty-set fallback, and the two-value
 mask.
+
+---
+
+## Addendum (locked before running): does the defect occur in thinner real data?
+
+**Why.** The user asked whether validating the BAM up front would beat
+handling the consequences. For whole-file problems it would, and several
+such checks exist. But the damaged NA19920 is a valid file with a coverage
+hole, and every hole tested in B1 was made by hand. On the 53 real files,
+none has an uncallable site. So whether this defect occurs in real data at
+all is **unmeasured**. This addendum measures it before B2.
+
+**Input.** Each of the 53 truth samples' BAMs, thinned with
+`samtools view -s 42.25` and `samtools view -s 42.10` (seed 42; 25 % and
+10 % of read names, so mates stay together). Both levels are fixed here,
+before any run.
+
+**Run.** The `a1b919b` binary (its `src/` is identical to this branch), with
+the benchmark's flags: `--strand-bias-all --fuzzy-match --changepoint-hybrid --het-check`.
+
+**Per run, measured:** genotype, filter, `Uncallable_target_sites`, and the
+phenotype of the call against the phenotype of the truth genotype (same
+functions as B1). A call is **confidently wrong** when it establishes one
+phenotype (all its alternatives agree) and that phenotype is not the
+truth's.
+
+**Decision rule — no tuned numbers:**
+
+| Rule | Outcome | Then |
+|---|---|---|
+| **S1** | **No** run, at either level, is confidently wrong while listing at least one uncallable site. | The defect does not arise even in thin data. Stop the masking plan; keep the reporting field; rely on up-front checks. |
+| **S2** | At least one such run exists. | The defect is real in realistic data. Continue to B2. |
+| **K3 on real holes** | On every S2 run on the main path, masking its own uncallable sites establishes a wrong phenotype. Zero tolerance. | Stop and diagnose before B2. |
+
+**Reported, deciding nothing:** wrong calls that list **no** uncallable
+site (other causes, such as copy number at low depth); how many of the S2
+runs carry `PASS`; and how often the truth falls out of the masked
+candidate set, meaning a site the matcher still trusted was itself wrong.
+That last number is the limit of masking.
