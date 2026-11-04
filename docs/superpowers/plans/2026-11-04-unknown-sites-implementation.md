@@ -513,6 +513,8 @@ No code change. Rules locked here, before running:
 
 The 9 NA19920 diplotypes: `*1/*10x2`, `*1/*147x2`, `*1/*4x2`, `*145/*147x2`, `*4x2/*145`, `*4/*4x2`, `*10x2/*145`, `*4/*10x2`, `*4/*147x2`.
 
+**Amendment before Task 4 (2026-11-04, no Task 4/5 code run yet).** The set is compared as **unordered diplotypes**: the order of the two haplotypes inside one diplotype is ignored (`*4/*10x2` = `*10x2/*4`). Reason, measured: the B2 prototype formatted each sub-allele-level candidate, while Task 1's fix formats the main-allele multisets; on the same 9 multisets with `cnvcall = "cn3"` (spacer `None`, `Some(2)`, `Some(3)` all alike) it prints `*10x2/*145;*10x2/*4;*145/*147x2;*145/*4x2;*147x2/*4;*1/*10x2;*1/*147x2;*1/*4x2;*4/*4x2`, which differs from the prototype's string only in the order inside 3 diplotypes. The genotype set, phenotype and filter are unaffected by that order.
+
 **Stop rules:** any full-depth difference; any thinned or damaged run that is confidently wrong with this code and was not before; the NA19920 set differing from the 9 above.
 
 - [ ] **Step 1:** run the damaged NA19920 and the 25 % and 10 % sets with the new binary into `~/cyrius-research/unknown-sites/final/`.
