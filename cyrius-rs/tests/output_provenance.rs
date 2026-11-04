@@ -15,6 +15,15 @@ const BIN: &str = env!("CARGO_BIN_EXE_cyrius-rs");
 
 /// The commit `build.rs` stamped into this build. `option_env!` rather than
 /// `env!` so a missing stamp is a test failure, not a compile error.
+///
+/// `clippy::option_env_unwrap` is deny-by-default and fires here, but its
+/// reasoning does not apply: it warns against turning a compile-time-knowable
+/// absence into a run-time panic. That trade is the point of this helper --
+/// this test exists to assert the stamp is present, so it must be able to
+/// FAIL rather than refuse to build. `build.rs` always emits the variable
+/// anyway (falling back to "unknown"), so the `None` arm is unreachable in
+/// any real build. Allowed deliberately, and narrowly, on this one function.
+#[allow(clippy::option_env_unwrap)]
 fn build_commit() -> &'static str {
     option_env!("CYRIUS_GIT_COMMIT").expect("build.rs must set CYRIUS_GIT_COMMIT")
 }
