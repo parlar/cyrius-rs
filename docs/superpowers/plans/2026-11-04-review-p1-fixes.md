@@ -76,7 +76,13 @@
   R=~/cyrius-research/review-fixes
   rm -rf "$R/accepted" && cp -r "$(cat "$R/logs/task_N/results_dir.txt")" "$R/accepted"
   ```
-- **G5 Lint:** folded into `gate.sh` above. Task 0 measures the baseline count with the gate's own command and writes it to `~/cyrius-research/review-fixes/lint_baseline.txt` (the earlier figure of 68 came from a different invocation and is re-measured, not assumed). A count below the baseline never passes when clippy failed to compile.
+- **G5 Lint:** folded into `gate.sh` above; the baseline lives in `~/cyrius-research/review-fixes/lint_baseline.txt`.
+
+  **Measured 2026-11-04, and it invalidated the old figure.** At `3807326`, `cargo clippy --all-targets` *could not compile* the `output_provenance` test: `clippy::option_env_unwrap` is deny-by-default and fires on `option_env!("CYRIUS_GIT_COMMIT").expect(..)` at `cyrius-rs/tests/output_provenance.rs:19`. The old G5 command piped clippy into `grep -c` and ignored its exit status, so it counted the output of an **aborted** run and reported `68`. A clippy run that actually compiles reports **65**. The plan's recorded baseline was an artifact of the failure it failed to notice — the reviewer's point about piped exit statuses, demonstrated on committed code.
+
+  Resolved by prerequisite commit `401e324` (user chose this on 2026-11-04 over rewriting the helper to use `env!`): a narrow `#[allow(clippy::option_env_unwrap)]` on that one function, with the reasoning recorded in a doc comment. The lint's premise — don't turn a compile-time-knowable absence into a run-time panic — is exactly the trade the helper wants, because the test must be able to *fail* rather than refuse to build, and `build.rs` always emits the variable anyway.
+
+  **Baseline is therefore 65**, and `gate.sh` checks that clippy compiled before trusting any count. A count below the baseline never passes when clippy failed to compile.
 - **G8 Expected changes are cumulative and valued.** Two failures the first draft of this plan had:
   - *Chaining.* Task 3 accepts changes to `Filter`, `Confidence` and `Confidence_label`. Comparing Task 4 against the frozen `3807326` baseline with "no changes allowed" would then fail on Task 3's accepted output. So every task compares twice: against `accepted/` (the previous passing run) with **only that task's** expected changes, and against `baseline/` (frozen at `3807326`) with the **cumulative** expected changes.
   - *Values.* An expected-changes file naming only `sample<TAB>field` lets any new value through; the reviewer's probe got `"Confidence": "not-a-number"` past it. Every line must name the expected new value: `sample<TAB>field<TAB>value`. A file must always exist, even when empty: an empty file means no change is allowed. A listed change that did not happen is also a failure.
@@ -102,7 +108,23 @@
   | `g.42128936-42128937insGGGGCGAAA` | `0,63` | `0,0` |
   | `g.42128936-42128937insGGGGCGAAAGGGGCGAAA` | `0,63` | `0,0` |
 
-  and **31** target sites lose depth in all, several nearly so: `g.42128933G>A` `0,62 -> 0,3`, `g.42128932C>T` `0,62 -> 0,4`, `g.42128926T>C` `0,62 -> 0,6`, `g.42128903-42128904insTA` `0,58 -> 0,11`. At total CN 5 a handful of reads may not survive the posterior cutoff either, so the count of sites whose dosage actually comes back `None` is **≥ 3 and not yet measured** — it needs the real `call_cn_var` path, which is what 3a builds. Do not write a number for it until 3a reports one.
+  and **31** target sites lose depth in all, several nearly so: `g.42128933G>A` `0,62 -> 0,3`, `g.42128932C>T` `0,62 -> 0,4`, `g.42128926T>C` `0,62 -> 0,6`, `g.42128903-42128904insTA` `0,58 -> 0,11`. At total CN 5 a handful of reads may not survive the posterior cutoff either.
+
+  **Now measured, by 3a's own code path (commit `ed5be20`): the count is 5.**
+  Three sites from zero coverage, and two more that keep a few reads and still
+  fail the cutoff:
+
+  | Site | reads left (alt,ref) | why |
+  |---|---|---|
+  | `g.42128945C>T` | `0,0` | no coverage |
+  | `g.42128936-42128937insGGGGCGAAA` | `0,0` | no coverage |
+  | `g.42128936-42128937insGGGGCGAAAGGGGCGAAA` | `0,0` | no coverage |
+  | `g.42128932C>T` | `0,4` | too few reads at total CN 5 |
+  | `g.42128933G>A` | `0,3` | too few reads at total CN 5 |
+
+  This reproduces the external reviewer's prototype figure of five uncallable
+  dosages, which this plan had recorded as the reviewer's output rather than a
+  fact. Both the number and the mechanism now come from the shipped code.
 
 - **Confidence rose when evidence was removed:** `0.87 HIGH` → `0.95 HIGH` (same measurement). The damaged input scores *higher* than the intact one, because the missing site stops contradicting `*10`. This is the defect in one line.
 - `call_reg1_cn` returns `None` when a site has no reads, and `Some(0)` when the expected copy number there is 0 ([copy_number_call.rs:13-18](../../../cyrius-rs/src/depth_calling/copy_number_call.rs)). So a homozygous deletion (NA19317, `*5/*5`) gives 0, not `None`.
@@ -310,7 +332,9 @@ cargo clippy --all-targets --locked > /tmp/clippy_base.log 2>&1 || true
 grep -qE "^error(\[|:)" /tmp/clippy_base.log && { echo "clippy did not compile"; exit 1; }
 grep -cE "^(warning|error)" /tmp/clippy_base.log | tee $R/lint_baseline.txt
 ```
-Expected: a number is written to `$R/lint_baseline.txt`. The earlier figure of 68 was measured with a different invocation; whatever this prints is the baseline, and G4 compares against this file. Record the number here once measured: `PREDICTED (not run): 68`.
+Expected: a number is written to `$R/lint_baseline.txt`. **Measured 2026-11-04: `65`** (with `401e324` applied; see G5). The `68` in earlier drafts came from a clippy run that aborted on a compile error, so it was never a valid baseline.
+
+**Prerequisite:** this step cannot pass at `3807326` — clippy fails to compile the `output_provenance` test there. Commit `401e324` fixes that and must be in place first. If `grep -qE "^error(\[|:)"` finds anything in `clippy_base.log`, stop: the count that follows would be meaningless.
 
 - [ ] **Step 6: Prove `gate.sh` can fail.** Break the build on purpose, run the gate, restore.
 
@@ -773,11 +797,22 @@ Expected: every `test result` is `ok`, with 0 failed, and both corrupt-BAM tests
 - [ ] **Step 6: Check that no BAM read error is still skipped**
 
 Run: `grep -rnE "is_err\(\) *\{ *$|Err\(_\) *=> *continue" src --include=*.rs`
-At `3807326` this command gives 19 hits (measured). Expected afterwards: 5 hits.
-- Three are text parsing: `diplotype_caller.rs` (two `cols[...].parse()` lines) and `phase_disambiguate.rs` (`fields[1].parse`).
-- Two are test function names in `bin_count.rs` that end in `_is_err() {`.
+At `3807326` this command gives 19 hits (measured). **Measured afterwards: 7 hits**, all accounted for:
+- Three are text parsing, not BAM reads: `diplotype_caller.rs:161,166` (`cols[...].parse()`) and `phase_disambiguate.rs:38` (`fields[1].parse`).
+- Two are test function *names* in `bin_count.rs` ending in `_is_err() {`.
+- Two are BAM reads in `d7_depth.rs:100,165` of the form `if result.is_err() { return None; }`.
 
-Read each hit to confirm that none is a BAM read.
+**The expected count was first written as 5, and that was wrong** — a prediction about the *form* the d7-depth fix would take, not a missed site. It is corrected here rather than argued with.
+
+The pattern over-matches, so the count alone is not the gate. `return None` discards the partial `count`/`lengths` and reports the optional evidence as unavailable, which is exactly what this task asks of an optional path; `continue` would keep counting past a bad record, which is the defect. The grep cannot tell them apart, so run the sharper check as well:
+
+```bash
+grep -rnA 2 -E "is_err\(\) *\{ *$|Err\(_\) *=> *" src --include=*.rs \
+  | grep -E "continue;" | grep -v "_is_err"
+```
+**Measured: no output** — no read error is skipped-and-continued anywhere. That is the property the task is actually buying, and an empty result is the pass condition. If this prints anything, a read error is still being stepped over.
+
+Read each hit of the broad grep anyway, and classify it into one of the three groups above. A hit that fits none of them is a finding.
 
 - [ ] **Step 7: Commit**
 
@@ -1414,7 +1449,8 @@ rm -rf $R/accepted && cp -r "$(cat $R/logs/task_4/results_dir.txt)" $R/accepted
 - Test: `cyrius-rs/src/caller/phase_disambiguate.rs` (tests module; uses `spanning_record` from Task 4)
 
 **Interfaces:**
-- Produces: `pub const PHASE_MIN_BASE_QUALITY: u8 = 13;`, `pub const QUAL_UNAVAILABLE: u8 = 0xFF;`, `fn query_span_at_pos(record, seq_len, genomic_pos_0based, n) -> Option<(usize, usize)>`, and the test helper `spanning_record_quals(qname, early_alt, late_alt, quals, flags)`.
+- Produces, in `depth_calling/mod.rs`: `pub const PHASE_MIN_BASE_QUALITY: u8 = 13;` and `pub const QUAL_UNAVAILABLE: u8 = 0xFF;`, re-exported from `caller::phase_disambiguate` so that path still resolves. In `phase_disambiguate.rs`: `fn query_span_at_pos(record, seq_len, genomic_pos_0based, n) -> Option<(usize, usize)>` and the test helper `spanning_record_quals(qname, early_alt, late_alt, quals, flags)`.
+- Layering note for Task 6: import these from `crate::depth_calling::{...}` inside `depth_calling/haplotype.rs`. Do **not** reach up into `crate::caller::` from `depth_calling` — nothing in that module does today.
 
 **Threshold:** 13 is the default `--min-BQ` of `bcftools mpileup`. It is chosen before any benchmark run and must not be changed after one (G3).
 
@@ -1537,16 +1573,32 @@ both `good` assertions pass. After Step 3, all pass.
 
 - [ ] **Step 3: Implement.** Replace `read_bases_at_pos` with a span finder plus a thin wrapper. The CIGAR walk is unchanged.
 
+In `depth_calling/mod.rs` — **not** in `phase_disambiguate.rs`. Task 6 gates
+the same bases inside `depth_calling/haplotype.rs`, and `depth_calling`
+currently imports nothing from `caller` (verified: zero `crate::caller`
+references under `src/depth_calling/`). Defining these in `caller` would make
+Task 6 introduce the first upward dependency in the crate. They belong in the
+lower layer, where the bases are read:
+
 ```rust
-/// Minimum base quality for an allele-discriminating base in phasing: the
+/// Minimum base quality for an allele-discriminating base: the
 /// `bcftools mpileup` default (`--min-BQ 13`). A pattern counts only if every
-/// base it was matched on reaches it.
+/// base it was matched on reaches it. Used by both the fragment-phasing path
+/// (`caller::phase_disambiguate`) and the targeted-rule path
+/// (`depth_calling::haplotype`), so it lives here, in the lower layer.
 pub const PHASE_MIN_BASE_QUALITY: u8 = 13;
 
 /// The value SAM/BAM stores when base qualities are **omitted**. It is not a
 /// quality of 255: it means there is no quality information, so it can never
 /// satisfy `PHASE_MIN_BASE_QUALITY` (review #5).
 pub const QUAL_UNAVAILABLE: u8 = 0xFF;
+```
+
+Then in `phase_disambiguate.rs`, re-export so the documented public path and
+every existing reference keep working:
+
+```rust
+pub use crate::depth_calling::{PHASE_MIN_BASE_QUALITY, QUAL_UNAVAILABLE};
 
 /// Query offset and number of available bases (at most `n`) for a 0-based
 /// genomic position, walking the CIGAR. `None` if the position is not on an
@@ -1696,7 +1748,10 @@ its only non-test callers are the three targeted cn2 rules
 whole targeted path and nothing else. `call_var42127526_var42127556` gains the
 gate as well as the two rules this task changes; that is intended.
 
-Reuse Task 5's constants — do not define a second threshold.
+Reuse Task 5's constants — do not define a second threshold. They live in
+`depth_calling/mod.rs`, so add `use crate::depth_calling::{PHASE_MIN_BASE_QUALITY, QUAL_UNAVAILABLE};`
+at the top of `haplotype.rs`. Do not import from `crate::caller::`: nothing in
+`depth_calling` does, and this task must not be the first.
 
 In `get_bases_per_read`, directly after the existing `if end_pos > seq.len() { continue; }`:
 
@@ -1707,10 +1762,9 @@ In `get_bases_per_read`, directly after the existing `if end_pos > seq.len() { c
                     // "good": both drop the read at this site.
                     let quals = record.qual();
                     if quals.len() < end_pos
-                        || quals[qpos..end_pos].iter().any(|&q| {
-                            q == crate::caller::phase_disambiguate::QUAL_UNAVAILABLE
-                                || q < crate::caller::phase_disambiguate::PHASE_MIN_BASE_QUALITY
-                        })
+                        || quals[qpos..end_pos]
+                            .iter()
+                            .any(|&q| q == QUAL_UNAVAILABLE || q < PHASE_MIN_BASE_QUALITY)
                     {
                         continue;
                     }
@@ -1795,11 +1849,17 @@ In the `call_variants.rs` tests:
     }
 
     #[test]
-    fn phase_signal_42126938_needs_three_informative_reads_to_say_no() {
-        assert_eq!(phase_signal_42126938(2, 2), Some(true));
-        assert_eq!(phase_signal_42126938(1, 5), Some(false));
-        assert_eq!(phase_signal_42126938(0, 2), None);
-        assert_eq!(phase_signal_42126938(0, 0), None);
+    fn phase_signal_42126938_never_says_no() {
+        // Corrected 2026-11-04: an earlier draft of this plan gave this test
+        // two arguments and expected `Some(false)` once three reads were
+        // "informative". That contradicts the rule above and reinstates the
+        // very defect review #5 is about -- absence of the G pattern is not
+        // evidence of the opposite arrangement. The implementer caught the
+        // contradiction and followed the rule, which was right.
+        assert_eq!(phase_signal_42126938(2), Some(true));
+        assert_eq!(phase_signal_42126938(5), Some(true));
+        assert_eq!(phase_signal_42126938(1), None);
+        assert_eq!(phase_signal_42126938(0), None);
     }
 ```
 
@@ -1899,16 +1959,21 @@ rm -rf $R/accepted && cp -r "$(cat $R/logs/task_6/results_dir.txt)" $R/accepted
 - Modify: `docs/reviews/2026-11-04-project-review.md` (add a "Status" line under each P1 heading)
 
 - [ ] **Step 1: README.**
-  - Filter values table: add the row `| `Uncallable_target_sites` | At least one target variant site has no dosage call (no usable reads, or no copy number reached its cutoff). A missing site is not treated as reference, so the call is not a PASS and its confidence is at most MEDIUM. |`.
-  - JSON fields: add `Uncallable_target_sites`, the list of target variants without a dosage call.
-  - "Changes from bcyrius": add one line for each of the six fixes, one sentence each, naming the behaviour that changed.
+  - **No Filter table row.** `Uncallable_target_sites` is a JSON field, not a filter value — 3c was withdrawn, so no filter string and no confidence cap exist. Adding that row would document behaviour the code does not have.
+  - JSON fields: add `Uncallable_target_sites` — the list of target variants that got no dosage call. Say precisely what that means, because there is more than one route to it: no usable reads at the site, too few reads for any copy number to reach its posterior cutoff, or the strand-bias filter (`NOISY_VAR`) having zeroed the alt count. Add the caveat that a handful of sites also have a dedicated caller that can resolve them from elsewhere (`g.42130655-42130656insA` via the haplotype database), so a listed site means "the main dosage path could not call it", not "nothing is known about it" — the field errs toward over-reporting missing evidence, which is the safe direction for a warning. State plainly that it is **reported only**: it does not change the genotype, the filter or the confidence in this release, and that an unobserved site is still treated as reference by the matcher. That is the deferred fix.
+  - JSON fields: add `Phase_pairs_truncated` (added by Task 8). Document all three states and be explicit that `null` is not `false`: `null` = the phase step did not run; `false` = it ran to completion, **including the legitimate case where it ran and had nothing to phase**, so an empty `Phase_pairs` with `false` is a real result and not a failure; `true` = the list was cut short, either by a BAM read error partway or by the file not opening at all. Say that every pair listed is a complete measurement even when the list is truncated — it is the list that is short, not the numbers.
+  - "Changes from bcyrius": one line each for the five fixes that change behaviour (reviews #2, #3, #4, #5, #6), naming what changed. Review #1 changes no behaviour, so it belongs under the new field's description, not here. `Phase_pairs_truncated` is a new output field rather than a behaviour change, so it belongs with the JSON fields too.
 
-- [ ] **Step 2: Review file.** Under each P1 heading, add `**Status (fix/review-p1):** fixed in <short hash>; test <test name>.` For #4, add: "The main allele-counting path (`snp_count.rs`) is unchanged; see Out of scope." For #5, add: "The g.42126938 negative state uses a read-count minimum, not a pattern; open question."
+- [ ] **Step 2: Review file.** Under each P1 heading add `**Status (fix/review-p1):** <status>; test <test name>.` Use these statuses exactly (per G9):
+  - **#1:** `diagnosed and reported, fix deferred to its own plan` — this branch adds the `Uncallable_target_sites` field and the measurement; the matcher still treats an unobserved site as reference. Attach the measurement: the damaged NA19920 takes three target sites to zero reads and 31 sites lose depth, the genotype moves `*1/*4x2` → `*1/*10x2`, and confidence *rises* 0.87 → 0.95.
+  - **#2, #3, #6:** `fixed in <short hash>`.
+  - **#4:** `fixed in <short hash>` plus: "The main allele-counting path (`snp_count.rs`) is unchanged; see Out of scope." Also note that omitted qualities (`0xFF`) and a quality array too short to cover the compared bases both leave phase unresolved.
+  - **#5:** `partly fixed in <short hash>: the unsupported negative branch was removed, not replaced` plus: "`phase_signal_42126938` can no longer return `Some(false)`; no affirmative non-G pattern is established. Open question, no plan."
+  - Do not write "fixed" for #1 or a bare "fixed" for #5.
 
 - [ ] **Step 3: Final gate.**
-  - Run `gate.sh 7` with both `expected_task_7.tsv` and `expected_cumulative_after_7.tsv` empty. With 3c withdrawn, **no task in this plan may change any of the 53 outputs** — which makes the gate strictly stronger than before.
-  - Run the Task 3c Step 5 reproduction again.
-  - Run `cargo clippy --all-targets --locked 2>&1 | grep -cE "^(warning|error)"`. It must be ≤ 68.
+  - Run `gate.sh 7` with both `expected_task_7.tsv` and `expected_cumulative_after_7.tsv` empty. With 3c withdrawn, **no task in this plan may change any of the 53 outputs** — which makes the gate strictly stronger than before. The lint check is inside `gate.sh` and compares against `lint_baseline.txt` from Task 0; there is no separate clippy step and no hardcoded 68.
+  - Re-run the NA19920 reproduction built in 3b Step 1, with the final binary, and record the output. Expected **unchanged from the baseline measurement**: genotype `*1/*10x2`, and `Uncallable_target_sites` non-empty listing at least `g.42128945C>T`, `g.42128936-42128937insGGGGCGAAA` and `g.42128936-42128937insGGGGCGAAAGGGGCGAAA`. The filter stays `PASS` and the confidence stays `0.95 HIGH`: that is the deferred fix, not a regression, and the review file must say so.
 
 - [ ] **Step 4: Commit** (`docs: README and review status for the P1 fixes`, with the G2 trailer). Report to the user:
   - the per-sample comparison output;
@@ -1917,6 +1982,153 @@ rm -rf $R/accepted && cp -r "$(cat $R/logs/task_6/results_dir.txt)" $R/accepted
   - the lint count.
 
 ---
+
+### Task 8: A truncated phase-pair list says so (review follow-up)
+
+**Added 2026-11-04 by user decision**, after the Task 2 review found the one
+place where partial evidence still reaches the output. Task 2 made an aborted
+phasing run stop deciding, which was right, but it still reports the variant
+pairs it had already finished and the JSON array reads as complete. Every
+number in it is a correct, finished measurement — the list is just shorter
+than it would have been, and the only hint is that `Resolved_by` is absent.
+
+The user chose to mark it rather than leave it to the docs. Run this **after
+Task 6 and before Task 7**, so Task 7 documents the field.
+
+**Files:**
+- Modify: `cyrius-rs/src/caller/phase_disambiguate.rs` (`PhaseOutcome`, the
+  abort return at `:687`, the normal return at `:750`)
+- Modify: `cyrius-rs/src/types.rs` (`D6Call`, new field)
+- Modify: `cyrius-rs/src/main.rs` (`phase_pairs_json` at `:184`, the
+  `disambiguate` call site at `~:882`, the JSON record)
+- Test: both modules' tests
+
+**Interfaces:**
+- Produces: `PhaseOutcome.pairs_truncated: bool`,
+  `D6Call.phase_pairs_truncated: Option<bool>`, JSON key
+  `Phase_pairs_truncated`.
+
+**The three states, fixed now:**
+
+| Situation | `Phase_pairs` | `Phase_pairs_truncated` |
+|---|---|---|
+| Phase step did not run | `null` | `null` |
+| Ran to completion | array | `false` |
+| Aborted on a read error | array of the pairs finished | `true` |
+
+`Phase_pairs_truncated` is not one of the fields `compare_runs.py` compares,
+so this task must still show 0 benchmark differences.
+
+- [ ] **Step 1: Write the failing tests.**
+
+In `main.rs` tests, extend the existing `phase_pairs_json` coverage:
+```rust
+    #[test]
+    fn phase_pairs_truncated_is_null_when_the_phase_step_did_not_run() {
+        assert_eq!(phase_pairs_truncated_json(None), serde_json::Value::Null);
+    }
+
+    #[test]
+    fn phase_pairs_truncated_distinguishes_a_complete_list_from_an_aborted_one() {
+        assert_eq!(phase_pairs_truncated_json(Some(false)), serde_json::json!(false));
+        assert_eq!(phase_pairs_truncated_json(Some(true)), serde_json::json!(true));
+    }
+```
+
+In `phase_disambiguate.rs` tests:
+```rust
+    #[test]
+    fn a_completed_run_is_not_marked_truncated() {
+        let records = (0..3).map(|i| spanning_record(&format!("q{i}"), true, true, 30, 0)).collect();
+        let outcome = disambiguate_fixture("complete", records);
+        assert_eq!(outcome.resolved.as_deref(), Some("*1/*A"));
+        assert!(!outcome.pairs_truncated, "a run that finished must not be marked truncated");
+    }
+```
+
+And the one that matters — reuse Task 2's corrupt-BAM construction so the
+abort path is reached for real, not simulated:
+```rust
+    #[test]
+    fn an_aborted_run_marks_its_pair_list_truncated() {
+        // Same corrupt-BGZF fixture Task 2 used: the read fails partway, so
+        // `disambiguate` stops. It still reports the pairs it finished, and
+        // must say that the list is incomplete.
+        let outcome = disambiguate_on_corrupt_fixture();
+        assert_eq!(outcome.resolved, None, "an aborted run must not decide");
+        assert!(outcome.pairs_truncated, "an aborted run must mark its list truncated");
+    }
+```
+
+`disambiguate_on_corrupt_fixture()` builds the fixture the way
+`check_phasing_reports_a_read_error_instead_of_partial_counts` already does in
+this module (Task 2 added it) and calls `disambiguate` on it. Reuse that
+helper rather than writing a second corruption routine; if it is not factored
+out, factor it out and have both tests use it.
+
+- [ ] **Step 2: Run them.**
+
+Run: `cargo test --release --locked truncated 2>&1 | grep -E "^test |left|right|error\["`
+Expected: the three new tests fail to compile (`no field 'pairs_truncated'`,
+`cannot find function 'phase_pairs_truncated_json'`). That is the RED.
+
+- [ ] **Step 3: Implement.**
+
+In `phase_disambiguate.rs`, add to `PhaseOutcome`:
+```rust
+    /// True when the step stopped early (a read error) and `pairs` therefore
+    /// holds only the pairs finished before it stopped. Each listed pair is
+    /// still a complete measurement; the list is not complete. `false` on a
+    /// run that evaluated every differentiating pair.
+    pub pairs_truncated: bool,
+```
+`Default` derives `false`, so the existing `PhaseOutcome::default()` returns
+stay correct: a step that never started has an empty list, not a truncated one.
+
+At the abort return (`:687`) use `pairs_truncated: true`; at the normal return
+(`:750`) use `pairs_truncated: false`.
+
+In `types.rs`, add to `D6Call`:
+```rust
+    /// See `PhaseOutcome.pairs_truncated`. `None` when the phase step did not
+    /// run.
+    pub phase_pairs_truncated: Option<bool>,
+```
+and `None` in `D6Call::no_call`.
+
+In `main.rs`, beside `phase_pairs_json`:
+```rust
+/// `Phase_pairs_truncated`: `null` when the phase step did not run, otherwise
+/// whether `Phase_pairs` is cut short by a read error.
+fn phase_pairs_truncated_json(truncated: Option<bool>) -> serde_json::Value {
+    match truncated {
+        None => serde_json::Value::Null,
+        Some(t) => serde_json::json!(t),
+    }
+}
+```
+Set it from the outcome where `phase_pairs = Some(outcome.pairs);` is assigned
+(capture `outcome.pairs_truncated` before moving `outcome.pairs`), and add
+`"Phase_pairs_truncated": phase_pairs_truncated_json(cyp2d6_call.phase_pairs_truncated),`
+immediately after the `"Phase_pairs"` entry.
+
+- [ ] **Step 4: Run all tests.** Expected: all ok, output pristine.
+
+- [ ] **Step 5: Commit** (`feat(output): Phase_pairs says when a read error cut it short`, with the G2 trailer).
+
+- [ ] **Step 6: Regression gate (G4).** No change is allowed: the new key is not a compared field.
+
+```bash
+R=~/cyrius-research/review-fixes
+: > $R/expected_task_8.tsv
+: > $R/expected_cumulative_after_8.tsv
+$R/gate.sh 8
+# only after GATE PASS:
+rm -rf $R/accepted && cp -r "$(cat $R/logs/task_8/results_dir.txt)" $R/accepted
+```
+
+---
+
 
 ## Out of scope (named so they aren't lost)
 
