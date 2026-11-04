@@ -573,10 +573,14 @@ pub struct PhaseOutcome {
     /// step stopped before counting (not two options, no differentiating
     /// pair, or the BAM could not be opened).
     pub pairs: Vec<PairEvidence>,
-    /// True when the step stopped early (a read error) and `pairs` therefore
-    /// holds only the pairs finished before it stopped. Each listed pair is
-    /// still a complete measurement; the list is not complete. `false` on a
-    /// run that evaluated every differentiating pair.
+    /// True when the step stopped early -- a read error partway through, or
+    /// a BAM that could not be opened at all -- and `pairs` therefore holds
+    /// only the pairs finished before it stopped (none, for an unopenable
+    /// BAM). Each listed pair is still a complete measurement; the list is
+    /// not complete. `false` on a run that evaluated every differentiating
+    /// pair, and also, with an empty list, on a run that completed but had
+    /// nothing to phase (not two options, too few variants, or no
+    /// differentiating pair).
     pub pairs_truncated: bool,
 }
 
@@ -704,7 +708,10 @@ pub fn disambiguate(
         Ok(r) => r,
         Err(e) => {
             log::warn!("phase_disambiguate: failed to open BAM: {}", e);
-            return PhaseOutcome::default();
+            // Unlike the three early returns above (which ran and found
+            // nothing to phase, so `false` is honest), this one aborted
+            // before reading anything: report it as cut short.
+            return PhaseOutcome { resolved: None, pairs: Vec::new(), pairs_truncated: true };
         }
     };
 
@@ -1150,6 +1157,42 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(outcome.resolved, None, "an aborted run must not decide");
         assert!(outcome.pairs_truncated, "an aborted run must mark its list truncated");
+    }
+
+    #[test]
+    fn a_bam_that_cannot_be_opened_marks_the_pair_list_truncated() {
+        // Reaching the reader-open failure: the step stops before counting
+        // anything, so an empty `pairs` with `false` would read as "ran,
+        // nothing to phase" -- indistinguishable from the legitimate empty
+        // case. It must say it was cut short.
+        let dir = fixture_dir("unopenable");
+        let missing = dir.join("does_not_exist.bam");
+        let (call, raw, star_combinations) = phase_tie();
+        let outcome = disambiguate(
+            &call, &raw, &star_combinations, &fixture_lookup(),
+            missing.to_str().unwrap(), "chr22", None, None, false,
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(outcome.resolved, None);
+        assert!(outcome.pairs.is_empty());
+        assert!(outcome.pairs_truncated, "an unopenable BAM must mark the list truncated");
+    }
+
+    #[test]
+    fn a_run_with_nothing_to_phase_is_not_truncated() {
+        // Control for the test above: a run that returns before the reader is
+        // opened because there is nothing to phase (here: not exactly two
+        // diplotype options) is a completed run, not an abort, and must stay
+        // `false`. Without this, a later change could mark every empty list
+        // truncated and nothing would notice.
+        let (_call, _raw, star_combinations) = phase_tie();
+        let outcome = disambiguate(
+            "*1/*1", &["*1_*1".to_string()],
+            &star_combinations, &fixture_lookup(),
+            "/nonexistent/never_read.bam", "chr22", None, None, false,
+        );
+        assert_eq!(outcome, PhaseOutcome::default());
+        assert!(!outcome.pairs_truncated, "a run with nothing to phase is not truncated");
     }
 
     #[test]
