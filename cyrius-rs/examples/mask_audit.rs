@@ -415,7 +415,7 @@ fn main() {
         let obs = vars_of(d);
         let mine: BTreeSet<String> = t.get(&key_of(&obs)).cloned().unwrap_or_default().into_iter().collect();
         let theirs: BTreeSet<String> = d["Raw_star_allele"].as_array().map(|a| a.iter().map(|x| x.as_str().unwrap().to_string()).collect()).unwrap_or_default();
-        let fuzzy = d["Call_info"].as_str().map_or(false, |c| c.starts_with("fuzzy"));
+        let fuzzy = d["Call_info"].as_str().is_some_and(|c| c.starts_with("fuzzy"));
         if fuzzy { fuzzy_n += 1; }
         if mine != theirs && !fuzzy {
             raw_bad += 1;
@@ -466,7 +466,8 @@ fn main() {
             let raw: Vec<String> = raw.into_iter().collect();
             let processed = post_process(&raw, false);
             let (v, call) = verdict(&processed, cnv, spacer, &func);
-            for tl in [if present > 0 { &mut a } else { &mut b }] { tl.cases += 1; }
+            {
+            let tl = if present > 0 { &mut a } else { &mut b }; tl.cases += 1; }
             if base_est { let e = if present > 0 { &mut ea } else { &mut eb }; e.cases += 1;
                 match (&v, &te) {
                     (Verdict::Established(act, ph), Some((ta, tp))) if act == ta && ph == tp => e.est_ok += 1,
