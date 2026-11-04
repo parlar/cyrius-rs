@@ -7,6 +7,7 @@
 use crate::caller::match_star_allele::main_allele_name;
 use crate::depth_calling::snp_count::passing_read;
 use crate::types::StarCombinations;
+pub use crate::depth_calling::{PHASE_MIN_BASE_QUALITY, QUAL_UNAVAILABLE};
 use rust_htslib::bam::{self, Read as BamRead};
 use std::collections::{HashMap, HashSet};
 
@@ -476,7 +477,8 @@ pub fn count_site(
 /// (case-insensitive), so a read too short to hold a pattern cannot match it:
 /// a read ending inside a repeat is not ALT just because what it holds is a
 /// prefix of the ALT. If both patterns match (one is a prefix of the other),
-/// the longer one wins.
+/// the longer one wins. Bases below `PHASE_MIN_BASE_QUALITY` (or without a
+/// quality) give `None`.
 ///
 /// Returns Some(true) for ALT, Some(false) for REF, None if the position is
 /// not covered or neither pattern matches in full.
@@ -486,39 +488,55 @@ fn check_allele_pileup(
     rv: &ResolvedVariant,
 ) -> Option<bool> {
     let check_len = rv.alt_bases.len().max(rv.ref_bases.len());
-    let bases = read_bases_at_pos(record, seq, rv.pos_0based, check_len)?;
-    let bases_upper = bases.to_uppercase();
+    let (qp, len) = query_span_at_pos(record, seq.len(), rv.pos_0based, check_len)?;
+    let bases_upper: String = seq[qp..qp + len].iter().map(|&b| b as char).collect::<String>().to_uppercase();
     let alt_upper = rv.alt_bases.to_uppercase();
     let ref_upper = rv.ref_bases.to_uppercase();
-
-    match (
+    let is_alt = match (
         bases_upper.starts_with(&alt_upper),
         bases_upper.starts_with(&ref_upper),
     ) {
-        (true, true) => Some(alt_upper.len() > ref_upper.len()),
-        (true, false) => Some(true),
-        (false, true) => Some(false),
-        (false, false) => None, // holds neither whole pattern
+        (true, true) => alt_upper.len() > ref_upper.len(),
+        (true, false) => true,
+        (false, true) => false,
+        (false, false) => return None, // holds neither whole pattern
+    };
+    // Every base the winning pattern was matched on must be trustworthy.
+    //
+    // Unavailable quality is NOT high quality (review #5). SAM/BAM stores
+    // "qualities omitted" as 0xFF, which would sail past a `q < 13` test, and
+    // a quality array too short to cover the compared bases means those bases
+    // have no quality at all. Both leave the phase unresolved rather than
+    // deciding it.
+    let compared = if is_alt { alt_upper.len() } else { ref_upper.len() };
+    let quals = record.qual();
+    if quals.len() < qp + compared {
+        return None; // no quality for the bases compared
     }
+    if quals[qp..qp + compared]
+        .iter()
+        .any(|&q| q == QUAL_UNAVAILABLE || q < PHASE_MIN_BASE_QUALITY)
+    {
+        return None;
+    }
+    Some(is_alt)
 }
 
-/// Read `n` bases from a read starting at a 0-based genomic position.
-/// Walks the CIGAR to find the query offset, then extracts bases.
-fn read_bases_at_pos(
+/// Query offset and number of available bases (at most `n`) for a 0-based
+/// genomic position, walking the CIGAR. `None` if the position is not on an
+/// aligned base of the read.
+fn query_span_at_pos(
     record: &rust_htslib::bam::Record,
-    seq: &[u8],
+    seq_len: usize,
     genomic_pos_0based: i64,
     n: usize,
-) -> Option<String> {
-    let record_start = record.pos(); // 0-based
-    let ref_offset = genomic_pos_0based - record_start;
+) -> Option<(usize, usize)> {
+    let ref_offset = genomic_pos_0based - record.pos();
     if ref_offset < 0 {
         return None;
     }
-
     let mut ref_pos = 0i64;
     let mut query_pos = 0usize;
-
     for &cigar_elem in record.cigar().iter() {
         use rust_htslib::bam::record::Cigar::*;
         match cigar_elem {
@@ -526,20 +544,7 @@ fn read_bases_at_pos(
                 let len = len as i64;
                 if ref_pos + len > ref_offset {
                     let qp = query_pos + (ref_offset - ref_pos) as usize;
-                    if qp + n <= seq.len() {
-                        let bases: String = seq[qp..qp + n]
-                            .iter()
-                            .map(|&b| b as char)
-                            .collect();
-                        return Some(bases);
-                    } else if qp < seq.len() {
-                        let bases: String = seq[qp..seq.len()]
-                            .iter()
-                            .map(|&b| b as char)
-                            .collect();
-                        return Some(bases);
-                    }
-                    return None;
+                    return if qp < seq_len { Some((qp, n.min(seq_len - qp))) } else { None };
                 }
                 ref_pos += len;
                 query_pos += len as usize;
@@ -1486,5 +1491,102 @@ mod tests {
         };
         assert_eq!(pileup(&record, &longer_ref), Some(false), "the longer REF must win");
         assert_eq!(pileup(&record, &longer_alt), Some(true), "the longer ALT must win");
+    }
+
+    #[test]
+    fn base_quality_zero_reads_do_not_decide_phase() {
+        let records = (0..3).map(|i| spanning_record(&format!("q{i}"), true, true, 0, 0)).collect();
+        assert_eq!(disambiguate_fixture("bq0", records).resolved, None);
+    }
+
+    #[test]
+    fn the_same_reads_at_base_quality_30_do_decide_phase() {
+        // Control: the test above must fail for quality, not for layout.
+        let records = (0..3).map(|i| spanning_record(&format!("q{i}"), true, true, 30, 0)).collect();
+        assert_eq!(disambiguate_fixture("bq30", records).resolved.as_deref(), Some("*1/*A"));
+    }
+
+    #[test]
+    fn quality_12_is_below_the_gate_and_quality_13_is_not() {
+        // The boundary, both sides. 13 is the threshold, so 13 must decide.
+        let at = |q: u8| {
+            let records = (0..3).map(|i| spanning_record(&format!("q{i}"), true, true, q, 0)).collect();
+            disambiguate_fixture(&format!("bq{q}"), records).resolved
+        };
+        assert_eq!(at(12), None);
+        assert_eq!(at(13).as_deref(), Some("*1/*A"));
+    }
+
+    #[test]
+    fn reads_without_base_qualities_do_not_decide_phase() {
+        // A BAM with qualities omitted stores 0xFF. That is "unknown", not
+        // "excellent", so it must not decide (review #5).
+        let records = (0..3)
+            .map(|i| spanning_record(&format!("q{i}"), true, true, QUAL_UNAVAILABLE, 0))
+            .collect();
+        assert_eq!(disambiguate_fixture("bqmissing", records).resolved, None);
+    }
+
+    #[test]
+    fn only_the_compared_bases_quality_matters() {
+        // Low quality ON a discriminating base rejects; low quality on a
+        // neighbouring base does not. This is what proves the gate reads the
+        // compared span and not the whole read.
+        let early = (FIXTURE_POS_EARLY - 990) as usize;
+        let with_low_at = |offset: usize| {
+            let records = (0..3)
+                .map(|i| {
+                    let mut quals = vec![30u8; 150];
+                    quals[offset] = 2;
+                    spanning_record_quals(&format!("q{i}"), true, true, quals, 0)
+                })
+                .collect();
+            disambiguate_fixture(&format!("low{offset}"), records).resolved
+        };
+        assert_eq!(with_low_at(early), None, "low quality on the compared base must reject");
+        assert_eq!(
+            with_low_at(early + 20).as_deref(),
+            Some("*1/*A"),
+            "low quality on an unrelated base must not reject"
+        );
+    }
+
+    /// A single aligned record at `pos` with an all-`Match` CIGAR over `seq`
+    /// and the given per-base qualities.
+    fn pileup_record_with_quals(pos: i64, seq: &[u8], quals: &[u8]) -> bam::Record {
+        let cigar = bam::record::CigarString(vec![bam::record::Cigar::Match(seq.len() as u32)]);
+        let mut record = bam::Record::new();
+        record.set(b"r", Some(&cigar), seq, quals);
+        record.set_pos(pos);
+        record
+    }
+
+    #[test]
+    fn one_bad_base_inside_a_multi_base_pattern_rejects_the_whole_pattern() {
+        // A 4-base ALT pattern where only the third base is poor. The pattern
+        // still matches the sequence, so without the gate it would be
+        // accepted; every compared base must reach the threshold.
+        let rv = ResolvedVariant {
+            pos_0based: 1000,
+            alt_bases: "ACGT".to_string(),
+            ref_bases: "A".to_string(),
+        };
+        let seq = b"ACGT".to_vec();
+        let good = pileup_record_with_quals(1000, &seq, &[30, 30, 30, 30]);
+        let bad = pileup_record_with_quals(1000, &seq, &[30, 30, 2, 30]);
+        assert_eq!(check_allele_pileup(&good, &seq, &rv), Some(true));
+        assert_eq!(check_allele_pileup(&bad, &seq, &rv), None);
+    }
+
+    #[test]
+    fn a_pattern_whose_qualities_are_omitted_is_rejected() {
+        let rv = ResolvedVariant {
+            pos_0based: 1000,
+            alt_bases: "ACGT".to_string(),
+            ref_bases: "A".to_string(),
+        };
+        let seq = b"ACGT".to_vec();
+        let omitted = pileup_record_with_quals(1000, &seq, &[QUAL_UNAVAILABLE; 4]);
+        assert_eq!(check_allele_pileup(&omitted, &seq, &rv), None);
     }
 }
