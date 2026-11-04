@@ -1094,7 +1094,8 @@ pub fn match_star(
     } else {
         let mut var_observed_68 = var_observed.clone();
         let matchtag = call_star68(&mut var_observed_68, &unknown, cnvcall, dic);
-        let unmatched_68 = matchtag.call_info.as_deref() == Some("no_match");
+        let unknown_sites_unmatched =
+            !unknown.is_empty() && matchtag.call_info.as_deref() == Some("no_match");
         let final_call_clean =
             get_final_call_clean(&matchtag.star_call, cnvcall, spacer_cn);
         StarCall {
@@ -1102,7 +1103,7 @@ pub fn match_star(
             variants_called: Some(var_observed_68.join(" ")),
             raw_call: Some(matchtag.candidate),
             clean_call: final_call_clean,
-            unknown_sites_unmatched: !unknown.is_empty() && unmatched_68,
+            unknown_sites_unmatched,
         }
     }
 }
@@ -1173,6 +1174,36 @@ mod tests {
         assert!(none_fit.unknown_sites_unmatched);
         let no_holes = match_star(&mut obs(&["g.not_a_site"]), &[], "cn2", None, &c, &exon9, None, None, &features);
         assert!(!no_holes.unknown_sites_unmatched);
+    }
+
+    #[test]
+    fn an_unmatched_sample_keeps_its_fallback_answer_and_is_flagged() {
+        // NA19908 at 25 % depth (measured): the hole at g.42128945C>T leaves no
+        // compatible key, so the fuzzy fallback answers (decision D1-a) and the
+        // call is flagged. A no-call here (D1-b) would fail this test.
+        use crate::caller::construct_star_table::{get_hap_table, TableKind};
+        let c = get_hap_table(crate::data::STAR_TABLE, &[TableKind::Dhap2]);
+        let exon9 = crate::types::Exon9Values {
+            exon9_cn: None, exon9cn_in_consensus: None, exon9_raw_site1: 0.0, exon9_raw_site2: 0.0,
+        };
+        let features = FeatureFlags {
+            strand_bias_all: false, fuzzy_match: true, phase_disambiguate: false,
+            phase_readpair: false, changepoint_hybrid: false, het_check: false,
+            spacer_cn_check: false, consistency_check: false, hmm_cnv: false,
+            clip_evidence: false, d7_depth: false, kmer_validation: false,
+        };
+        let vars = obs(&["g.42127941G>A", "g.42129075C>T", "g.42130715C>T"]);
+        let call = match_star(&mut vars.clone(), &obs(&["g.42128945C>T"]), "cn2", Some(2), &c, &exon9, None, None, &features);
+        assert!(call.unknown_sites_unmatched);
+        let pairs = |s: &str| -> std::collections::BTreeSet<Vec<String>> {
+            s.split(';').map(|d| { let mut h: Vec<String> = d.split('/').map(String::from).collect(); h.sort(); h }).collect()
+        };
+        assert_eq!(pairs(call.clean_call.as_deref().expect("D1-a keeps the fallback answer")),
+                   pairs("*1/*46;*43/*45;*12/*43"));
+        // Same input, no unknown sites: same fallback answer, not flagged.
+        let plain = match_star(&mut vars.clone(), &[], "cn2", Some(2), &c, &exon9, None, None, &features);
+        assert!(!plain.unknown_sites_unmatched);
+        assert_eq!(plain.clean_call, call.clean_call);
     }
 
     #[test]
