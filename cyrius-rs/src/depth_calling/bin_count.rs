@@ -300,7 +300,7 @@ pub fn header_drops_multimappers(header_text: &str) -> bool {
     })
 }
 
-/// Replace a PASS or Fuzzy_match filter with `"Multimapper_depleted"` when
+/// Replace a PASS, Fuzzy_match, Unknown_sites_unmatched or Unknown_sites_resolved filter with `"Multimapper_depleted"` when
 /// the header shows a step that drops multi-mapped reads
 /// ([`header_drops_multimappers`]): the input does not meet the caller's
 /// assumption, so the call must not read as a clean pass. The genotype is
@@ -311,7 +311,7 @@ pub fn downgrade_filter_for_multimapper_depletion(
     header_drops_multimappers: Option<bool>,
 ) -> Option<String> {
     match (filter.as_deref(), header_drops_multimappers) {
-        (Some("PASS" | "Fuzzy_match"), Some(true)) => Some("Multimapper_depleted".to_string()),
+        (Some("PASS" | "Fuzzy_match" | "Unknown_sites_unmatched" | "Unknown_sites_resolved"), Some(true)) => Some("Multimapper_depleted".to_string()),
         _ => filter,
     }
 }
@@ -1157,6 +1157,8 @@ mod tests {
         let depleted = Some("Multimapper_depleted".to_string());
         assert_eq!(flag(Some("PASS"), Some(true)), depleted);
         assert_eq!(flag(Some("Fuzzy_match"), Some(true)), depleted);
+        assert_eq!(flag(Some("Unknown_sites_unmatched"), Some(true)), depleted);
+        assert_eq!(flag(Some("Unknown_sites_resolved"), Some(true)), depleted);
         assert_eq!(flag(Some("PASS"), Some(false)), Some("PASS".to_string()));
         // Header not read: no flag.
         assert_eq!(flag(Some("PASS"), None), Some("PASS".to_string()));

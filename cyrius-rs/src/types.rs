@@ -108,6 +108,16 @@ pub struct StarCall {
     pub variants_called: Option<String>,
     pub raw_call: Option<Vec<String>>,
     pub clean_call: Option<String>,
+    /// True when the sample had unknown target sites and no table key fit even
+    /// with them masked. Any call then came from the retry or fuzzy fallback,
+    /// which treats an unknown site as absent. Such a call never reaches PASS.
+    pub unknown_sites_unmatched: bool,
+    /// True when unknown target sites were masked and the masked lookup kept
+    /// more than one candidate. A later read-evidence step may narrow such a set
+    /// to one answer; that answer is not a clean call, so it never reads PASS.
+    /// Computed from the masked result, before retry, fuzzy and cn2 phase rules.
+    /// Never true together with `unknown_sites_unmatched`.
+    pub unknown_sites_ambiguous: bool,
 }
 
 /// Compact, serializable summary of k-mer validation for the output.

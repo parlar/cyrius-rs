@@ -8,6 +8,7 @@ pub mod construct_star_table;
 pub mod d7_depth;
 pub mod diplotype_caller;
 pub mod fuzzy_match;
+pub mod genotype_filter;
 pub mod het_check;
 pub mod hmm_cnv;
 pub mod match_star_allele;
