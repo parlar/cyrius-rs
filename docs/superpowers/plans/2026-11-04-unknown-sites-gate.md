@@ -305,3 +305,59 @@ implementation plan should not let a resolver pick on a masked set reach
 `PASS` without a stated rule for it.
 
 **Next:** the implementation plan.
+
+## Result: implementation (Task 5 of the implementation plan) — measured at 176cb35
+
+Runs: `~/cyrius-research/unknown-sites/final/run.sh` (same flags as the benchmark),
+outputs in `~/cyrius-research/unknown-sites/final/{dmg,p25,p10}`, audit with
+`mask_audit --real` in `final/real_p25.txt`, `final/real_p10.txt`, field diffs
+against the `a1b919b` thinned outputs in `final/diff_p25.txt`, `final/diff_p10.txt`.
+
+| Input | Locked expectation | Measured | |
+|---|---|---|---|
+| 53 full-depth samples | 0 differing field-values | gates 1, 2, 3, 4 and 4b: 0 of 53 each | met |
+| Damaged NA19920 | 9 diplotypes as unordered pairs; `More_than_one_possible_genotype`; `unknown_effect`; long-read true; 0.80 MEDIUM | `*1/*10x2;*1/*147x2;*1/*4x2;*145/*147x2;*4x2/*145;*4/*4x2;*10x2/*145;*4/*10x2;*4/*147x2`, same 9 pairs; `More_than_one_possible_genotype`; `unknown_effect`; true; 0.80 MEDIUM; resolver posterior 0.111 (a 9-way tie) | met |
+| NA21105, 25 % | `*3/*111`, `PASS`, resolver | `*3/*111`, `PASS`, `Resolved_by` resolver (was `*2/*3` `Fuzzy_match`) | met |
+| NA20289, 25 % | `*6/*11`, `LowQ_coverage_MAD` | `*6/*11`, `LowQ_coverage_MAD` (was `Fuzzy_match`) | met |
+| HG02373, 25 % | no `_`; `*14/*36+*10` among options | `*14/*36+*10;*36+*10/*65;*36+*10/*114` | met |
+| NA19908, 25 % (D1 case) | unchanged | unchanged: `*1/*46;*43/*45;*12/*43`, `More_than_one_possible_genotype` | met |
+| HG03259, 25 % (single-copy path) | PREDICTED (not run) | unchanged: `*5/*106`, `PASS` (1 unknown site; masked lookup on the single-copy table still finds only `*106`). At 10 %: unchanged, `LowQ_coverage_MAD`, 5 unknown sites | recorded |
+
+**Changed samples.** 25 %: 3 of 53 (NA21105, NA20289, HG02373), 11 field-values,
+every one in the table above. 10 %: 0 of 53.
+
+**Audit (`mask_audit --real`).** 25 %: confidently wrong with holes 1 -> **0**
+(NA21105 fixed); confidently wrong without holes 0 -> 0; ESTABLISHED-WRONG 0.
+10 %: 0 -> 0 throughout.
+
+**Stop rules:** none triggered (no full-depth difference; no run became
+confidently wrong; the NA19920 set equals the locked 9).
+
+**Not exercised by any run.** The new filter value `Unknown_sites_unmatched`:
+NA19908 is the only D1 case and its ambiguity filter comes first. Pinned instead
+by the unit test `an_unmatched_sample_keeps_its_fallback_answer_and_is_flagged`
+(NA19908's measured inputs).
+
+**Open, carried to the user.** The gate record's B2 caveat (a resolver pick on a
+masked set reaching `PASS` needs a stated rule) was not addressed by the
+implementation plan; NA21105 reaches `PASS` that way. See the final report.
+
+**Found while measuring (not in the plan).**
+- *Tie order is not reproducible.* The same binary run twice on the damaged
+  NA19920 (0cf2b80 code, then 176cb35, a behaviour-neutral refactor) gives the
+  same 9 diplotypes in a different order. The resolver sorts by posterior, then
+  by name (`resolver.rs` ~L38), but the 9 posteriors are equal only to about
+  1e-13 (0.11111111111112557) and differ in the last bits between runs, so the
+  name tie-break never fires. Only the order changes: the set, the filter and
+  the ambiguous/resolved decision (margin 0.10) do not. The resolver behaved
+  this way before this branch; masking makes many-way ties reachable. 25 % and
+  10 % sets: identical between the two runs.
+- *Size of a masked set with many unknown sites* (probe on the real tables,
+  empty variant list): 2-copy table 14 / 35 / 70 / 140 unknown sites ->
+  15 / 136 / 378 / 10,153 diplotypes; 3-copy table -> 25 / 256 / 729 / 20,164
+  (a 219 KB genotype string). Scan <= 0.11 s, formatting <= 0.25 s. Nothing
+  downstream caps the set; resolver time on such a set is not measured. Not
+  reached in any run: real thinned files had at most 5 unknown sites, and
+  NA19920 with reads removed at every 10th or every 4th target site (14 or 35
+  sites, `~/cyrius-research/unknown-sites/many_holes/`) is refused at the
+  copy-number step (no call, ~1 s).
