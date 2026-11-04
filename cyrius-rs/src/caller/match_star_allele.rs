@@ -54,8 +54,75 @@ pub(crate) fn convert_to_main_allele(list_of_star: &[String]) -> Vec<String> {
     out
 }
 
+/// Copy counts of every variant that is not an unknown site.
+fn known_site_counts<'a>(
+    vars: impl Iterator<Item = &'a str>,
+    unknown: &[String],
+) -> std::collections::BTreeMap<&'a str, usize> {
+    let mut counts = std::collections::BTreeMap::new();
+    for v in vars {
+        if !unknown.iter().any(|u| u == v) {
+            *counts.entry(v).or_insert(0) += 1;
+        }
+    }
+    counts
+}
+
+/// Keys whose variants agree with `var_observed` at every site not in
+/// `unknown`; an unknown site may carry any number of copies. A full scan:
+/// measured 0.80 s on the largest table (1,551,523 keys), 0.14 s or less on
+/// the others. Only called when `unknown` is non-empty.
+fn compatible_keys<'k>(
+    var_observed: &[String],
+    unknown: &[String],
+    keys: impl Iterator<Item = &'k String>,
+) -> Vec<&'k String> {
+    let target = known_site_counts(var_observed.iter().map(String::as_str), unknown);
+    keys.filter(|k| {
+        let vars = if k.as_str() == "NA" { "" } else { k.as_str() };
+        known_site_counts(vars.split('_').filter(|v| !v.is_empty()), unknown) == target
+    })
+    .collect()
+}
+
+/// get_star when some sites are unknown: every compatible candidate is kept
+/// and no frequency rule narrows the set.
+fn get_star_masked(var_observed: &[String], unknown: &[String], dic: &HashMap<String, Vec<String>>) -> RawStarCall {
+    let mut raw: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for k in compatible_keys(var_observed, unknown, dic.keys()) {
+        raw.extend(dic[k].iter().cloned());
+    }
+    raw_to_call(raw.into_iter().collect())
+}
+
+fn get_star_cn1_masked(var_observed: &[String], unknown: &[String], dic: &HashMap<String, String>) -> RawStarCall {
+    let raw: std::collections::BTreeSet<String> =
+        compatible_keys(var_observed, unknown, dic.keys()).into_iter().map(|k| dic[k].clone()).collect();
+    raw_to_call(raw.into_iter().collect())
+}
+
+/// Labels a masked candidate list the way get_star labels an exact one,
+/// minus the rare-allele rule.
+fn raw_to_call(raw: Vec<String>) -> RawStarCall {
+    if raw.is_empty() {
+        return RawStarCall { call_info: Some("no_match".to_string()), candidate: vec![], star_call: vec![] };
+    }
+    let processed = convert_to_main_allele(&raw);
+    let info = if raw.len() == 1 {
+        "unique_match"
+    } else if processed.len() == 1 {
+        "unique_star"
+    } else {
+        "more_than_one_match"
+    };
+    RawStarCall { call_info: Some(info.to_string()), candidate: raw, star_call: processed }
+}
+
 /// Return the star allele call and assign tags.
-fn get_star(var_observed: &[String], dic: &HashMap<String, Vec<String>>) -> RawStarCall {
+fn get_star(var_observed: &[String], unknown: &[String], dic: &HashMap<String, Vec<String>>) -> RawStarCall {
+    if !unknown.is_empty() {
+        return get_star_masked(var_observed, unknown, dic);
+    }
     let mut sorted = var_observed.to_vec();
     sorted.sort();
     let var_list = get_var_list(&sorted);
@@ -124,7 +191,10 @@ fn get_star(var_observed: &[String], dic: &HashMap<String, Vec<String>>) -> RawS
 }
 
 /// Get star for CN=1 (dhap returns a single String, not Vec).
-fn get_star_cn1(var_observed: &[String], dic: &HashMap<String, String>) -> RawStarCall {
+fn get_star_cn1(var_observed: &[String], unknown: &[String], dic: &HashMap<String, String>) -> RawStarCall {
+    if !unknown.is_empty() {
+        return get_star_cn1_masked(var_observed, unknown, dic);
+    }
     let mut sorted = var_observed.to_vec();
     sorted.sort();
     let var_list = get_var_list(&sorted);
@@ -152,7 +222,7 @@ fn call_star68_cn1(
     cnvcall: &str,
     dic: &HashMap<String, String>,
 ) -> RawStarCall {
-    let mut matchtag = vec![get_star_cn1(var_observed, dic)];
+    let mut matchtag = vec![get_star_cn1(var_observed, &[], dic)];
     let cn = cnvcall.split('_').filter(|&s| s == "star68").count();
     let count0692 = var_observed
         .iter()
@@ -163,7 +233,7 @@ fn call_star68_cn1(
         if let Some(pos) = var_observed.iter().position(|v| v == "g.42130692G>A") {
             var_observed.remove(pos);
         }
-        matchtag.push(get_star_cn1(var_observed, dic));
+        matchtag.push(get_star_cn1(var_observed, &[], dic));
     }
 
     if matchtag.len() == 1 {
@@ -222,7 +292,7 @@ fn call_star68(
     cnvcall: &str,
     dic: &HashMap<String, Vec<String>>,
 ) -> RawStarCall {
-    let mut matchtag = vec![get_star(var_observed, dic)];
+    let mut matchtag = vec![get_star(var_observed, &[], dic)];
     let cn = cnvcall.split('_').filter(|&s| s == "star68").count();
     let count0692 = var_observed
         .iter()
@@ -233,7 +303,7 @@ fn call_star68(
         if let Some(pos) = var_observed.iter().position(|v| v == "g.42130692G>A") {
             var_observed.remove(pos);
         }
-        matchtag.push(get_star(var_observed, dic));
+        matchtag.push(get_star(var_observed, &[], dic));
     }
 
     if matchtag.len() == 1 {
@@ -814,7 +884,7 @@ fn retry_add_one_copy(
             variant_tried.push(variant_to_try);
             let mut var_new = var_observed.to_vec();
             var_new.push(variant_to_try.clone());
-            let matchtag_new = get_star(&var_new, dic);
+            let matchtag_new = get_star(&var_new, &[], dic);
             let unambiguous = matches!(
                 matchtag_new.call_info.as_deref(),
                 Some("unique_match") | Some("unique_star")
@@ -875,7 +945,7 @@ pub fn match_star(
                 clean_call: final_call_clean,
             };
         }
-        let mut matchtag = get_star_cn1(var_observed, &star_combinations.dhap);
+        let mut matchtag = get_star_cn1(var_observed, &[], &star_combinations.dhap);
         // Feature: fuzzy_match — try fuzzy matching on no_match
         if features.fuzzy_match && matchtag.call_info.as_deref() == Some("no_match") {
             if let Some(fuzzy) = fuzzy_match::fuzzy_match_star_cn1(var_observed, &star_combinations.dhap) {
@@ -924,7 +994,7 @@ pub fn match_star(
     );
 
     if !cnvcall.contains("star68") {
-        let mut matchtag = get_star(var_observed, dic);
+        let mut matchtag = get_star(var_observed, &[], dic);
 
         // For cn3-cn6, try adding a variant on no_match
         if cnvcall.starts_with("cn")
@@ -1012,12 +1082,83 @@ mod tests {
             .collect()
     }
 
+    fn obs(v: &[&str]) -> Vec<String> { v.iter().map(|s| s.to_string()).collect() }
+
+    #[test]
+    fn an_unknown_site_never_acts_as_a_reference_call() {
+        // Today "B unseen" means "no B": only *x. Masked, *y (which has B) stays.
+        let d = dic(&[("g.A", &["*x"]), ("g.A_g.B", &["*y"])]);
+        let call = get_star(&obs(&["g.A"]), &obs(&["g.B"]), &d);
+        assert_eq!(call.candidate, obs(&["*x", "*y"]));
+        assert_eq!(get_star(&obs(&["g.A"]), &[], &d).candidate, obs(&["*x"]));
+    }
+
+    #[test]
+    fn unknown_sites_are_masked_together() {
+        let d = dic(&[("g.A", &["*x"]), ("g.A_g.B_g.C", &["*y"]), ("g.A_g.C", &["*z"])]);
+        let call = get_star(&obs(&["g.A"]), &obs(&["g.B", "g.C"]), &d);
+        assert_eq!(call.candidate, obs(&["*x", "*y", "*z"]));
+    }
+
+    #[test]
+    fn a_known_site_still_excludes_candidates() {
+        // Masking B must not admit *w, which lacks the observed A.
+        let d = dic(&[("g.A", &["*x"]), ("g.B", &["*w"])]);
+        assert_eq!(get_star(&obs(&["g.A"]), &obs(&["g.B"]), &d).candidate, obs(&["*x"]));
+    }
+
+    #[test]
+    fn a_frequency_rule_does_not_narrow_a_masked_set() {
+        // *34 is in RARE_ALLELES. Unmasked, the rare rule picks the common one.
+        let d = dic(&[("g.A", &["*1_*2"]), ("g.A_g.B", &["*1_*34"])]);
+        let masked = get_star(&obs(&["g.A"]), &obs(&["g.B"]), &d);
+        assert_eq!(masked.star_call, obs(&["*1_*2", "*1_*34"]));
+        assert_eq!(masked.call_info.as_deref(), Some("more_than_one_match"));
+    }
+
+    #[test]
+    fn an_irrelevant_unknown_site_gives_the_exact_answer_on_the_real_table() {
+        // Scan path vs exact path, every 100th key of the real cn2 table.
+        let c = crate::caller::construct_star_table::get_hap_table(
+            crate::data::STAR_TABLE, &[crate::caller::construct_star_table::TableKind::Dhap2]);
+        let t = &c.dhap2;
+        let mut keys: Vec<&String> = t.keys().collect();
+        keys.sort();
+        let none = obs(&["g.not_a_site"]);
+        let mut checked = 0;
+        for k in keys.iter().step_by(100) {
+            let vars: Vec<String> = if *k == "NA" { vec![] } else { k.split('_').map(String::from).collect() };
+            let mut exact = t[*k].clone();
+            exact.sort();
+            exact.dedup(); // the masked path returns a set
+            assert_eq!(get_star(&vars, &none, t).candidate, exact, "key {k}");
+            checked += 1;
+        }
+        assert!(checked >= 200, "only {checked} keys checked");
+    }
+
+    #[test]
+    fn damaged_na19920_keeps_its_true_genotype_among_the_candidates() {
+        // Measured in gate B1: 5 unknown sites, 9 candidate multisets.
+        let c = crate::caller::construct_star_table::get_hap_table(
+            crate::data::STAR_TABLE, &[crate::caller::construct_star_table::TableKind::Dhap3Pair]);
+        let observed = obs(&["g.42126611C>G", "g.42126611C>G", "g.42129130C>G", "g.42129130C>G",
+                             "g.42129754G>A", "g.42129754G>A", "g.42130692G>A", "g.42130692G>A"]);
+        let unknown = obs(&["g.42128936-42128937insGGGGCGAAAGGGGCGAAA", "g.42128936-42128937insGGGGCGAAA",
+                            "g.42128932C>T", "g.42128933G>A", "g.42128945C>T"]);
+        let call = get_star(&observed, &unknown, &c.dhap3pair);
+        assert_eq!(call.star_call, obs(&["*10_*10_*145", "*10_*10_*4", "*145_*147_*147", "*145_*4_*4",
+            "*147_*147_*4", "*1_*10_*10", "*1_*147_*147", "*1_*4_*4", "*4_*4_*4"]));
+        // Unmasked, today's answer: the single wrong *1_*10_*10.
+        assert_eq!(get_star(&observed, &[], &c.dhap3pair).star_call, obs(&["*1_*10_*10"]));
+    }
+
     #[test]
     fn get_star_keeps_candidates_when_all_are_rare() {
         // Every candidate carries a rare allele and they differ after main-allele
         // conversion: the rare filter must not empty the call.
         let d = dic(&[("g.X", &["*34_*1", "*39_*1"])]);
-        let out = get_star(&["g.X".to_string()], &d);
+        let out = get_star(&["g.X".to_string()], &[], &d);
         assert_eq!(out.call_info.as_deref(), Some("more_than_one_match"));
         assert_eq!(out.star_call, vec!["*1_*34".to_string(), "*1_*39".to_string()]);
     }
@@ -1025,7 +1166,7 @@ mod tests {
     #[test]
     fn star_4_013_keeps_its_name() {
         let d = dic(&[("g.X", &["*1_*4.013"])]);
-        let out = get_star(&["g.X".to_string()], &d);
+        let out = get_star(&["g.X".to_string()], &[], &d);
         assert_eq!(out.star_call, vec!["*1_*4.013".to_string()]);
     }
 
