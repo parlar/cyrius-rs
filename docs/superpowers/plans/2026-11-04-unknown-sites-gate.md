@@ -202,3 +202,64 @@ site (other causes, such as copy number at low depth); how many of the S2
 runs carry `PASS`; and how often the truth falls out of the masked
 candidate set, meaning a site the matcher still trusted was itself wrong.
 That last number is the limit of masking.
+
+---
+
+## Results so far (B1 and the thinned-data addendum; B2 not yet run)
+
+Raw outputs: `~/cyrius-research/unknown-sites/b1_output.txt`,
+`real_full.txt`, `real_p25.txt`, `real_p10.txt`. Thinned BAMs and their
+caller outputs: `~/cyrius-research/unknown-sites/thinned/`.
+
+**Controls (all passed before any result was read).** Exact lookup finds the
+same raw candidates as the pipeline on 45/45 main-path samples; the formatted
+call matches the reported genotype on 43/43 (2 changed by fragment phasing,
+skipped). Masking by enumeration and by full scan agree on NA19920 (9 keys
+each). The real-holes mode reports 0 holes and 0 confidently wrong calls on
+the 53 full-depth outputs (36 calls established, so the comparison ran), and
+it **does** flag the damaged NA19920 as confidently wrong at `PASS`.
+
+**K1 — PASS.** Damaged NA19920, 5 unknown sites masked: 9 candidates
+(`*1/*4x2` among them), activity 0.0 to 1.5 plus several of unknown
+function. Verdict: unresolved. All 9 differ only at the two zero-read sites
+(the 9-base insertion and the splice site); the two low-read sites are 0 in
+every candidate, so the two-value mask would change nothing here.
+
+**K3 — PASS, and not vacuously.** 7,155 single-site dropouts on the 45
+main-path samples: 0 established-wrong. In 167 of them masking **added**
+candidates and still established a phenotype, all correct. Today's exact
+lookup on the 197 dropouts of a present variant: 28 right, **17 confidently
+wrong**, 16 unresolved, 124 no exact match. Restricted to the 30 samples
+whose unmasked call establishes a phenotype: present-variant dropouts 98
+correct / 37 unresolved / 0 wrong; absent-variant dropouts 3,514 / 1,121 / 0.
+15 of 45 samples never establish a phenotype even unmasked: each carries an
+allele with no function row.
+
+**Skipping the rare-allele rule was not shown to be necessary.** It would
+have changed 66 cases and made 0 of them wrong. It stays skipped on
+principle (H19); this is caution, not a measured need.
+
+**Addendum — S2, so continue.** At 25 % of reads, 12 of 53 samples get a
+genotype; 41 are refused at the copy-number step (37 with no CNV tag, 4 with
+no total CN). 7 runs list uncallable sites. **One** is confidently wrong with
+holes: NA21105, called `*2/*3` (activity 1.0, Intermediate) against truth
+`*3/*111` (Indeterminate: `*111` has no function row), 5 holes, filter
+`Fuzzy_match`, **not PASS**. Masking its 5 holes gives
+`*111/*3;*2/*3;*3/*30`, unresolved, truth included. K3 on the 6 real-hole
+runs masking can handle: 0 established-wrong. Truth fell out of the masked
+set twice: NA18973 (`*2/*21` for truth `*1/*21`; a trusted site was wrong,
+phenotype still right) and NA19908 (no compatible key, so the fallback). At
+10 %, 2 of 53 get a genotype and neither is wrong. Confidently wrong with
+**no** holes: 0 at either level.
+
+**Honest reading.** The defect is real in thinned data but rare, and the one
+real instance was already flagged `Fuzzy_match`. The only `PASS` instance is
+still the hand-made NA19920. Thin WGS is mostly refused before matching.
+Data where copy number succeeds but single sites are missing (for example
+capture gaps) has not been measured.
+
+**Found along the way, must be fixed in any implementation:**
+`get_final_call_clean` prints raw multisets for any non-cn2 group with more
+than one candidate. It occurs on real data at 25 %: HG02373 is printed
+`*10_*14_*36;*10_*36_*65;*10_*114_*36`, so its phenotype reads as
+Indeterminate although the truth `*14/*36+*10` is the first candidate.
