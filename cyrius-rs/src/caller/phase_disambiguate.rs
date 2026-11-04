@@ -220,13 +220,42 @@ fn phase_read_passes(record: &bam::Record) -> bool {
         && passing_read(record, false, false)
 }
 
+/// What the reads of one fragment showed at one site.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum SiteObs {
+    #[default]
+    Unseen,
+    /// ALT (`true`) or REF (`false`), with every read agreeing.
+    Allele(bool),
+    /// Reads of the same fragment disagree: the site is not evidence.
+    Conflict,
+}
+
+impl SiteObs {
+    /// Add one read's observation. Order-independent: any disagreement is a
+    /// conflict for good, so no read can overwrite another.
+    fn merge(self, seen: Option<bool>) -> SiteObs {
+        match (self, seen) {
+            (s, None) => s,
+            (SiteObs::Unseen, Some(a)) => SiteObs::Allele(a),
+            (SiteObs::Allele(old), Some(a)) if old == a => SiteObs::Allele(a),
+            (SiteObs::Allele(_), Some(_)) | (SiteObs::Conflict, Some(_)) => SiteObs::Conflict,
+        }
+    }
+
+    fn allele(self) -> Option<bool> {
+        match self {
+            SiteObs::Allele(a) => Some(a),
+            _ => None,
+        }
+    }
+}
+
 /// What one fragment (all reads sharing a qname) showed at a pair's two sites.
 #[derive(Debug, Default)]
 struct Fragment {
-    /// ALT (`Some(true)`), REF (`Some(false)`) or not seen at the first site.
-    allele1: Option<bool>,
-    /// The same at the second site.
-    allele2: Option<bool>,
+    site1: SiteObs,
+    site2: SiteObs,
     /// Highest MAPQ over every read of this qname that passed the filters.
     max_mapq: u8,
 }
@@ -243,12 +272,8 @@ fn observe_read(
     let allele1 = check_allele_pileup(record, &seq, rv1);
     let allele2 = check_allele_pileup(record, &seq, rv2);
     let entry = fragments.entry(read_name).or_default();
-    if allele1.is_some() {
-        entry.allele1 = allele1;
-    }
-    if allele2.is_some() {
-        entry.allele2 = allele2;
-    }
+    entry.site1 = entry.site1.merge(allele1);
+    entry.site2 = entry.site2.merge(allele2);
     entry.max_mapq = entry.max_mapq.max(record.mapq());
 }
 
@@ -332,7 +357,7 @@ fn check_phasing(
 
     let mut counts = PhaseCounts::default();
     for f in fragments.values() {
-        match (f.allele1, f.allele2) {
+        match (f.site1.allele(), f.site2.allele()) {
             (Some(true), Some(true)) => counts.aa += 1,  // both ALT → same haplotype
             (Some(true), Some(false)) => counts.ar += 1, // one ALT, one REF → different haplotypes
             (Some(false), Some(true)) => counts.ra += 1,
@@ -1204,6 +1229,54 @@ mod tests {
         outcome
     }
 
+
+    /// A 150 bp read starting at 990 covers both fixture sites (1000, 1100).
+    fn spanning_record(qname: &str, early_alt: bool, late_alt: bool, qual: u8, flags: u16) -> bam::Record {
+        spanning_record_quals(qname, early_alt, late_alt, vec![qual; 150], flags)
+    }
+
+    /// `spanning_record` with a per-base quality array, so a single base of a
+    /// pattern can be made untrustworthy (review #5).
+    fn spanning_record_quals(
+        qname: &str,
+        early_alt: bool,
+        late_alt: bool,
+        quals: Vec<u8>,
+        flags: u16,
+    ) -> bam::Record {
+        let mut seq = vec![b'A'; 150];
+        seq[(FIXTURE_POS_EARLY - 990) as usize] = if early_alt { b'C' } else { b'G' };
+        seq[(FIXTURE_POS_LATE - 990) as usize] = if late_alt { b'T' } else { b'A' };
+        let cigar = bam::record::CigarString(vec![bam::record::Cigar::Match(150)]);
+        let mut record = bam::Record::new();
+        record.set(qname.as_bytes(), Some(&cigar), &seq, &quals);
+        record.set_tid(0);
+        record.set_pos(990);
+        record.set_mapq(60);
+        record.set_mtid(0);
+        record.set_flags(flags);
+        record
+    }
+
+    #[test]
+    fn disagreeing_mates_give_the_same_result_in_either_order() {
+        // Each fragment: one mate ALT/ALT (cis), the other ALT/REF (trans),
+        // both at the same coordinate. The late site conflicts.
+        let order = |cis_first: bool| -> Vec<bam::Record> {
+            let mut v = Vec::new();
+            for i in 0..3 {
+                let q = format!("f{i}");
+                let cis = spanning_record(&q, true, true, 30, 0x1 | 0x40);
+                let trans = spanning_record(&q, true, false, 30, 0x1 | 0x80);
+                if cis_first { v.push(cis); v.push(trans); } else { v.push(trans); v.push(cis); }
+            }
+            v
+        };
+        let a = disambiguate_fixture("conflict_a", order(true));
+        let b = disambiguate_fixture("conflict_b", order(false));
+        assert_eq!(a.resolved, b.resolved, "record order changed the phase decision");
+        assert_eq!(a.resolved, None, "a conflicting site is not evidence");
+    }
     #[test]
     fn disambiguate_reports_the_pairs_it_counted_and_an_anchored_rr_decides() {
         // 2 AA + 1 anchored RR = 3 cis, 0 trans: a decisive pair for the cis
