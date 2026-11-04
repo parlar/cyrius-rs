@@ -107,7 +107,7 @@ pub fn get_reads_by_region(
         for pileup_result in pileups {
             let pileup = match pileup_result {
                 Ok(p) => p,
-                Err(_) => continue,
+                Err(e) => return Err(format!("BAM pileup failed at {}:{}: {}", nchr, snp_position, e)),
             };
             let site_position = pileup.pos() as i64 + 1;
             if site_position != snp_position {

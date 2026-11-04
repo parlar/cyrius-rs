@@ -100,7 +100,7 @@ pub fn detect_clip_clusters(
     for result in reader.records() {
         let record = match result {
             Ok(r) => r,
-            Err(_) => continue,
+            Err(_) => return None,
         };
 
         if record.is_unmapped()

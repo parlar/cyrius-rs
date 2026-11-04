@@ -260,20 +260,20 @@ fn observe_read(
 /// contribute observations. Read pairs share the same qname, so a mate
 /// covering pos1 and its partner covering pos2 will be linked.
 ///
-/// Returns the fragment tallies; all zero when the contig is missing or a
-/// fetch fails.
+/// Returns the fragment tallies; all zero when the contig is missing. A failed
+/// fetch or a BAM read error is an `Err`: partial tallies must not look measured.
 fn check_phasing(
     reader: &mut bam::IndexedReader,
     nchr: &str,
     rv1: &ResolvedVariant,
     rv2: &ResolvedVariant,
     use_read_pairs: bool,
-) -> PhaseCounts {
+) -> Result<PhaseCounts, String> {
     let pos1 = rv1.pos_0based;
     let pos2 = rv2.pos_0based;
     let tid = match reader.header().tid(nchr.as_bytes()) {
         Some(t) => t,
-        None => return PhaseCounts::default(),
+        None => return Ok(PhaseCounts::default()),
     };
 
     let mut fragments: HashMap<String, Fragment> = HashMap::new();
@@ -295,12 +295,12 @@ fn check_phasing(
                 ))
                 .is_err()
             {
-                return PhaseCounts::default();
+                return Err(format!("BAM fetch failed at {}:{}", nchr, pos1.min(pos2)));
             }
             for record_result in reader.records() {
                 let record = match record_result {
                     Ok(r) => r,
-                    Err(_) => continue,
+                    Err(e) => return Err(format!("BAM read failed at {}:{}: {}", nchr, pos1.min(pos2), e)),
                 };
                 if !phase_read_passes(&record) {
                     continue;
@@ -315,13 +315,13 @@ fn check_phasing(
             .fetch(bam::FetchDefinition::Region(tid as i32, start, end))
             .is_err()
         {
-            return PhaseCounts::default();
+            return Err(format!("BAM fetch failed at {}:{}", nchr, pos1.min(pos2)));
         }
 
         for record_result in reader.records() {
             let record = match record_result {
                 Ok(r) => r,
-                Err(_) => continue,
+                Err(e) => return Err(format!("BAM read failed at {}:{}: {}", nchr, pos1.min(pos2), e)),
             };
             if !phase_read_passes(&record) {
                 continue;
@@ -346,11 +346,12 @@ fn check_phasing(
         }
     }
 
-    counts
+    Ok(counts)
 }
 
 /// Count one variant pair: resolve both names, fetch, tally. `None` when
-/// either variant has no lookup entry. The one counting path both
+/// either variant has no lookup entry, `Err` on a BAM fetch or read error.
+/// The one counting path both
 /// `disambiguate` and `count_pair` use.
 fn pair_evidence(
     reader: &mut bam::IndexedReader,
@@ -359,33 +360,34 @@ fn pair_evidence(
     vb: &str,
     variant_lookup: &VariantLookup,
     use_read_pairs: bool,
-) -> Option<PairEvidence> {
+) -> Result<Option<PairEvidence>, String> {
     let rv_a = match variant_lookup.resolve(va) {
         Some(rv) => rv,
         None => {
             log::debug!("phase_disambiguate: no lookup for variant {}", va);
-            return None;
+            return Ok(None);
         }
     };
     let rv_b = match variant_lookup.resolve(vb) {
         Some(rv) => rv,
         None => {
             log::debug!("phase_disambiguate: no lookup for variant {}", vb);
-            return None;
+            return Ok(None);
         }
     };
-    let counts = check_phasing(reader, nchr, &rv_a, &rv_b, use_read_pairs);
-    Some(PairEvidence {
+    let counts = check_phasing(reader, nchr, &rv_a, &rv_b, use_read_pairs)?;
+    Ok(Some(PairEvidence {
         va: va.to_string(),
         vb: vb.to_string(),
         pos_a: rv_a.pos_0based,
         pos_b: rv_b.pos_0based,
         counts,
-    })
+    }))
 }
 
 /// Count one variant pair exactly as `disambiguate` does on its default
-/// (single-fetch) path. `None` when either variant has no lookup entry.
+/// (single-fetch) path. `Ok(None)` when either variant has no lookup entry;
+/// `Err` on a BAM fetch or read error.
 /// For audits: the counts come from the shipped code, not a port.
 pub fn count_pair(
     reader: &mut bam::IndexedReader,
@@ -393,14 +395,14 @@ pub fn count_pair(
     va: &str,
     vb: &str,
     variant_lookup: &VariantLookup,
-) -> Option<PairEvidence> {
+) -> Result<Option<PairEvidence>, String> {
     pair_evidence(reader, nchr, va, vb, variant_lookup, false)
 }
 
 /// Count the reads overlapping one variant's position as `(alt, ref, none)`,
 /// with the phasing read filters and `check_allele_pileup`. `None` when the
-/// variant has no lookup entry; all zero when the contig is missing or the
-/// fetch fails. Counts reads, not fragments.
+/// variant has no lookup entry or when the fetch or a read fails; all zero when
+/// the contig is missing. Counts reads, not fragments.
 pub fn count_site(
     reader: &mut bam::IndexedReader,
     nchr: &str,
@@ -420,13 +422,13 @@ pub fn count_site(
         ))
         .is_err()
     {
-        return Some((0, 0, 0));
+        return None;
     }
     let (mut alt, mut ref_count, mut none) = (0, 0, 0);
     for record_result in reader.records() {
         let record = match record_result {
             Ok(r) => r,
-            Err(_) => continue,
+            Err(_) => return None,
         };
         if !phase_read_passes(&record) {
             continue;
@@ -678,8 +680,12 @@ pub fn disambiguate(
     for &(va, vb, cis_in_dt1) in &phasing_pairs {
         let evidence =
             match pair_evidence(&mut reader, nchr, va, vb, variant_lookup, use_read_pairs) {
-                Some(e) => e,
-                None => continue,
+                Ok(Some(e)) => e,
+                Ok(None) => continue,
+                Err(e) => {
+                    log::warn!("phase_disambiguate: {e}; phase left unresolved");
+                    return PhaseOutcome { resolved: None, pairs };
+                }
             };
         let cis_count = evidence.counts.cis();
         let trans_count = evidence.counts.trans();
@@ -927,10 +933,10 @@ mod tests {
             ref_bases: "A".to_string(),
         };
 
-        let single = check_phasing(&mut reader, "chr22", &rv_early, &rv_late, false);
+        let single = check_phasing(&mut reader, "chr22", &rv_early, &rv_late, false).unwrap();
         let single = (single.cis(), single.trans());
         // 100 bp apart, so --phase-readpair takes the same single-fetch path.
-        let readpair = check_phasing(&mut reader, "chr22", &rv_early, &rv_late, true);
+        let readpair = check_phasing(&mut reader, "chr22", &rv_early, &rv_late, true).unwrap();
         let readpair = (readpair.cis(), readpair.trans());
 
         // Clean up before the assertions so a failure still leaves nothing behind.
@@ -1056,6 +1062,32 @@ mod tests {
     }
 
     #[test]
+    fn check_phasing_reports_a_read_error_instead_of_partial_counts() {
+        let dir = fixture_dir("readerr");
+        // Enough fragments that the BAM spans several BGZF blocks.
+        let mut records = Vec::new();
+        for i in 0..1500 {
+            records.extend(fixture_fragment(&format!("f{i}"), true, true, 60, 60));
+        }
+        let path = write_fixture_bam(&dir, "readerr.bam", records);
+        let mut bytes = std::fs::read(&path).unwrap();
+        let size0 = u16::from_le_bytes([bytes[16], bytes[17]]) as usize + 1;
+        let size1 = u16::from_le_bytes([bytes[size0 + 16], bytes[size0 + 17]]) as usize + 1;
+        let off2 = size0 + size1;
+        let size2 = u16::from_le_bytes([bytes[off2 + 16], bytes[off2 + 17]]) as usize + 1;
+        assert!(size2 > 28, "too few records for a third data block");
+        bytes[off2 + size2 - 8] ^= 0xFF;
+        std::fs::write(&path, bytes).unwrap();
+        let lookup = fixture_lookup();
+        let early = lookup.resolve("g.early").unwrap();
+        let late = lookup.resolve("g.late").unwrap();
+        let mut reader = bam::IndexedReader::from_path(&path).unwrap();
+        let counts = check_phasing(&mut reader, "chr22", &early, &late, false);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(counts.is_err(), "check_phasing gave {counts:?}");
+    }
+
+    #[test]
     fn check_phasing_tallies_each_fragment_kind_and_anchors_rr_by_max_mapq() {
         let dir = fixture_dir("rr_tally");
         let bam_path = write_rr_fixture_bam(&dir);
@@ -1063,7 +1095,7 @@ mod tests {
         let lookup = fixture_lookup();
         let rv_early = lookup.resolve("g.early").unwrap();
         let rv_late = lookup.resolve("g.late").unwrap();
-        let counts = check_phasing(&mut reader, "chr22", &rv_early, &rv_late, false);
+        let counts = check_phasing(&mut reader, "chr22", &rv_early, &rv_late, false).unwrap();
         drop(reader);
         let _ = std::fs::remove_dir_all(&dir);
 
@@ -1083,7 +1115,7 @@ mod tests {
         let lookup = fixture_lookup();
         let rv_early = lookup.resolve("g.early").unwrap();
         let rv_late = lookup.resolve("g.late").unwrap();
-        let counts = check_phasing(&mut reader, "chr22", &rv_early, &rv_late, false);
+        let counts = check_phasing(&mut reader, "chr22", &rv_early, &rv_late, false).unwrap();
         drop(reader);
         let _ = std::fs::remove_dir_all(&dir);
 
@@ -1108,7 +1140,7 @@ mod tests {
         let lookup = fixture_lookup();
         let rv_early = lookup.resolve("g.early").unwrap();
         let rv_late = lookup.resolve("g.late").unwrap();
-        let counts = check_phasing(&mut reader, "chr22", &rv_early, &rv_late, false);
+        let counts = check_phasing(&mut reader, "chr22", &rv_early, &rv_late, false).unwrap();
         drop(reader);
         let _ = std::fs::remove_dir_all(&dir);
 
@@ -1247,12 +1279,12 @@ mod tests {
         let bam_path = write_rr_fixture_bam(&dir);
         let mut reader = bam::IndexedReader::from_path(&bam_path).unwrap();
         let lookup = fixture_lookup();
-        let pair = count_pair(&mut reader, "chr22", "g.early", "g.late", &lookup);
+        let pair = count_pair(&mut reader, "chr22", "g.early", "g.late", &lookup).unwrap();
         let rv_early = lookup.resolve("g.early").unwrap();
         let rv_late = lookup.resolve("g.late").unwrap();
-        let direct = check_phasing(&mut reader, "chr22", &rv_early, &rv_late, false);
-        let missing_a = count_pair(&mut reader, "chr22", "g.absent", "g.late", &lookup);
-        let missing_b = count_pair(&mut reader, "chr22", "g.early", "g.absent", &lookup);
+        let direct = check_phasing(&mut reader, "chr22", &rv_early, &rv_late, false).unwrap();
+        let missing_a = count_pair(&mut reader, "chr22", "g.absent", "g.late", &lookup).unwrap();
+        let missing_b = count_pair(&mut reader, "chr22", "g.early", "g.absent", &lookup).unwrap();
         drop(reader);
         let _ = std::fs::remove_dir_all(&dir);
 

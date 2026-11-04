@@ -65,7 +65,8 @@ fn audit_pairs(bam_path: &str, pairs_path: &str, lookup: &VariantLookup) {
             _ => die(&format!("{pairs_path} line {}: too few columns", n + 2)),
         };
         match count_pair(&mut reader, nchr, va, vb, lookup) {
-            Some(e) => {
+            Err(e) => die(&format!("{va} {vb}: {e}")),
+            Ok(Some(e)) => {
                 let c = e.counts;
                 println!(
                     "{va}\t{vb}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
@@ -79,7 +80,7 @@ fn audit_pairs(bam_path: &str, pairs_path: &str, lookup: &VariantLookup) {
                     c.trans()
                 );
             }
-            None => println!("{va}\t{vb}{}", "\tNA".repeat(8)),
+            Ok(None) => println!("{va}\t{vb}{}", "\tNA".repeat(8)),
         }
     }
 }

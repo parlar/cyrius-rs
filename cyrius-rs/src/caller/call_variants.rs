@@ -284,8 +284,8 @@ pub fn get_allele_counts_var42128936(
 
     let mut record = bam::Record::new();
     while let Some(result) = reader.read(&mut record) {
-        if result.is_err() {
-            continue;
+        if let Err(e) = result {
+            return Err(format!("BAM read failed at g.42128936: {}", e));
         }
         if good_read(&record) {
             let seq = String::from_utf8_lossy(&record.seq().as_bytes()).to_string();

@@ -170,7 +170,7 @@ fn count_kmers_in_region(
     start: i64,
     end: i64,
     lookup: &KmerLookup,
-) -> KmerCounts {
+) -> Option<KmerCounts> {
     let mut d6_counts = vec![0u32; lookup.n_positions];
     let mut d7_counts = vec![0u32; lookup.n_positions];
     let mut total_reads = 0u64;
@@ -190,12 +190,7 @@ fn count_kmers_in_region(
             Some(t) => t,
             None => {
                 log::warn!("kmer_validation: chromosome '{}' not found in BAM header", chrom);
-                return KmerCounts {
-                    d6_counts,
-                    d7_counts,
-                    total_reads: 0,
-                    matched_reads: 0,
-                };
+                return None;
             }
         }
     };
@@ -205,12 +200,7 @@ fn count_kmers_in_region(
         .is_err()
     {
         log::warn!("kmer_validation: failed to fetch region {}:{}-{}", chrom, start, end);
-        return KmerCounts {
-            d6_counts,
-            d7_counts,
-            total_reads: 0,
-            matched_reads: 0,
-        };
+        return None;
     }
 
     let k = lookup.k;
@@ -218,7 +208,7 @@ fn count_kmers_in_region(
     for result in reader.records() {
         let record = match result {
             Ok(r) => r,
-            Err(_) => continue,
+            Err(_) => return None,
         };
 
         if record.is_secondary() || record.is_supplementary() || record.is_duplicate() {
@@ -252,12 +242,12 @@ fn count_kmers_in_region(
         }
     }
 
-    KmerCounts {
+    Some(KmerCounts {
         d6_counts,
         d7_counts,
         total_reads,
         matched_reads,
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -462,22 +452,16 @@ pub fn validate_with_kmers(
     };
 
     // Count in the D6 region
-    let counts_d6 = count_kmers_in_region(
-        &mut reader,
-        chrom,
-        42123000,
-        42132000,
-        &lookup,
-    );
+    let counts_d6 = match count_kmers_in_region(&mut reader, chrom, 42123000, 42132000, &lookup) {
+        Some(c) => c,
+        None => return KmerValidationResult::unavailable("BAM read failed in the CYP2D6 region"),
+    };
 
     // Count in the D7 region (reads mapping here may carry D7 k-mers)
-    let counts_d7 = count_kmers_in_region(
-        &mut reader,
-        chrom,
-        42135000,
-        42146000,
-        &lookup,
-    );
+    let counts_d7 = match count_kmers_in_region(&mut reader, chrom, 42135000, 42146000, &lookup) {
+        Some(c) => c,
+        None => return KmerValidationResult::unavailable("BAM read failed in the CYP2D7 region"),
+    };
 
     // Merge counts from both regions
     let mut merged = KmerCounts {

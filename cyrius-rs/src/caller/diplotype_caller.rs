@@ -337,7 +337,10 @@ fn collect_reads_dual_region(
         for result in reader.records() {
             let mut record = match result {
                 Ok(r) => r,
-                Err(_) => continue,
+                Err(e) => {
+                    log::warn!("resolver: BAM read failed ({e}); leaving the call unresolved");
+                    return Vec::new();
+                }
             };
 
             if record.is_secondary()
