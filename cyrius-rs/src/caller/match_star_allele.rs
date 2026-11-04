@@ -323,7 +323,10 @@ pub fn get_final_call_clean(
         return Some(diplotypes.join(";"));
     }
 
-    if final_call.is_empty() || final_call.len() > 1 {
+    if final_call.is_empty() {
+        return Some(String::new());
+    }
+    if final_call.len() > 1 {
         if final_call == ["*10_*10_*4.013", "*10_*36_*4"] {
             // Two structurally-consistent decompositions with DIFFERENT allele
             // multisets ({*10,*36,*4} vs {*10,*10,*4.013}); emit both as proper
@@ -331,7 +334,21 @@ pub fn get_final_call_clean(
             // report honest ambiguity). Was previously hardcoded to *4/*36+*10.
             return Some("*4/*36+*10;*4.013/*10+*10".to_string());
         }
-        return Some(final_call.join(";"));
+        // Format each candidate the way a single answer is formatted. Joining
+        // the raw multisets ("*1_*4_*4") gave strings match_phenotype cannot
+        // read. A candidate that cannot be formatted keeps its raw form, which
+        // reads as unknown effect: the safe direction.
+        let mut out: Vec<String> = Vec::new();
+        for one in &final_call {
+            let formatted = get_final_call_clean(std::slice::from_ref(one), cnvcall, spacer_cn)
+                .unwrap_or_else(|| one.clone());
+            for d in formatted.split(';') {
+                if !out.iter().any(|x| x == d) {
+                    out.push(d.to_string());
+                }
+            }
+        }
+        return Some(out.join(";"));
     }
 
     let called_stars = &final_call[0];
@@ -1050,5 +1067,32 @@ mod tests {
         let mut vars = vec!["g.42130692G>A".to_string(), "g.X".to_string()];
         let out = call_star68(&mut vars, "star68", &d);
         assert!(!out.star_call.is_empty());
+    }
+
+    #[test]
+    fn several_candidates_outside_cn2_are_each_formatted() {
+        // HG02373 at 25 % depth (spacer CN 3). At full depth its single
+        // candidate *10_*14_*36 is formatted *14/*36+*10 (measured).
+        let call = vec![
+            "*10_*14_*36".to_string(),
+            "*10_*36_*65".to_string(),
+            "*10_*114_*36".to_string(),
+        ];
+        // Each candidate formatted alone (measured): *14/*36+*10, *65/*36+*10,
+        // *114/*36+*10. Today all three together give the raw
+        // "*10_*114_*36;*10_*14_*36;*10_*36_*65" (measured).
+        assert_eq!(
+            get_final_call_clean(&call, "exon9hyb", Some(3)).as_deref(),
+            Some("*114/*36+*10;*14/*36+*10;*65/*36+*10")
+        );
+    }
+
+    #[test]
+    fn the_hand_written_two_candidate_case_is_unchanged() {
+        let call = vec!["*10_*10_*4.013".to_string(), "*10_*36_*4".to_string()];
+        assert_eq!(
+            get_final_call_clean(&call, "exon9hyb", Some(3)).as_deref(),
+            Some("*4/*36+*10;*4.013/*10+*10")
+        );
     }
 }
