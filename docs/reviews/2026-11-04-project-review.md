@@ -24,7 +24,7 @@ Evidence from this review is retained locally in `/tmp/cyrius_review_29pdv5po/`.
 
 ### 1. [P1] Uncallable target sites become reference evidence
 
-**Status:** fixed on `feat/unknown-sites` (commits `ad4f123` formatting, `cec2334` masked lookup, `4b64bbb` `*68` paths, `0cf2b80` + `176cb35` wiring and the D1-a test, `841303e` results). Uncallable sites are now matched as unknown. Damaged NA19920 now gives 9 possible diplotypes including the truth `*1/*4x2`, `More_than_one_possible_genotype`, confidence 0.80 MEDIUM, instead of `*1/*10x2` `PASS` 0.95 HIGH; no field changes on the 53 full-depth samples. The original finding follows.
+**Status:** fixed on `feat/unknown-sites` (commits `ad4f123` formatting, `cec2334` masked lookup, `4b64bbb` `*68` paths, `0cf2b80` + `176cb35` wiring and the D1-a test, `841303e` results; decision D2, a masked set narrowed to one answer reads `Unknown_sites_resolved`, in the Task 7 commit). Uncallable sites are now matched as unknown. Damaged NA19920 now gives 9 possible diplotypes including the truth `*1/*4x2`, `More_than_one_possible_genotype`, confidence 0.80 MEDIUM, instead of `*1/*10x2` `PASS` 0.95 HIGH; no field changes on the 53 full-depth samples. The original finding follows.
 
 Locations: [call_variants.rs](../../cyrius-rs/src/caller/call_variants.rs), `get_called_variants`, around lines 575–593; [main.rs](../../cyrius-rs/src/main.rs), variant-set construction around line 817; [confidence.rs](../../cyrius-rs/src/caller/confidence.rs), around lines 237–250.
 

@@ -343,15 +343,20 @@ masked set reaching `PASS` needs a stated rule) was not addressed by the
 implementation plan; NA21105 reaches `PASS` that way. See the final report.
 
 **Found while measuring (not in the plan).**
-- *Tie order is not reproducible.* The same binary run twice on the damaged
-  NA19920 (0cf2b80 code, then 176cb35, a behaviour-neutral refactor) gives the
-  same 9 diplotypes in a different order. The resolver sorts by posterior, then
-  by name (`resolver.rs` ~L38), but the 9 posteriors are equal only to about
-  1e-13 (0.11111111111112557) and differ in the last bits between runs, so the
-  name tie-break never fires. Only the order changes: the set, the filter and
-  the ambiguous/resolved decision (margin 0.10) do not. The resolver behaved
-  this way before this branch; masking makes many-way ties reachable. 25 % and
-  10 % sets: identical between the two runs.
+- *Tie order is not reproducible.* The same binary (176cb35) run 6 times on the
+  damaged NA19920 gave the same order in runs 1-5 and a different order in run
+  6; the set is the same 9 diplotypes, `Confidence` 0.80 and `Resolver_posterior`
+  0.11111111111112557 every time (raw runs: `~/cyrius-research/unknown-sites/tie_runs/r1..r6/`).
+  The earlier comparison was across two builds (0cf2b80 and 176cb35, a
+  behaviour-neutral refactor), not one binary. The resolver sorts by posterior,
+  then by name (`resolver.rs` ~L38), but the 9 posteriors are equal only to
+  about 1e-13 and differ in the last bits between runs, so the name tie-break
+  never fires. Only the order changes: the set, the filter and the
+  ambiguous/resolved decision (margin 0.10) do not. `confidence.rs` (~L203)
+  scores completeness from the first `;` alternative only, so `Confidence`
+  could change with the order (not observed). The resolver behaved this way
+  before this branch; masking makes many-way ties reachable. 25 % and 10 %
+  sets: identical between the two builds.
 - *Size of a masked set with many unknown sites* (probe on the real tables,
   empty variant list): 2-copy table 14 / 35 / 70 / 140 unknown sites ->
   15 / 136 / 378 / 10,153 diplotypes; 3-copy table -> 25 / 256 / 729 / 20,164

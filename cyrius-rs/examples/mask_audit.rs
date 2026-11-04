@@ -1,6 +1,8 @@
 //! Gate B1 for `docs/superpowers/plans/2026-11-04-unknown-sites-gate.md`.
 //!
-//! Throwaway experiment. Changes nothing in `src/`. It answers two questions
+//! The experiment program of this gate record. Changes nothing in `src/`. Its
+//! `RARE_ALLELES` copy (and the helpers copied with it) must match
+//! `match_star_allele.rs`. It answers two questions
 //! with the real tables and the real reporting functions:
 //!
 //! * K1: with the damaged NA19920's five unknown sites masked, is the truth
@@ -23,6 +25,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 type Table = HashMap<String, Vec<String>>;
 
 // ---- copied from match_star_allele.rs (private there); kept byte-for-byte in meaning ----
+// RARE_ALLELES here must stay equal to the one in match_star_allele.rs.
 const RARE_ALLELES: &[&str] = &["*34", "*39", "*4.009", "*139"];
 fn main_allele_name(star: &str) -> &str {
     if star == "*4.013" { star } else { star.split('.').next().unwrap_or(star) }
