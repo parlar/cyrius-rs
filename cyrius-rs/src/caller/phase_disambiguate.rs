@@ -573,6 +573,11 @@ pub struct PhaseOutcome {
     /// step stopped before counting (not two options, no differentiating
     /// pair, or the BAM could not be opened).
     pub pairs: Vec<PairEvidence>,
+    /// True when the step stopped early (a read error) and `pairs` therefore
+    /// holds only the pairs finished before it stopped. Each listed pair is
+    /// still a complete measurement; the list is not complete. `false` on a
+    /// run that evaluated every differentiating pair.
+    pub pairs_truncated: bool,
 }
 
 /// Attempt to disambiguate an ambiguous CN=2 diplotype call using physical phasing.
@@ -714,7 +719,7 @@ pub fn disambiguate(
                 Ok(None) => continue,
                 Err(e) => {
                     log::warn!("phase_disambiguate: {e}; phase left unresolved");
-                    return PhaseOutcome { resolved: None, pairs };
+                    return PhaseOutcome { resolved: None, pairs, pairs_truncated: true };
                 }
             };
         let cis_count = evidence.counts.cis();
@@ -777,7 +782,7 @@ pub fn disambiguate(
         log::info!("phase_disambiguate: inconclusive for {}", clean_call);
         None
     };
-    PhaseOutcome { resolved, pairs }
+    PhaseOutcome { resolved, pairs, pairs_truncated: false }
 }
 
 /// Check if two variants are on the same haplotype (cis) in a given diplotype.
@@ -1091,15 +1096,15 @@ mod tests {
         dir
     }
 
-    #[test]
-    fn check_phasing_reports_a_read_error_instead_of_partial_counts() {
-        let dir = fixture_dir("readerr");
+    /// An indexed BAM of 1500 fragments whose third BGZF data block has a
+    /// flipped CRC byte, so reading it fails partway. Returns the BAM path.
+    fn write_corrupt_bam(dir: &std::path::Path) -> std::path::PathBuf {
         // Enough fragments that the BAM spans several BGZF blocks.
         let mut records = Vec::new();
         for i in 0..1500 {
             records.extend(fixture_fragment(&format!("f{i}"), true, true, 60, 60));
         }
-        let path = write_fixture_bam(&dir, "readerr.bam", records);
+        let path = write_fixture_bam(dir, "readerr.bam", records);
         let mut bytes = std::fs::read(&path).unwrap();
         let size0 = u16::from_le_bytes([bytes[16], bytes[17]]) as usize + 1;
         let size1 = u16::from_le_bytes([bytes[size0 + 16], bytes[size0 + 17]]) as usize + 1;
@@ -1108,6 +1113,13 @@ mod tests {
         assert!(size2 > 28, "too few records for a third data block");
         bytes[off2 + size2 - 8] ^= 0xFF;
         std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn check_phasing_reports_a_read_error_instead_of_partial_counts() {
+        let dir = fixture_dir("readerr");
+        let path = write_corrupt_bam(&dir);
         let lookup = fixture_lookup();
         let early = lookup.resolve("g.early").unwrap();
         let late = lookup.resolve("g.late").unwrap();
@@ -1115,6 +1127,39 @@ mod tests {
         let counts = check_phasing(&mut reader, "chr22", &early, &late, false);
         let _ = std::fs::remove_dir_all(&dir);
         assert!(counts.is_err(), "check_phasing gave {counts:?}");
+    }
+
+    #[test]
+    fn an_aborted_run_marks_its_pair_list_truncated() {
+        // The corrupt-BGZF fixture: the read fails partway, so `disambiguate`
+        // stops. It must not decide, and must say its list is incomplete.
+        let dir = fixture_dir("abort_trunc");
+        let bam_path = write_corrupt_bam(&dir);
+        let (call, raw, star_combinations) = phase_tie();
+        let outcome = disambiguate(
+            &call,
+            &raw,
+            &star_combinations,
+            &fixture_lookup(),
+            bam_path.to_str().unwrap(),
+            "chr22",
+            None,
+            None,
+            false,
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(outcome.resolved, None, "an aborted run must not decide");
+        assert!(outcome.pairs_truncated, "an aborted run must mark its list truncated");
+    }
+
+    #[test]
+    fn a_completed_run_is_not_marked_truncated() {
+        let records = (0..3)
+            .map(|i| spanning_record(&format!("q{i}"), true, true, 30, 0))
+            .collect();
+        let outcome = disambiguate_fixture("complete", records);
+        assert_eq!(outcome.resolved.as_deref(), Some("*1/*A"));
+        assert!(!outcome.pairs_truncated, "a run that finished must not be marked truncated");
     }
 
     #[test]
