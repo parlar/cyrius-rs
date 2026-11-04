@@ -754,8 +754,8 @@ pub fn update_variants(
 /// haplotype boolean excludes; any other candidates are kept.
 fn apply_cn2_phase_rules(
     clean_call: &str,
-    var42126938_g_haplotype: bool,
-    var42127803_diff_haplotype: bool,
+    var42126938_g_haplotype: Option<bool>,
+    var42127803_diff_haplotype: Option<bool>,
 ) -> String {
     let mut diplotypes: Vec<&str> = clean_call.split(';').collect();
     let rules = [
@@ -763,6 +763,7 @@ fn apply_cn2_phase_rules(
         ("*119/*2", "*1/*41", var42127803_diff_haplotype),
     ];
     for (if_true, if_false, signal) in rules {
+        let Some(signal) = signal else { continue };
         if diplotypes.contains(&if_true) && diplotypes.contains(&if_false) {
             let excluded = if signal { if_false } else { if_true };
             diplotypes.retain(|d| *d != excluded);
@@ -818,8 +819,8 @@ pub fn match_star(
     spacer_cn: Option<u32>,
     star_combinations: &StarCombinations,
     exon9: &crate::types::Exon9Values,
-    var42126938_g_haplotype: bool,
-    var42127803_diff_haplotype: bool,
+    var42126938_g_haplotype: Option<bool>,
+    var42127803_diff_haplotype: Option<bool>,
     features: &FeatureFlags,
 ) -> StarCall {
     let direct = cnvtag_to_genotype();
@@ -972,6 +973,16 @@ pub fn match_star(
 mod tests {
     use super::*;
 
+    #[test]
+    fn unknown_phase_keeps_both_diplotypes() {
+        assert_eq!(apply_cn2_phase_rules("*1/*41;*119/*2", None, None), "*1/*41;*119/*2");
+        assert_eq!(apply_cn2_phase_rules("*1/*41;*119/*2", None, Some(true)), "*119/*2");
+        assert_eq!(apply_cn2_phase_rules("*1/*41;*119/*2", None, Some(false)), "*1/*41");
+        assert_eq!(apply_cn2_phase_rules("*1/*32;*27/*41", Some(true), None), "*1/*32");
+        assert_eq!(apply_cn2_phase_rules("*1/*32;*27/*41", Some(false), None), "*27/*41");
+        assert_eq!(apply_cn2_phase_rules("*1/*32;*27/*41", None, None), "*1/*32;*27/*41");
+    }
+
     fn dic(entries: &[(&str, &[&str])]) -> HashMap<String, Vec<String>> {
         entries
             .iter()
@@ -1009,12 +1020,12 @@ mod tests {
     #[test]
     fn cn2_phase_rules_drop_only_the_excluded_diplotype() {
         assert_eq!(
-            apply_cn2_phase_rules("*119/*162;*1/*32;*27/*41", true, false),
+            apply_cn2_phase_rules("*119/*162;*1/*32;*27/*41", Some(true), Some(false)),
             "*119/*162;*1/*32"
         );
-        assert_eq!(apply_cn2_phase_rules("*1/*32;*27/*41", false, false), "*27/*41");
-        assert_eq!(apply_cn2_phase_rules("*119/*2;*1/*41", false, true), "*119/*2");
-        assert_eq!(apply_cn2_phase_rules("*1/*2;*1/*3", true, true), "*1/*2;*1/*3");
+        assert_eq!(apply_cn2_phase_rules("*1/*32;*27/*41", Some(false), Some(false)), "*27/*41");
+        assert_eq!(apply_cn2_phase_rules("*119/*2;*1/*41", Some(false), Some(true)), "*119/*2");
+        assert_eq!(apply_cn2_phase_rules("*1/*2;*1/*3", Some(true), Some(true)), "*1/*2;*1/*3");
     }
 
     #[test]

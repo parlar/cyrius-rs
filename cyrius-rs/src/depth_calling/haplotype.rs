@@ -1,3 +1,4 @@
+use crate::depth_calling::{PHASE_MIN_BASE_QUALITY, QUAL_UNAVAILABLE};
 use crate::depth_calling::snp_count::passing_read;
 use crate::depth_calling::utilities::fetch_region;
 use crate::types::SnpLookup;
@@ -243,6 +244,19 @@ fn get_bases_per_read(
                         continue;
                     }
 
+                    // Every extracted base must be trustworthy, by the same
+                    // rule the fragment-phasing path uses (review #3/#5).
+                    // A short or omitted quality array is "unknown", never
+                    // "good": both drop the read at this site.
+                    let quals = record.qual();
+                    if quals.len() < end_pos
+                        || quals[qpos..end_pos]
+                            .iter()
+                            .any(|&q| q == QUAL_UNAVAILABLE || q < PHASE_MIN_BASE_QUALITY)
+                    {
+                        continue;
+                    }
+
                     let hap = String::from_utf8_lossy(&seq[qpos..end_pos]).to_string();
 
                     let entry = dread.entry(read_name).or_insert_with(|| {
@@ -380,6 +394,17 @@ mod tests {
         read_len: usize,
         reads: &[FixtureRead],
     ) {
+        write_hap_bam_with_quality(path, read_len, reads, 30);
+    }
+
+    /// As `write_hap_bam`, with every base at quality byte `qual_byte`
+    /// (0xFF = quality omitted).
+    fn write_hap_bam_with_quality(
+        path: &std::path::Path,
+        read_len: usize,
+        reads: &[FixtureRead],
+        qual_byte: u8,
+    ) {
         let mut header = bam::header::Header::new();
         let mut sq = bam::header::HeaderRecord::new(b"SQ");
         sq.push_tag(b"SN", "chr22");
@@ -390,7 +415,7 @@ mod tests {
             let mut writer = bam::Writer::from_path(path, &header, bam::Format::Bam).unwrap();
             let cigar =
                 bam::record::CigarString(vec![bam::record::Cigar::Match(read_len as u32)]);
-            let qual = vec![30u8; read_len];
+            let qual = vec![qual_byte; read_len];
             for (name, pos, bases) in reads {
                 let mut seq = vec![b'N'; read_len];
                 for (qpos, allele) in bases.iter() {
@@ -461,6 +486,61 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// Four reads over two 1 bp sites (g.42127803 / g.42127941 spacing): two
+    /// show the region-1 base at both sites ("11"), two the region-2 base at
+    /// both ("22"). Every base carries quality `q`.
+    fn haplotype_fixture_with_quality(
+        q: u8,
+    ) -> (Scratch, bam::IndexedReader, SnpLookup) {
+        let dir = Scratch::new(&format!("qual_{q}_{}", std::thread::current().name().unwrap_or("t").replace("::", "_")));
+        let bam_path = dir.join("hap_qual.bam");
+        write_hap_bam_with_quality(
+            &bam_path,
+            150,
+            &[
+                ("a11", 1000, &[(0, "C"), (138, "G")]),
+                ("b11", 1000, &[(0, "C"), (138, "G")]),
+                ("c22", 1000, &[(0, "T"), (138, "A")]),
+                ("d22", 1000, &[(0, "T"), (138, "A")]),
+            ],
+            q,
+        );
+        let base_db = hap_lookup(&[(1001, 2001, "C_T"), (1139, 2139, "G_A")]);
+        let reader = bam::IndexedReader::from_path(&bam_path).unwrap();
+        (dir, reader, base_db)
+    }
+
+    #[test]
+    fn base_quality_zero_reads_are_not_haplotype_evidence() {
+        // Reads that would give 11=2, 22=2 (enough for phase_signal_42127803
+        // to answer Some(false)) are dropped: their bases carry quality 0.
+        let (_dir, mut reader, base_db) = haplotype_fixture_with_quality(0);
+        let haps = get_haplotypes_from_bam_single_region(&mut reader, &base_db, &[0, 1]).unwrap();
+        let counts = extract_hap(&haps, &[0, 1]);
+        assert!(
+            counts.values().all(|v| v.iter().sum::<u32>() == 0),
+            "quality-0 bases must not be counted, got {counts:?}"
+        );
+    }
+
+    #[test]
+    fn the_same_reads_at_quality_30_are_haplotype_evidence() {
+        // Control: the test above must fail for quality, not for the fixture.
+        let (_dir, mut reader, base_db) = haplotype_fixture_with_quality(30);
+        let haps = get_haplotypes_from_bam_single_region(&mut reader, &base_db, &[0, 1]).unwrap();
+        let counts = extract_hap(&haps, &[0, 1]);
+        assert_eq!(counts.get("11").map(|v| v.iter().sum::<u32>()), Some(2));
+        assert_eq!(counts.get("22").map(|v| v.iter().sum::<u32>()), Some(2));
+    }
+
+    #[test]
+    fn reads_without_base_qualities_are_not_haplotype_evidence() {
+        let (_dir, mut reader, base_db) = haplotype_fixture_with_quality(QUAL_UNAVAILABLE);
+        let haps = get_haplotypes_from_bam_single_region(&mut reader, &base_db, &[0, 1]).unwrap();
+        let counts = extract_hap(&haps, &[0, 1]);
+        assert!(counts.values().all(|v| v.iter().sum::<u32>() == 0));
     }
 
     #[test]
