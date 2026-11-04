@@ -1,6 +1,5 @@
 use clap::Parser;
 use indexmap::IndexMap;
-use log;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -860,11 +859,11 @@ fn d6_star_caller(
     let is_fuzzy = star_called
         .call_info
         .as_deref()
-        .map_or(false, |s| s.starts_with("fuzzy_match"));
+        .is_some_and(|s| s.starts_with("fuzzy_match"));
 
     if star_called.call_info.is_some()
         && star_called.call_info.as_deref() != Some("no_match")
-        && star_called.call_info.as_deref() != None
+        && star_called.call_info.as_deref().is_some()
     {
         final_star_allele_call = star_called.clean_call.clone();
 

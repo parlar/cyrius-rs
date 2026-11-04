@@ -194,7 +194,7 @@ The header check only sees what the header records. A file whose header was stri
 
 ## Building
 
-Requires Rust 1.70+ and htslib development libraries (for BAM/CRAM support).
+Requires Rust 1.85+ (the `lowess` dependency uses the 2024 edition) and htslib development libraries (for BAM/CRAM support).
 
 ```bash
 cd cyrius-rs

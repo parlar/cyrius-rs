@@ -120,7 +120,7 @@ pub fn detect_clip_clusters(
 
         // Check leading soft clip.
         if let rust_htslib::bam::record::Cigar::SoftClip(len) = ops[0] {
-            if len as u32 >= MIN_CLIP_LEN {
+            if len >= MIN_CLIP_LEN {
                 let bin = (pos / BIN_SIZE) * BIN_SIZE;
                 *left_clips.entry(bin).or_insert(0) += 1;
                 total_clipped += 1;
@@ -130,7 +130,7 @@ pub fn detect_clip_clusters(
         // Check trailing soft clip.
         if ops.len() > 1 {
             if let rust_htslib::bam::record::Cigar::SoftClip(len) = ops[ops.len() - 1] {
-                if len as u32 >= MIN_CLIP_LEN {
+                if len >= MIN_CLIP_LEN {
                     // Compute reference end position.
                     let ref_end = record.cigar().end_pos();
                     let bin = (ref_end / BIN_SIZE) * BIN_SIZE;

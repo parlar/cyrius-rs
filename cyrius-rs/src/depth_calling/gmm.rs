@@ -16,6 +16,12 @@ pub struct Gmm {
     pub nstate: usize,
 }
 
+impl Default for Gmm {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Gmm {
     pub fn new() -> Self {
         Gmm {

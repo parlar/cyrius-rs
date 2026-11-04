@@ -184,7 +184,7 @@ pub fn call_cn_snp(
         .iter()
         .zip(lsnp2.iter())
         .map(|(&c1, &c2)| {
-            call_reg1_cn(Some(total_cn), c1 as f64, c2 as f64, 0.0)[0].clone().into()
+            call_reg1_cn(Some(total_cn), c1 as f64, c2 as f64, 0.0)[0].into()
         })
         .collect();
     process_raw_call_gc(&cn_prob, threshold, true)
@@ -199,7 +199,7 @@ pub fn call_cn_var_homo(
     let cn_prob: Vec<CnProbResult> = lsnp1
         .iter()
         .zip(lsnp2.iter())
-        .map(|(&c1, &c2)| call_reg1_cn(Some(total_cn), c1 as f64, c2 as f64, 4.0)[0].clone().into())
+        .map(|(&c1, &c2)| call_reg1_cn(Some(total_cn), c1 as f64, c2 as f64, 4.0)[0].into())
         .collect();
     let calls = process_raw_call_denovo(&cn_prob, 0.8, 0.65, None, true);
     calls
@@ -247,7 +247,6 @@ pub fn call_cn_var(
 
         cn_prob.push(
             call_reg1_cn(Some(total_cn[i]), total_var as f64, total_ref as f64, min_read as f64)[0]
-                .clone()
                 .into(),
         );
     }
@@ -345,7 +344,7 @@ pub fn call_exon9gc(
         if sum > 0 {
             d6_values.push(cn as f64 * c1 as f64 / sum as f64);
         }
-        cn_prob.push(call_reg1_cn(Some(cn as u32), c1 as f64, c2 as f64, 3.0)[0].clone().into());
+        cn_prob.push(call_reg1_cn(Some(cn as u32), c1 as f64, c2 as f64, 3.0)[0].into());
     }
 
     let cn_prob_stringent = process_raw_call_gc(&cn_prob, 0.88, true);
@@ -372,7 +371,7 @@ pub fn call_exon9gc(
         // breakpoint downstream of exon9 causes borderline D6/D7 ratios at exon9
         // (e.g., HG00421: average probability 0.729 was failing the 0.75 cutoff).
         let ave_call = process_raw_call_gc(
-            &[call_reg1_cn(Some(cn as u32), mean_c1, mean_c2, 3.0)[0].clone().into()],
+            &[call_reg1_cn(Some(cn as u32), mean_c1, mean_c2, 3.0)[0].into()],
             0.70,
             true,
         );
@@ -507,10 +506,10 @@ pub fn call_var42127526_var42127556(
 
         let has_211 = recombinant_read_count
             .get("211")
-            .map_or(false, |c| c.iter().sum::<u32>() > 1);
+            .is_some_and(|c| c.iter().sum::<u32>() > 1);
         let has_221 = recombinant_read_count
             .get("221")
-            .map_or(false, |c| c.iter().sum::<u32>() > 1);
+            .is_some_and(|c| c.iter().sum::<u32>() > 1);
 
         if has_211 {
             for _ in 0..var7526_cn {
