@@ -841,6 +841,7 @@ fn d6_star_caller(
 
     let star_called = match_star(
         &mut total_callset,
+        &uncallable_target_sites,
         &cnvtag_str,
         raw_cn_call.spacer_cn,
         &star_combinations,
@@ -955,6 +956,8 @@ fn d6_star_caller(
                 genotype_filter = Some("Not_assigned_to_haplotypes".to_string());
             } else if high_cn_low_confidence {
                 genotype_filter = Some("LowQ_high_CN".to_string());
+            } else if star_called.unknown_sites_unmatched {
+                genotype_filter = Some("Unknown_sites_unmatched".to_string());
             } else if is_fuzzy {
                 genotype_filter = Some("Fuzzy_match".to_string());
             } else {
@@ -973,7 +976,7 @@ fn d6_star_caller(
     //   star13/star13intron1 variants: skip (insufficient data)
     if features.spacer_cn_check {
         if let Some(ref filter) = genotype_filter {
-            if filter == "PASS" || filter == "Fuzzy_match" {
+            if filter == "PASS" || filter == "Fuzzy_match" || filter == "Unknown_sites_unmatched" {
                 if let Some(sp_cn) = raw_cn_call.spacer_cn {
                     let expected_diff: Option<u32> = match cnvtag_str.as_str() {
                         "cn2" => Some(2),
@@ -1012,7 +1015,7 @@ fn d6_star_caller(
     // Feature: consistency_check — post-hoc validation of the final call
     if features.consistency_check {
         if let Some(ref filter) = genotype_filter {
-            if filter == "PASS" || filter == "Fuzzy_match" {
+            if filter == "PASS" || filter == "Fuzzy_match" || filter == "Unknown_sites_unmatched" {
                 let consistency = cyrius_rs::caller::consistency::run_consistency_checks(
                     &snp_d6, &snp_d7,
                     &var_alt, &var_ref, &params.var_list,

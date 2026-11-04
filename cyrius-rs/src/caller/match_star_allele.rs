@@ -28,6 +28,12 @@ pub(crate) fn main_allele_name(star: &str) -> &str {
     }
 }
 
+/// Sites the dosage step could not call, minus any that a dedicated caller or
+/// `update_variants` has since placed in the call.
+fn still_unknown(unknown_sites: &[String], var_observed: &[String]) -> Vec<String> {
+    unknown_sites.iter().filter(|u| !var_observed.contains(u)).cloned().collect()
+}
+
 fn get_var_list(var_observed: &[String]) -> String {
     if var_observed.is_empty() {
         "NA".to_string()
@@ -930,6 +936,7 @@ fn retry_add_one_copy(
 /// Main star allele matching function.
 pub fn match_star(
     var_observed: &mut Vec<String>,
+    unknown_sites: &[String],
     cnvcall: &str,
     spacer_cn: Option<u32>,
     star_combinations: &StarCombinations,
@@ -945,15 +952,19 @@ pub fn match_star(
             variants_called: Some(String::new()),
             raw_call: Some(vec![genotype.to_string()]),
             clean_call: Some(genotype.to_string()),
+            unknown_sites_unmatched: false,
         };
     }
 
     update_variants(var_observed, cnvcall, exon9);
+    let unknown = still_unknown(unknown_sites, var_observed);
 
     if uses_cn1_dic(cnvcall) {
         if cnvcall.contains("star68") {
             // star5_star68, star13_star68: use call_star68_cn1 for iterative matching
-            let mut matchtag = call_star68_cn1(var_observed, &[], cnvcall, &star_combinations.dhap);
+            let mut matchtag = call_star68_cn1(var_observed, &unknown, cnvcall, &star_combinations.dhap);
+            let unknown_sites_unmatched =
+                !unknown.is_empty() && matchtag.call_info.as_deref() == Some("no_match");
             // Feature: fuzzy_match — try fuzzy matching on no_match for star68 CN=1
             if features.fuzzy_match && matchtag.call_info.as_deref() == Some("no_match") {
                 if let Some(fuzzy) = fuzzy_match::fuzzy_match_star_cn1(var_observed, &star_combinations.dhap) {
@@ -967,9 +978,12 @@ pub fn match_star(
                 variants_called: Some(var_observed.join(" ")),
                 raw_call: Some(matchtag.candidate),
                 clean_call: final_call_clean,
+                unknown_sites_unmatched,
             };
         }
-        let mut matchtag = get_star_cn1(var_observed, &[], &star_combinations.dhap);
+        let mut matchtag = get_star_cn1(var_observed, &unknown, &star_combinations.dhap);
+        let unknown_sites_unmatched =
+            !unknown.is_empty() && matchtag.call_info.as_deref() == Some("no_match");
         // Feature: fuzzy_match — try fuzzy matching on no_match
         if features.fuzzy_match && matchtag.call_info.as_deref() == Some("no_match") {
             if let Some(fuzzy) = fuzzy_match::fuzzy_match_star_cn1(var_observed, &star_combinations.dhap) {
@@ -983,6 +997,7 @@ pub fn match_star(
             variants_called: Some(var_observed.join(" ")),
             raw_call: Some(matchtag.candidate),
             clean_call: final_call_clean,
+            unknown_sites_unmatched,
         };
     }
 
@@ -994,6 +1009,7 @@ pub fn match_star(
                 variants_called: None,
                 raw_call: None,
                 clean_call: None,
+                unknown_sites_unmatched: false,
             }
         }
     };
@@ -1018,7 +1034,9 @@ pub fn match_star(
     );
 
     if !cnvcall.contains("star68") {
-        let mut matchtag = get_star(var_observed, &[], dic);
+        let mut matchtag = get_star(var_observed, &unknown, dic);
+        let unknown_sites_unmatched =
+            !unknown.is_empty() && matchtag.call_info.as_deref() == Some("no_match");
 
         // For cn3-cn6, try adding a variant on no_match
         if cnvcall.starts_with("cn")
@@ -1033,6 +1051,7 @@ pub fn match_star(
                     variants_called: Some(var_observed.join(" ")),
                     raw_call: Some(mt.candidate),
                     clean_call: final_call_clean,
+                    unknown_sites_unmatched,
                 };
             }
         }
@@ -1070,10 +1089,12 @@ pub fn match_star(
             variants_called: Some(var_observed.join(" ")),
             raw_call: Some(matchtag.candidate),
             clean_call: final_call_clean,
+            unknown_sites_unmatched,
         }
     } else {
         let mut var_observed_68 = var_observed.clone();
-        let matchtag = call_star68(&mut var_observed_68, &[], cnvcall, dic);
+        let matchtag = call_star68(&mut var_observed_68, &unknown, cnvcall, dic);
+        let unmatched_68 = matchtag.call_info.as_deref() == Some("no_match");
         let final_call_clean =
             get_final_call_clean(&matchtag.star_call, cnvcall, spacer_cn);
         StarCall {
@@ -1081,6 +1102,7 @@ pub fn match_star(
             variants_called: Some(var_observed_68.join(" ")),
             raw_call: Some(matchtag.candidate),
             clean_call: final_call_clean,
+            unknown_sites_unmatched: !unknown.is_empty() && unmatched_68,
         }
     }
 }
@@ -1107,6 +1129,51 @@ mod tests {
     }
 
     fn obs(v: &[&str]) -> Vec<String> { v.iter().map(|s| s.to_string()).collect() }
+
+    #[test]
+    fn a_listed_site_already_in_the_call_is_not_masked() {
+        // g.B is listed uncallable but a dedicated caller (or update_variants)
+        // put it in the call, so it is known; g.C stays unknown.
+        let still = still_unknown(&obs(&["g.B", "g.C"]), &obs(&["g.A", "g.B"]));
+        assert_eq!(still, obs(&["g.C"]));
+        assert!(still_unknown(&[], &obs(&["g.A"])).is_empty());
+    }
+
+    #[test]
+    fn match_star_masks_unknown_sites_and_flags_only_an_unmatched_fallback() {
+        use crate::caller::construct_star_table::{get_hap_table, TableKind};
+        let c = get_hap_table(crate::data::STAR_TABLE, &[TableKind::Dhap2, TableKind::Dhap3Pair]);
+        let exon9 = crate::types::Exon9Values {
+            exon9_cn: None, exon9cn_in_consensus: None, exon9_raw_site1: 0.0, exon9_raw_site2: 0.0,
+        };
+        let features = FeatureFlags {
+            strand_bias_all: false, fuzzy_match: false, phase_disambiguate: false,
+            phase_readpair: false, changepoint_hybrid: false, het_check: false,
+            spacer_cn_check: false, consistency_check: false, hmm_cnv: false,
+            clip_evidence: false, d7_depth: false, kmer_validation: false,
+        };
+        let na19920 = obs(&["g.42126611C>G", "g.42126611C>G", "g.42129130C>G", "g.42129130C>G",
+                            "g.42129754G>A", "g.42129754G>A", "g.42130692G>A", "g.42130692G>A"]);
+        let holes = obs(&["g.42128936-42128937insGGGGCGAAAGGGGCGAAA", "g.42128936-42128937insGGGGCGAAA",
+                          "g.42128932C>T", "g.42128933G>A", "g.42128945C>T"]);
+
+        // Damaged NA19920: masked, all 9 candidates survive; a key fits, so not flagged.
+        let masked = match_star(&mut na19920.clone(), &holes, "cn3", None, &c, &exon9, None, None, &features);
+        assert_eq!(masked.clean_call.as_deref(), Some(
+            "*10x2/*145;*10x2/*4;*145/*147x2;*145/*4x2;*147x2/*4;*1/*10x2;*1/*147x2;*1/*4x2;*4/*4x2"));
+        assert_eq!(masked.call_info.as_deref(), Some("more_than_one_match"));
+        assert!(!masked.unknown_sites_unmatched);
+        // Same sample with no unknown sites: today's single (wrong) answer, unchanged.
+        let exact = match_star(&mut na19920.clone(), &[], "cn3", None, &c, &exon9, None, None, &features);
+        assert_eq!(exact.clean_call.as_deref(), Some("*1/*10x2"));
+        assert!(!exact.unknown_sites_unmatched);
+
+        // Nothing fits even with the hole masked: flagged. Without holes: not flagged.
+        let none_fit = match_star(&mut obs(&["g.not_a_site"]), &obs(&["g.42128945C>T"]), "cn2", None, &c, &exon9, None, None, &features);
+        assert!(none_fit.unknown_sites_unmatched);
+        let no_holes = match_star(&mut obs(&["g.not_a_site"]), &[], "cn2", None, &c, &exon9, None, None, &features);
+        assert!(!no_holes.unknown_sites_unmatched);
+    }
 
     #[test]
     fn an_unknown_site_never_acts_as_a_reference_call() {
