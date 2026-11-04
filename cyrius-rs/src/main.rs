@@ -7,7 +7,7 @@ use std::path::Path;
 use cyrius_rs::caller::call_variants::{
     call_cn_snp, call_cn_var, call_cn_var_homo, call_exon9gc, call_var42126938,
     call_var42127526_var42127556, call_var42127803hap, call_var42130655ins_a,
-    get_allele_counts_var42128936, get_called_variants, reportable_cnvtag, update_var42128936,
+    get_allele_counts_var42128936, get_called_variants, reportable_cnvtag, uncallable_variants, update_var42128936,
     NOISY_VAR,
 };
 use cyrius_rs::caller::cnv_hybrid::get_cnvtag;
@@ -461,6 +461,7 @@ fn d6_star_caller(
             kmer_validation: None, resolver_posterior: None,
             resolved_by: None, phase_pairs: None,
             rep7_mapq0_fraction: normalized_depth.rep7_mapq0_fraction,
+            uncallable_target_sites: None,
         };
     }
 
@@ -669,6 +670,7 @@ fn d6_star_caller(
             kmer_validation: None, resolver_posterior: None,
             resolved_by: None, phase_pairs: None,
             rep7_mapq0_fraction: normalized_depth.rep7_mapq0_fraction,
+            uncallable_target_sites: None,
         };
     }
 
@@ -816,6 +818,8 @@ fn d6_star_caller(
     let mut total_callset = get_called_variants(&params.var_list, &cn_call_var, 0);
     let called_var_homo = get_called_variants(&params.var_list, &cn_call_var_homo, cn_call_var.len());
     total_callset.extend(called_var_homo);
+    let mut uncallable_target_sites = uncallable_variants(&params.var_list, &cn_call_var, 0);
+    uncallable_target_sites.extend(uncallable_variants(&params.var_list, &cn_call_var_homo, cn_call_var.len()));
     total_callset.extend(var42126938);
     total_callset.extend(var42127526);
     total_callset.extend(var42130655ins_a);
@@ -1048,6 +1052,7 @@ fn d6_star_caller(
         resolved_by,
         phase_pairs,
         rep7_mapq0_fraction: normalized_depth.rep7_mapq0_fraction,
+        uncallable_target_sites: Some(uncallable_target_sites),
     }
 }
 
@@ -1298,6 +1303,7 @@ fn main() {
         "Median_depth": cyp2d6_call.median_depth,
         "REP7_MAPQ0_fraction": cyp2d6_call.rep7_mapq0_fraction,
         "Header_drops_multimappers": header_drops_multimappers,
+        "Uncallable_target_sites": cyp2d6_call.uncallable_target_sites,
         "Total_CN": cyp2d6_call.total_cn,
         "Spacer_CN": cyp2d6_call.spacer_cn,
         "Total_CN_raw": cyp2d6_call.total_cn_raw,

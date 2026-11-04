@@ -160,6 +160,8 @@ pub struct D6Call {
     pub phase_pairs: Option<Vec<PairEvidence>>,
     /// See `NormalizedDepth::rep7_mapq0_fraction`.
     pub rep7_mapq0_fraction: Option<f64>,
+    /// Target variants with no dosage call (see `call_variants::uncallable_variants`).
+    pub uncallable_target_sites: Option<Vec<String>>,
 }
 
 impl D6Call {
@@ -190,6 +192,7 @@ impl D6Call {
             resolved_by: None,
             phase_pairs: None,
             rep7_mapq0_fraction: None,
+            uncallable_target_sites: None,
         }
     }
 }

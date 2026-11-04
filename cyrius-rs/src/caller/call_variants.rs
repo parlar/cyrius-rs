@@ -593,12 +593,38 @@ pub fn get_called_variants(
     total_callset
 }
 
+/// Target variants whose dosage could not be called (`None`): no usable
+/// reads, or no copy number reached its posterior cutoff. A missing call is
+/// not a reference call, so these are reported instead of being dropped the
+/// way `get_called_variants` drops them.
+pub fn uncallable_variants(
+    var_list: &[String],
+    cn_calls: &[Option<u32>],
+    starting_index: usize,
+) -> Vec<String> {
+    cn_calls
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.is_none())
+        .map(|(i, _)| var_list[i + starting_index].clone())
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn uncallable_variants_lists_sites_without_a_call_and_not_zero_calls() {
+        let names: Vec<String> = ["g.a", "g.b", "g.c", "g.d"].iter().map(|s| s.to_string()).collect();
+        let calls = [Some(0), None, Some(1)];
+        assert_eq!(uncallable_variants(&names, &calls, 0), vec!["g.b".to_string()]);
+        assert_eq!(uncallable_variants(&names, &[None], 3), vec!["g.d".to_string()]);
+        assert!(uncallable_variants(&names, &[Some(0), Some(2)], 0).is_empty());
+    }
+
     use super::*;
 
     // Finding #24: a zero-depth exon9 site was pushed into d6_values as 0.0,
