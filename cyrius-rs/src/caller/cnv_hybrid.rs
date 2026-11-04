@@ -253,6 +253,28 @@ fn transform_cnvtag(cnvtag: &str) -> String {
     split_call.join("_")
 }
 
+/// Check that the CNV combination produces the right final copy number.
+fn check_cn_match(
+    sv_list: &[String],
+    cn_increase: &[&str],
+    cn_decrease: &[&str],
+    final_cn: u32,
+) -> bool {
+    if sv_list.is_empty() {
+        return false;
+    }
+    let mut initial_cn: i32 = 2;
+    for sv in sv_list {
+        if cn_increase.contains(&sv.as_str()) {
+            initial_cn += 1;
+        }
+        if cn_decrease.contains(&sv.as_str()) {
+            initial_cn -= 1;
+        }
+    }
+    initial_cn == final_cn as i32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -302,26 +324,4 @@ mod tests {
             "an all-events-cancel result must be a no-call, not Some(\"\")"
         );
     }
-}
-
-/// Check that the CNV combination produces the right final copy number.
-fn check_cn_match(
-    sv_list: &[String],
-    cn_increase: &[&str],
-    cn_decrease: &[&str],
-    final_cn: u32,
-) -> bool {
-    if sv_list.is_empty() {
-        return false;
-    }
-    let mut initial_cn: i32 = 2;
-    for sv in sv_list {
-        if cn_increase.contains(&sv.as_str()) {
-            initial_cn += 1;
-        }
-        if cn_decrease.contains(&sv.as_str()) {
-            initial_cn -= 1;
-        }
-    }
-    initial_cn == final_cn as i32
 }

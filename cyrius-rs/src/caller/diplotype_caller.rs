@@ -228,8 +228,7 @@ fn parse_target_variant(name: &str) -> Option<UnifiedSite> {
     }
 
     // Single-base deletion: "delT"
-    if rest.starts_with("del") {
-        let del_seq = &rest[3..];
+    if let Some(del_seq) = rest.strip_prefix("del") {
         if del_seq.len() == 1 && del_seq.as_bytes()[0].is_ascii_alphabetic() {
             let ref_base = del_seq.as_bytes()[0].to_ascii_uppercase();
             return Some(UnifiedSite {
@@ -810,7 +809,7 @@ pub fn score_candidates(
         for a in cand_assignments {
             let reads_ll = read_log10_likelihoods(&reads, &d6_alleles, &sites, cn as u32, a, &lut);
             let ll: f64 = reads_ll.iter().sum();
-            if best.as_ref().map_or(true, |(b, _)| ll > *b) {
+            if best.as_ref().is_none_or(|(b, _)| ll > *b) {
                 best = Some((ll, reads_ll));
             }
         }

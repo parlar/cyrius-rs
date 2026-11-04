@@ -29,7 +29,7 @@ pub fn parse_region_file(content: &str, genome: &str) -> RegionDic {
         let region: Region = (nchr, region_start, region_end, region_name);
         region_dic
             .entry(region_type)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push((region, region_gc));
     }
     region_dic
@@ -62,7 +62,7 @@ pub fn parse_gmm_file(content: &str) -> GmmParameter {
             })
             .collect();
         dpar.entry(variant_id)
-            .or_insert_with(HashMap::new)
+            .or_default()
             .entry(param_name)
             .or_insert(values);
     }

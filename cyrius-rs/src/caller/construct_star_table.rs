@@ -57,7 +57,7 @@ fn make_star_set(stars: &[&str]) -> String {
 }
 
 fn insert_hap(key: &str, star_set: &str, hap_dic: &mut HashMap<String, Vec<String>>) {
-    let entry = hap_dic.entry(key.to_string()).or_insert_with(Vec::new);
+    let entry = hap_dic.entry(key.to_string()).or_default();
     if !entry.contains(&star_set.to_string()) {
         entry.push(star_set.to_string());
     }

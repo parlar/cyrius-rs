@@ -369,7 +369,7 @@ pub fn extract_hap(
             continue;
         }
         let key: String = hap_base.iter().collect();
-        hap_count.entry(key).or_insert_with(Vec::new).push(1);
+        hap_count.entry(key).or_default().push(1);
     }
     hap_count
 }

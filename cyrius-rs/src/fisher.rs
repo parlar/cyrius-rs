@@ -44,11 +44,7 @@ pub fn fisher_exact(table: [[u64; 2]; 2]) -> (f64, f64) {
     let col1 = a + c;
     let n = a + b + c + d;
 
-    let a_min = if col1 + row1 > n {
-        (col1 + row1 - n) as u64
-    } else {
-        0
-    };
+    let a_min = (col1 + row1).saturating_sub(n);
     let a_max = std::cmp::min(row1, col1);
 
     let mut p_value = 0.0;

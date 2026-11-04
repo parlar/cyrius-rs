@@ -265,7 +265,7 @@ fn compute_crossing(d6_reads: &[HashSet<String>], d7_reads: &[HashSet<String>]) 
 
     let mut n_consistent = 0usize;
     let mut n_crossing = 0usize;
-    for (_, (is_d6, is_d7)) in &assignments {
+    for (is_d6, is_d7) in assignments.values() {
         if *is_d6 && *is_d7 {
             n_crossing += 1;
         } else if *is_d6 || *is_d7 {

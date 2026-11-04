@@ -1533,7 +1533,7 @@ mod tests {
     fn pileup_record(at_variant: &str, tail_len: usize, cigar: Vec<bam::record::Cigar>) -> bam::Record {
         let mut seq = vec![b'C'; 30];
         seq.extend_from_slice(at_variant.as_bytes());
-        seq.extend(std::iter::repeat(b'C').take(tail_len));
+        seq.extend(std::iter::repeat_n(b'C', tail_len));
         let mut record = bam::Record::new();
         record.set(
             b"r",

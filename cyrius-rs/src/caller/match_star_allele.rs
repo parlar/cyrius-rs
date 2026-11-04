@@ -435,16 +435,14 @@ pub fn get_final_call_clean(
     // this structural rule is kept here rather than delegated to the resolver.
     if cnvcall == "exon9hyb_star5" {
         if split_call == ["*10", "*10"] {
-            return if spacer_cn.map_or(false, |cn| cn > 2) {
+            return if spacer_cn.is_some_and(|cn| cn > 2) {
                 Some("*5/*36+*10".to_string())
             } else {
                 None
             };
         }
-        if split_call == ["*4", "*4"] {
-            if spacer_cn.map_or(false, |cn| cn > 2) {
-                return Some("*5/*4.013+*4".to_string());
-            }
+        if split_call == ["*4", "*4"] && spacer_cn.is_some_and(|cn| cn > 2) {
+            return Some("*5/*4.013+*4".to_string());
         }
         return Some(split_call.join("/"));
     }
@@ -473,7 +471,7 @@ pub fn get_final_call_clean(
             // indistinguishable from short reads (*36 is a superset of *10).
             // Output both alternatives.
             if remaining == "*36" {
-                return Some(format!("*36/*36+*10;*10/*36x2"));
+                return Some("*36/*36+*10;*10/*36x2".to_string());
             }
             return Some(format!("{}/*36+*10", remaining));
         }
@@ -524,7 +522,7 @@ pub fn get_final_call_clean(
         // a *5 deletion on one haplotype with tandem *36+*10 on the other.
         // Expected spacer CN: *36+*10/*36+*10 = 4, *5/*36x2+*10x2 = 5.
         if cnvcall == "exon9hyb_exon9hyb" && called_stars == "*10_*10_*36_*36" {
-            return if spacer_cn.map_or(false, |cn| cn > 4) {
+            return if spacer_cn.is_some_and(|cn| cn > 4) {
                 Some("*5/*36x2+*10x2".to_string())
             } else {
                 Some("*36+*10/*36+*10".to_string())
@@ -627,10 +625,8 @@ pub fn get_final_call_clean(
             }
         }
 
-        if cnvcall == "exon9hyb_star68" {
-            if *called_stars == "*4_*4_*4.013" {
-                return Some("*4.013+*4/*68+*4".to_string());
-            }
+        if cnvcall == "exon9hyb_star68" && *called_stars == "*4_*4_*4.013" {
+            return Some("*4.013+*4/*68+*4".to_string());
         }
 
         // Default: add *68 to the call
@@ -697,13 +693,15 @@ pub fn update_variants(
             }
         }
         // Add variants if not called to sufficient CN
-        for var_to_add in &["g.42130692G>A"] {
+        {
+            let var_to_add = &"g.42130692G>A";
             let count = var_observed.iter().filter(|v| v.as_str() == *var_to_add).count();
             if count > 0 && count <= cn {
                 var_observed.push(var_to_add.to_string());
             }
         }
-        for var_to_add in &["g.42129754G>A"] {
+        {
+            let var_to_add = &"g.42129754G>A";
             let count = var_observed.iter().filter(|v| v.as_str() == *var_to_add).count();
             if count > 0
                 && count <= cn
@@ -728,18 +726,17 @@ pub fn update_variants(
         if let (Some(exon9cn_consensus), Some(exon9_cn)) =
             (exon9.exon9cn_in_consensus, exon9.exon9_cn)
         {
-            if exon9cn_consensus > exon9_cn && exon9_cn <= 1 {
-                if !var_observed.contains(&"g.42126611C>G".to_string())
+            if exon9cn_consensus > exon9_cn && exon9_cn <= 1
+                && (!var_observed.contains(&"g.42126611C>G".to_string())
                     || (exon9.exon9_raw_site1.min(exon9.exon9_raw_site2) < 1.15
-                        && exon9.exon9_raw_site1.max(exon9.exon9_raw_site2) < 1.2)
-                {
+                        && exon9.exon9_raw_site1.max(exon9.exon9_raw_site2) < 1.2))
+            {
+                for _ in 0..(exon9cn_consensus - exon9_cn) {
+                    var_observed.push("exon9gc".to_string());
+                }
+                if !var_observed.contains(&"g.42126611C>G".to_string()) {
                     for _ in 0..(exon9cn_consensus - exon9_cn) {
-                        var_observed.push("exon9gc".to_string());
-                    }
-                    if !var_observed.contains(&"g.42126611C>G".to_string()) {
-                        for _ in 0..(exon9cn_consensus - exon9_cn) {
-                            var_observed.push("g.42126611C>G".to_string());
-                        }
+                        var_observed.push("g.42126611C>G".to_string());
                     }
                 }
             }

@@ -9,13 +9,13 @@ const ERROR_RATE: f64 = 0.1;
 /// Returns a Vec of 1 element (confident call) or 4 elements (two most likely scenarios).
 pub fn call_reg1_cn(full_cn: Option<u32>, count_reg1: f64, count_reg2: f64, min_read: f64) -> Vec<Option<CnProb>> {
     match full_cn {
-        None => vec![None.into()],
-        Some(0) => vec![Some(CnProb::Single(0)).into()],
-        Some(1) if count_reg1 > min_read => vec![Some(CnProb::Single(1)).into()],
+        None => vec![None],
+        Some(0) => vec![Some(CnProb::Single(0))],
+        Some(1) if count_reg1 > min_read => vec![Some(CnProb::Single(1))],
         Some(cn) => {
             let nsum = count_reg1 + count_reg2;
             if nsum == 0.0 {
-                return vec![None.into()];
+                return vec![None];
             }
             let mut prob = Vec::new();
             for i in 0..=cn {
@@ -37,7 +37,7 @@ pub fn call_reg1_cn(full_cn: Option<u32>, count_reg1: f64, count_reg2: f64, min_
             }
             let sum_prob: f64 = prob.iter().sum();
             if sum_prob == 0.0 {
-                return vec![None.into()];
+                return vec![None];
             }
             let mut post_prob: Vec<f64> = prob.iter().map(|&a| a / sum_prob).collect();
             if count_reg2 < count_reg1 {
@@ -52,11 +52,11 @@ pub fn call_reg1_cn(full_cn: Option<u32>, count_reg1: f64, count_reg2: f64, min_
             let top_prob = post_prob_sorted[0].1;
 
             if top_idx != 0 && count_reg1 <= min_read && count_reg2 >= min_read {
-                return vec![Some(CnProb::Single(0)).into()];
+                return vec![Some(CnProb::Single(0))];
             }
 
             if top_prob >= POSTERIOR_CUTOFF_STRINGENT {
-                return vec![Some(CnProb::Single(top_idx as u32)).into()];
+                return vec![Some(CnProb::Single(top_idx as u32))];
             }
 
             // Output the two most likely scenarios
@@ -65,8 +65,7 @@ pub fn call_reg1_cn(full_cn: Option<u32>, count_reg1: f64, count_reg2: f64, min_
                 prob1: python_round3(top_prob),
                 cn2: post_prob_sorted[1].0 as u32,
                 prob2: python_round3(post_prob_sorted[1].1),
-            })
-            .into()]
+            })]
         }
     }
 }
