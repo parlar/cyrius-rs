@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** A target site with no dosage call stops counting as "no variant". It matches any copy count; every compatible candidate is kept; a phenotype is reported only when all candidates agree.
+**Goal:** A target site with no dosage call stops counting as "no variant". It matches any copy count; every compatible candidate is kept; a call can read `PASS` only when all candidates agree (wording corrected with D2: a set narrowed by read evidence keeps its answer but reads `Unknown_sites_resolved`).
 
 **Architecture:** The matcher today looks up one exact key. When a sample has unknown sites, it instead scans the table for every key that agrees on all *known* sites, and skips the two frequency rules that narrow a candidate set by habit rather than evidence. The existing reporting (`clinical_equivalence`, the resolver, `More_than_one_possible_genotype`) then does the rest unchanged. A separate formatting bug that this makes reachable is fixed first.
 
