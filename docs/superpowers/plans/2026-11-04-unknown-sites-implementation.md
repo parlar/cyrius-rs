@@ -489,6 +489,8 @@ and set `unknown_sites_unmatched` (instead of `false`) in the `StarCall` returne
 
 In the two PASS-only checks (`spacer_cn_check` ~L976, `consistency_check` ~L1015) change `filter == "PASS" || filter == "Fuzzy_match"` to also accept `"Unknown_sites_unmatched"`, so those checks still see the calls they saw before.
 
+Same for the third such check (added at pre-flight, 2026-11-04): `downgrade_filter_for_multimapper_depletion` in `cyrius-rs/src/depth_calling/bin_count.rs` (~L314) matches `Some("PASS" | "Fuzzy_match")`; make it `Some("PASS" | "Fuzzy_match" | "Unknown_sites_unmatched")`, update its doc comment, and add one assertion beside the existing `Fuzzy_match` one in its test (~L1159): `assert_eq!(flag(Some("Unknown_sites_unmatched"), Some(true)), depleted);`. Without it, a call that today reads `Fuzzy_match` -> `Multimapper_depleted` would lose the depletion warning. The confidence penalty (`confidence.rs` ~L173) is left alone: the new value takes the default 0.5, below `Fuzzy_match`'s 0.6.
+
 - [ ] **Step 5: test + suite + `cargo +1.85 check` + gate 4 (empty expectations).** Commit `feat(matching): an uncallable target site matches any copy count`.
 
 - [ ] **Step 6 (only if D1-b was chosen instead):** in Step 3, when `unknown_sites_unmatched` is true, return `StarCall { call_info: Some("no_match".into()), raw_call: Some(vec![]), clean_call: None, variants_called: Some(var_observed.join(" ")), unknown_sites_unmatched: true }` instead of running retry/fuzzy, and drop the Step 4 filter value.
@@ -506,6 +508,7 @@ No code change. Rules locked here, before running:
 | NA21105, 25 % | `*3/*111`, `PASS`, `Resolved_by` `resolver` | Measured with the B2 prototype |
 | NA20289, 25 % | `*6/*11`, filter `LowQ_coverage_MAD` | Measured with the B2 prototype |
 | HG02373, 25 % | No `_` in the genotype; `*14/*36+*10` among its options | Task 1 test |
+| NA19908, 25 % (the D1 case) | Unchanged: `*1/*46;*43/*45;*12/*43`, filter `More_than_one_possible_genotype` (the ambiguity filter, main.rs ~L953, comes before the new one) | Measured with the B2 prototype (`b2/p25_on`) |
 | HG03259, 25 % (single-copy path, not in the prototype) | **PREDICTED (not run)** — record what happens | — |
 
 The 9 NA19920 diplotypes: `*1/*10x2`, `*1/*147x2`, `*1/*4x2`, `*145/*147x2`, `*4x2/*145`, `*4/*4x2`, `*10x2/*145`, `*4/*10x2`, `*4/*147x2`.
