@@ -10,6 +10,8 @@
 //!
 //! Usage:
 //!   cargo run --release --example mask_audit -- <accepted_dir> <truth.tsv> <damaged.json>
+//!   cargo run --release --example mask_audit -- --real <out_dir> <truth.tsv>
+//!     (addendum: real coverage holes in thinned BAMs; rules S1/S2 and K3)
 
 use cyrius_rs::caller::construct_star_table::{combination_table_for, get_hap_table, TableKind};
 use cyrius_rs::caller::match_star_allele::get_final_call_clean;
@@ -197,8 +199,112 @@ fn is_main_path(cnv: &str) -> bool {
         && !cnv.contains("star68")
 }
 
+/// Truth diplotype -> sorted main-allele multiset, e.g. "*1/*4x2" -> "*1_*4_*4".
+fn truth_multiset(t: &str) -> String {
+    let mut v: Vec<String> = Vec::new();
+    for hap in t.split('/') {
+        for part in hap.split('+') {
+            let (name, n) = match part.split_once('x') {
+                Some((a, b)) if b.chars().all(|c| c.is_ascii_digit()) && !b.is_empty() => (a, b.parse::<usize>().unwrap()),
+                _ => (part, 1),
+            };
+            for _ in 0..n { v.push(main_allele_name(name).to_string()); }
+        }
+    }
+    v.sort();
+    v.join("_")
+}
+
+fn norm_truth(truth: &str) -> String {
+    let mut out = String::new();
+    let mut rest = truth;
+    while let Some(i) = rest.find('(') {
+        let head = &rest[..i];
+        let j = rest[i..].find(')').map(|j| i + j).unwrap();
+        let start = head.rfind('*').unwrap();
+        out.push_str(&head[..start]);
+        out.push_str(&rest[i + 1..j]);
+        rest = &rest[j + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// (activity, phenotype) of a ';'-joined call if all alternatives agree and
+/// the activity is known; None otherwise ("not established").
+fn established(call: &str, func: &HashMap<String, HaplotypeFunctionality>) -> Option<(String, String)> {
+    let preds = match_phenotype(Some(call), func);
+    let (eq, _) = clinical_equivalence(&preds);
+    (eq == "same_effect" && preds[0].total_activity != "n/a")
+        .then(|| (preds[0].total_activity.clone(), preds[0].predicted_phenotype.clone()))
+}
+
+fn real_mode(out_dir: &str, truth_path: &str) {
+    let func = load_haplotype_functionality(HAPLOTYPE_FUNC);
+    let mut truth: HashMap<String, String> = HashMap::new();
+    for line in std::fs::read_to_string(truth_path).unwrap().lines() {
+        if line.starts_with('#') || line.trim().is_empty() { continue; }
+        let f: Vec<&str> = line.split('\t').collect();
+        truth.insert(f[0].to_string(), f[1].to_string());
+    }
+    let mut paths: Vec<_> = std::fs::read_dir(out_dir).unwrap().filter_map(|e| { let p = e.ok()?.path(); (p.extension()? == "json").then_some(p) }).collect();
+    paths.sort();
+    let (mut runs, mut called, mut with_holes, mut s2, mut s2_pass, mut wrong_no_holes) = (0, 0, 0, 0, 0, 0);
+    let (mut masked_runs, mut k3_wrong, mut truth_out) = (0, 0, 0);
+    let mut combos_cache: HashMap<String, StarCombinations> = HashMap::new();
+    for p in paths {
+        let s = p.file_stem().unwrap().to_string_lossy().to_string();
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        let d = &v[&s];
+        runs += 1;
+        let Some(call) = d["Genotype"].as_str() else { continue };
+        called += 1;
+        let tr = norm_truth(&truth[&s]);
+        let tp = match_phenotype(Some(&tr), &func);
+        let t_eff = (tp[0].total_activity.clone(), tp[0].predicted_phenotype.clone());
+        let c_eff = established(call, &func);
+        let holes: Vec<String> = d["Uncallable_target_sites"].as_array().map(|a| a.iter().map(|x| x.as_str().unwrap().to_string()).collect()).unwrap_or_default();
+        let conf_wrong = matches!(&c_eff, Some(e) if *e != t_eff);
+        let filter = d["Filter"].as_str().unwrap_or("None");
+        if !holes.is_empty() { with_holes += 1; }
+        if conf_wrong && holes.is_empty() { wrong_no_holes += 1; }
+        let tag = if conf_wrong && !holes.is_empty() { s2 += 1; if filter == "PASS" { s2_pass += 1; } "S2 CONFIDENTLY WRONG WITH HOLES" } else if conf_wrong { "confidently wrong, no holes" } else { "" };
+        println!("{s:8} call={call:<40} filter={filter:<32} est={c_eff:?} truth={} {t_eff:?} holes={} {tag}", truth[&s], holes.len());
+        if holes.is_empty() { continue; }
+        // Masking on the real holes (main path only).
+        let cnv = d["CNV_group"].as_str().unwrap_or("");
+        if !(is_main_path(cnv) && combination_table_for(cnv).is_some()) { println!("    masking: not on the main path ({cnv}), skipped"); continue; }
+        let kind = combination_table_for(cnv).unwrap();
+        let combos = combos_cache.entry(format!("{kind:?}")).or_insert_with(|| get_hap_table(STAR_TABLE, &[kind]));
+        let t = table_of(combos, kind);
+        let observed: Vec<String> = d["Variants_called"].as_array().map(|a| a.iter().map(|x| x.as_str().unwrap().to_string()).collect()).unwrap_or_default();
+        let unknown: Vec<String> = holes.iter().filter(|h| !observed.contains(h)).cloned().collect();
+        if unknown.len() != holes.len() { println!("    {} listed site(s) were resolved by a dedicated caller and are not masked", holes.len() - unknown.len()); }
+        let hits = masked_enum(&observed, &unknown, max_variant_count(t), t);
+        let mut raw: BTreeSet<String> = BTreeSet::new();
+        for (_, k) in &hits { raw.extend(t[k].iter().cloned()); }
+        let raw: Vec<String> = raw.into_iter().collect();
+        let processed = post_process(&raw, false);
+        let (mv, mcall) = verdict(&processed, cnv, d["Spacer_CN"].as_u64().map(|x| x as u32), &func);
+        masked_runs += 1;
+        let tin = processed.iter().any(|m| *m == truth_multiset(&tr));
+        if !tin { truth_out += 1; }
+        let mwrong = matches!(&mv, Verdict::Established(a, ph) if (a.clone(), ph.clone()) != t_eff);
+        if mwrong { k3_wrong += 1; }
+        println!("    masked {} site(s): {} keys -> {} candidates -> {mv:?}{} | truth in set: {tin}{}",
+            unknown.len(), hits.len(), processed.len(), if mwrong { "  <-- K3 VIOLATION" } else { "" },
+            mcall.map(|c| format!(" | call {}", if c.len() > 90 { format!("{}...", &c[..90]) } else { c })).unwrap_or_default());
+    }
+    println!("\nruns {runs} | gave a genotype {called} | listed >=1 uncallable site {with_holes}");
+    println!("confidently wrong WITH holes (S2): {s2} (of which PASS {s2_pass}) | confidently wrong with NO holes: {wrong_no_holes}");
+    println!("masking on real holes: {masked_runs} runs | ESTABLISHED-WRONG {k3_wrong} | truth fell out of the masked set {truth_out}");
+    println!("rule: {}", if s2 == 0 { "S1 (no confidently wrong run with holes)" } else { "S2 (defect occurs in this data)" });
+    println!("K3 on real holes: {}", if k3_wrong == 0 { "PASS" } else { "FAIL" });
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args[1] == "--real" { return real_mode(&args[2], &args[3]); }
     let (acc_dir, truth_path, dmg_path) = (&args[1], &args[2], &args[3]);
 
     let func = load_haplotype_functionality(HAPLOTYPE_FUNC);
