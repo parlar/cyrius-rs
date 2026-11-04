@@ -7,7 +7,7 @@ use std::path::Path;
 use cyrius_rs::caller::call_variants::{
     call_cn_snp, call_cn_var, call_cn_var_homo, call_exon9gc, call_var42126938,
     call_var42127526_var42127556, call_var42127803hap, call_var42130655ins_a,
-    get_allele_counts_var42128936, get_called_variants, reportable_cnvtag, update_var42128936,
+    get_allele_counts_var42128936, get_called_variants, reportable_cnvtag, uncallable_variants, update_var42128936,
     NOISY_VAR,
 };
 use cyrius_rs::caller::cnv_hybrid::get_cnvtag;
@@ -176,6 +176,15 @@ fn feature_flags(cli: &Cli) -> FeatureFlags {
 /// Derived from the struct (`Serialize`), so a new flag cannot be left out.
 fn feature_flags_json(features: &FeatureFlags) -> serde_json::Value {
     serde_json::to_value(features).expect("FeatureFlags is a struct of bools")
+}
+
+/// `Phase_pairs_truncated`: `null` when the phase step did not run, otherwise
+/// whether `Phase_pairs` is cut short by a read error.
+fn phase_pairs_truncated_json(truncated: Option<bool>) -> serde_json::Value {
+    match truncated {
+        None => serde_json::Value::Null,
+        Some(t) => serde_json::json!(t),
+    }
 }
 
 /// The JSON `Phase_pairs`: null when the phase step did not run, else one
@@ -459,8 +468,9 @@ fn d6_star_caller(
             raw_star_allele: None, call_info: None, exon9_cn: None, cnv_consensus: None,
             d67_snp_call: None, d67_snp_raw: None, variant_raw_count: Some(raw_count),
             kmer_validation: None, resolver_posterior: None,
-            resolved_by: None, phase_pairs: None,
+            resolved_by: None, phase_pairs: None, phase_pairs_truncated: None,
             rep7_mapq0_fraction: normalized_depth.rep7_mapq0_fraction,
+            uncallable_target_sites: None,
         };
     }
 
@@ -667,8 +677,9 @@ fn d6_star_caller(
             d67_snp_raw: Some(raw_d6_cn_str),
             variant_raw_count: Some(raw_count),
             kmer_validation: None, resolver_posterior: None,
-            resolved_by: None, phase_pairs: None,
+            resolved_by: None, phase_pairs: None, phase_pairs_truncated: None,
             rep7_mapq0_fraction: normalized_depth.rep7_mapq0_fraction,
+            uncallable_target_sites: None,
         };
     }
 
@@ -816,6 +827,8 @@ fn d6_star_caller(
     let mut total_callset = get_called_variants(&params.var_list, &cn_call_var, 0);
     let called_var_homo = get_called_variants(&params.var_list, &cn_call_var_homo, cn_call_var.len());
     total_callset.extend(called_var_homo);
+    let mut uncallable_target_sites = uncallable_variants(&params.var_list, &cn_call_var, 0);
+    uncallable_target_sites.extend(uncallable_variants(&params.var_list, &cn_call_var_homo, cn_call_var.len()));
     total_callset.extend(var42126938);
     total_callset.extend(var42127526);
     total_callset.extend(var42130655ins_a);
@@ -843,6 +856,7 @@ fn d6_star_caller(
     let mut resolver_posterior: Option<f64> = None;
     let mut resolved_by: Option<&'static str> = None;
     let mut phase_pairs: Option<Vec<PairEvidence>> = None;
+    let mut phase_pairs_truncated: Option<bool> = None;
     let is_fuzzy = star_called
         .call_info
         .as_deref()
@@ -875,6 +889,7 @@ fn d6_star_caller(
                         index_name,
                         features.phase_readpair,
                     );
+                    phase_pairs_truncated = Some(outcome.pairs_truncated);
                     phase_pairs = Some(outcome.pairs);
                     if let Some(resolved) = outcome.resolved {
                         log::info!("phase_disambiguate: {} -> {}", call, resolved);
@@ -1047,7 +1062,9 @@ fn d6_star_caller(
         resolver_posterior,
         resolved_by,
         phase_pairs,
+        phase_pairs_truncated,
         rep7_mapq0_fraction: normalized_depth.rep7_mapq0_fraction,
+        uncallable_target_sites: Some(uncallable_target_sites),
     }
 }
 
@@ -1298,6 +1315,7 @@ fn main() {
         "Median_depth": cyp2d6_call.median_depth,
         "REP7_MAPQ0_fraction": cyp2d6_call.rep7_mapq0_fraction,
         "Header_drops_multimappers": header_drops_multimappers,
+        "Uncallable_target_sites": cyp2d6_call.uncallable_target_sites,
         "Total_CN": cyp2d6_call.total_cn,
         "Spacer_CN": cyp2d6_call.spacer_cn,
         "Total_CN_raw": cyp2d6_call.total_cn_raw,
@@ -1324,6 +1342,7 @@ fn main() {
         // phase step (null when it did not run).
         "Resolved_by": cyp2d6_call.resolved_by,
         "Phase_pairs": phase_pairs_json(cyp2d6_call.phase_pairs.as_deref()),
+        "Phase_pairs_truncated": phase_pairs_truncated_json(cyp2d6_call.phase_pairs_truncated),
         // Provenance: which build and which configuration produced this record.
         "Tool_version": TOOL_VERSION,
         "Tool_commit": TOOL_COMMIT,
@@ -1575,6 +1594,17 @@ mod tests {
     fn phase_disambiguate_and_no_phase_disambiguate_conflict() {
         let err = parse(&["--phase-disambiguate", "--no-phase-disambiguate"]).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::ArgumentConflict, "{err}");
+    }
+
+    #[test]
+    fn phase_pairs_truncated_is_null_when_the_phase_step_did_not_run() {
+        assert_eq!(phase_pairs_truncated_json(None), serde_json::Value::Null);
+    }
+
+    #[test]
+    fn phase_pairs_truncated_distinguishes_a_complete_list_from_an_aborted_one() {
+        assert_eq!(phase_pairs_truncated_json(Some(false)), serde_json::json!(false));
+        assert_eq!(phase_pairs_truncated_json(Some(true)), serde_json::json!(true));
     }
 
     #[test]

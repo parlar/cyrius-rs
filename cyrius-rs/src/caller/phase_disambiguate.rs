@@ -7,6 +7,7 @@
 use crate::caller::match_star_allele::main_allele_name;
 use crate::depth_calling::snp_count::passing_read;
 use crate::types::StarCombinations;
+pub use crate::depth_calling::{PHASE_MIN_BASE_QUALITY, QUAL_UNAVAILABLE};
 use rust_htslib::bam::{self, Read as BamRead};
 use std::collections::{HashMap, HashSet};
 
@@ -220,13 +221,42 @@ fn phase_read_passes(record: &bam::Record) -> bool {
         && passing_read(record, false, false)
 }
 
+/// What the reads of one fragment showed at one site.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum SiteObs {
+    #[default]
+    Unseen,
+    /// ALT (`true`) or REF (`false`), with every read agreeing.
+    Allele(bool),
+    /// Reads of the same fragment disagree: the site is not evidence.
+    Conflict,
+}
+
+impl SiteObs {
+    /// Add one read's observation. Order-independent: any disagreement is a
+    /// conflict for good, so no read can overwrite another.
+    fn merge(self, seen: Option<bool>) -> SiteObs {
+        match (self, seen) {
+            (s, None) => s,
+            (SiteObs::Unseen, Some(a)) => SiteObs::Allele(a),
+            (SiteObs::Allele(old), Some(a)) if old == a => SiteObs::Allele(a),
+            (SiteObs::Allele(_), Some(_)) | (SiteObs::Conflict, Some(_)) => SiteObs::Conflict,
+        }
+    }
+
+    fn allele(self) -> Option<bool> {
+        match self {
+            SiteObs::Allele(a) => Some(a),
+            _ => None,
+        }
+    }
+}
+
 /// What one fragment (all reads sharing a qname) showed at a pair's two sites.
 #[derive(Debug, Default)]
 struct Fragment {
-    /// ALT (`Some(true)`), REF (`Some(false)`) or not seen at the first site.
-    allele1: Option<bool>,
-    /// The same at the second site.
-    allele2: Option<bool>,
+    site1: SiteObs,
+    site2: SiteObs,
     /// Highest MAPQ over every read of this qname that passed the filters.
     max_mapq: u8,
 }
@@ -243,12 +273,8 @@ fn observe_read(
     let allele1 = check_allele_pileup(record, &seq, rv1);
     let allele2 = check_allele_pileup(record, &seq, rv2);
     let entry = fragments.entry(read_name).or_default();
-    if allele1.is_some() {
-        entry.allele1 = allele1;
-    }
-    if allele2.is_some() {
-        entry.allele2 = allele2;
-    }
+    entry.site1 = entry.site1.merge(allele1);
+    entry.site2 = entry.site2.merge(allele2);
     entry.max_mapq = entry.max_mapq.max(record.mapq());
 }
 
@@ -260,20 +286,20 @@ fn observe_read(
 /// contribute observations. Read pairs share the same qname, so a mate
 /// covering pos1 and its partner covering pos2 will be linked.
 ///
-/// Returns the fragment tallies; all zero when the contig is missing or a
-/// fetch fails.
+/// Returns the fragment tallies; all zero when the contig is missing. A failed
+/// fetch or a BAM read error is an `Err`: partial tallies must not look measured.
 fn check_phasing(
     reader: &mut bam::IndexedReader,
     nchr: &str,
     rv1: &ResolvedVariant,
     rv2: &ResolvedVariant,
     use_read_pairs: bool,
-) -> PhaseCounts {
+) -> Result<PhaseCounts, String> {
     let pos1 = rv1.pos_0based;
     let pos2 = rv2.pos_0based;
     let tid = match reader.header().tid(nchr.as_bytes()) {
         Some(t) => t,
-        None => return PhaseCounts::default(),
+        None => return Ok(PhaseCounts::default()),
     };
 
     let mut fragments: HashMap<String, Fragment> = HashMap::new();
@@ -295,12 +321,12 @@ fn check_phasing(
                 ))
                 .is_err()
             {
-                return PhaseCounts::default();
+                return Err(format!("BAM fetch failed at {}:{}", nchr, pos1.min(pos2)));
             }
             for record_result in reader.records() {
                 let record = match record_result {
                     Ok(r) => r,
-                    Err(_) => continue,
+                    Err(e) => return Err(format!("BAM read failed at {}:{}: {}", nchr, pos1.min(pos2), e)),
                 };
                 if !phase_read_passes(&record) {
                     continue;
@@ -315,13 +341,13 @@ fn check_phasing(
             .fetch(bam::FetchDefinition::Region(tid as i32, start, end))
             .is_err()
         {
-            return PhaseCounts::default();
+            return Err(format!("BAM fetch failed at {}:{}", nchr, pos1.min(pos2)));
         }
 
         for record_result in reader.records() {
             let record = match record_result {
                 Ok(r) => r,
-                Err(_) => continue,
+                Err(e) => return Err(format!("BAM read failed at {}:{}: {}", nchr, pos1.min(pos2), e)),
             };
             if !phase_read_passes(&record) {
                 continue;
@@ -332,7 +358,7 @@ fn check_phasing(
 
     let mut counts = PhaseCounts::default();
     for f in fragments.values() {
-        match (f.allele1, f.allele2) {
+        match (f.site1.allele(), f.site2.allele()) {
             (Some(true), Some(true)) => counts.aa += 1,  // both ALT → same haplotype
             (Some(true), Some(false)) => counts.ar += 1, // one ALT, one REF → different haplotypes
             (Some(false), Some(true)) => counts.ra += 1,
@@ -346,11 +372,12 @@ fn check_phasing(
         }
     }
 
-    counts
+    Ok(counts)
 }
 
 /// Count one variant pair: resolve both names, fetch, tally. `None` when
-/// either variant has no lookup entry. The one counting path both
+/// either variant has no lookup entry, `Err` on a BAM fetch or read error.
+/// The one counting path both
 /// `disambiguate` and `count_pair` use.
 fn pair_evidence(
     reader: &mut bam::IndexedReader,
@@ -359,33 +386,34 @@ fn pair_evidence(
     vb: &str,
     variant_lookup: &VariantLookup,
     use_read_pairs: bool,
-) -> Option<PairEvidence> {
+) -> Result<Option<PairEvidence>, String> {
     let rv_a = match variant_lookup.resolve(va) {
         Some(rv) => rv,
         None => {
             log::debug!("phase_disambiguate: no lookup for variant {}", va);
-            return None;
+            return Ok(None);
         }
     };
     let rv_b = match variant_lookup.resolve(vb) {
         Some(rv) => rv,
         None => {
             log::debug!("phase_disambiguate: no lookup for variant {}", vb);
-            return None;
+            return Ok(None);
         }
     };
-    let counts = check_phasing(reader, nchr, &rv_a, &rv_b, use_read_pairs);
-    Some(PairEvidence {
+    let counts = check_phasing(reader, nchr, &rv_a, &rv_b, use_read_pairs)?;
+    Ok(Some(PairEvidence {
         va: va.to_string(),
         vb: vb.to_string(),
         pos_a: rv_a.pos_0based,
         pos_b: rv_b.pos_0based,
         counts,
-    })
+    }))
 }
 
 /// Count one variant pair exactly as `disambiguate` does on its default
-/// (single-fetch) path. `None` when either variant has no lookup entry.
+/// (single-fetch) path. `Ok(None)` when either variant has no lookup entry;
+/// `Err` on a BAM fetch or read error.
 /// For audits: the counts come from the shipped code, not a port.
 pub fn count_pair(
     reader: &mut bam::IndexedReader,
@@ -393,14 +421,14 @@ pub fn count_pair(
     va: &str,
     vb: &str,
     variant_lookup: &VariantLookup,
-) -> Option<PairEvidence> {
+) -> Result<Option<PairEvidence>, String> {
     pair_evidence(reader, nchr, va, vb, variant_lookup, false)
 }
 
 /// Count the reads overlapping one variant's position as `(alt, ref, none)`,
 /// with the phasing read filters and `check_allele_pileup`. `None` when the
-/// variant has no lookup entry; all zero when the contig is missing or the
-/// fetch fails. Counts reads, not fragments.
+/// variant has no lookup entry or when the fetch or a read fails; all zero when
+/// the contig is missing. Counts reads, not fragments.
 pub fn count_site(
     reader: &mut bam::IndexedReader,
     nchr: &str,
@@ -420,13 +448,13 @@ pub fn count_site(
         ))
         .is_err()
     {
-        return Some((0, 0, 0));
+        return None;
     }
     let (mut alt, mut ref_count, mut none) = (0, 0, 0);
     for record_result in reader.records() {
         let record = match record_result {
             Ok(r) => r,
-            Err(_) => continue,
+            Err(_) => return None,
         };
         if !phase_read_passes(&record) {
             continue;
@@ -449,7 +477,8 @@ pub fn count_site(
 /// (case-insensitive), so a read too short to hold a pattern cannot match it:
 /// a read ending inside a repeat is not ALT just because what it holds is a
 /// prefix of the ALT. If both patterns match (one is a prefix of the other),
-/// the longer one wins.
+/// the longer one wins. Bases below `PHASE_MIN_BASE_QUALITY` (or without a
+/// quality) give `None`.
 ///
 /// Returns Some(true) for ALT, Some(false) for REF, None if the position is
 /// not covered or neither pattern matches in full.
@@ -459,39 +488,58 @@ fn check_allele_pileup(
     rv: &ResolvedVariant,
 ) -> Option<bool> {
     let check_len = rv.alt_bases.len().max(rv.ref_bases.len());
-    let bases = read_bases_at_pos(record, seq, rv.pos_0based, check_len)?;
-    let bases_upper = bases.to_uppercase();
+    let (qp, len) = query_span_at_pos(record, seq.len(), rv.pos_0based, check_len)?;
+    let bases_upper: String = seq[qp..qp + len].iter().map(|&b| b as char).collect::<String>().to_uppercase();
     let alt_upper = rv.alt_bases.to_uppercase();
     let ref_upper = rv.ref_bases.to_uppercase();
-
-    match (
+    let is_alt = match (
         bases_upper.starts_with(&alt_upper),
         bases_upper.starts_with(&ref_upper),
     ) {
-        (true, true) => Some(alt_upper.len() > ref_upper.len()),
-        (true, false) => Some(true),
-        (false, true) => Some(false),
-        (false, false) => None, // holds neither whole pattern
+        (true, true) => alt_upper.len() > ref_upper.len(),
+        (true, false) => true,
+        (false, true) => false,
+        (false, false) => return None, // holds neither whole pattern
+    };
+    // Every base the winning pattern was matched on must be trustworthy.
+    //
+    // Unavailable quality is NOT high quality (review #5). SAM/BAM stores
+    // "qualities omitted" as 0xFF, which would sail past a `q < 13` test, so
+    // it leaves the phase unresolved rather than deciding it.
+    //
+    // The length check below is UNREACHABLE and kept only so the slice can
+    // never panic: `Record::qual()` returns exactly `seq_len()` bytes, and
+    // `query_span_at_pos` already bounds `qp + len` by `seq.len()`, with
+    // `compared <= len` because the pattern matched inside that span.
+    let compared = if is_alt { alt_upper.len() } else { ref_upper.len() };
+    let quals = record.qual();
+    if quals.len() < qp + compared {
+        return None; // unreachable; see above
     }
+    if quals[qp..qp + compared]
+        .iter()
+        .any(|&q| q == QUAL_UNAVAILABLE || q < PHASE_MIN_BASE_QUALITY)
+    {
+        return None;
+    }
+    Some(is_alt)
 }
 
-/// Read `n` bases from a read starting at a 0-based genomic position.
-/// Walks the CIGAR to find the query offset, then extracts bases.
-fn read_bases_at_pos(
+/// Query offset and number of available bases (at most `n`) for a 0-based
+/// genomic position, walking the CIGAR. `None` if the position is not on an
+/// aligned base of the read.
+fn query_span_at_pos(
     record: &rust_htslib::bam::Record,
-    seq: &[u8],
+    seq_len: usize,
     genomic_pos_0based: i64,
     n: usize,
-) -> Option<String> {
-    let record_start = record.pos(); // 0-based
-    let ref_offset = genomic_pos_0based - record_start;
+) -> Option<(usize, usize)> {
+    let ref_offset = genomic_pos_0based - record.pos();
     if ref_offset < 0 {
         return None;
     }
-
     let mut ref_pos = 0i64;
     let mut query_pos = 0usize;
-
     for &cigar_elem in record.cigar().iter() {
         use rust_htslib::bam::record::Cigar::*;
         match cigar_elem {
@@ -499,20 +547,7 @@ fn read_bases_at_pos(
                 let len = len as i64;
                 if ref_pos + len > ref_offset {
                     let qp = query_pos + (ref_offset - ref_pos) as usize;
-                    if qp + n <= seq.len() {
-                        let bases: String = seq[qp..qp + n]
-                            .iter()
-                            .map(|&b| b as char)
-                            .collect();
-                        return Some(bases);
-                    } else if qp < seq.len() {
-                        let bases: String = seq[qp..seq.len()]
-                            .iter()
-                            .map(|&b| b as char)
-                            .collect();
-                        return Some(bases);
-                    }
-                    return None;
+                    return if qp < seq_len { Some((qp, n.min(seq_len - qp))) } else { None };
                 }
                 ref_pos += len;
                 query_pos += len as usize;
@@ -541,6 +576,15 @@ pub struct PhaseOutcome {
     /// step stopped before counting (not two options, no differentiating
     /// pair, or the BAM could not be opened).
     pub pairs: Vec<PairEvidence>,
+    /// True when the step stopped early -- a read error partway through, or
+    /// a BAM that could not be opened at all -- and `pairs` therefore holds
+    /// only the pairs finished before it stopped (none, for an unopenable
+    /// BAM). Each listed pair is still a complete measurement; the list is
+    /// not complete. `false` on a run that evaluated every differentiating
+    /// pair, and also, with an empty list, on a run that completed but had
+    /// nothing to phase (not two options, too few variants, or no
+    /// differentiating pair).
+    pub pairs_truncated: bool,
 }
 
 /// Attempt to disambiguate an ambiguous CN=2 diplotype call using physical phasing.
@@ -667,7 +711,10 @@ pub fn disambiguate(
         Ok(r) => r,
         Err(e) => {
             log::warn!("phase_disambiguate: failed to open BAM: {}", e);
-            return PhaseOutcome::default();
+            // Unlike the three early returns above (which ran and found
+            // nothing to phase, so `false` is honest), this one aborted
+            // before reading anything: report it as cut short.
+            return PhaseOutcome { resolved: None, pairs: Vec::new(), pairs_truncated: true };
         }
     };
 
@@ -678,8 +725,12 @@ pub fn disambiguate(
     for &(va, vb, cis_in_dt1) in &phasing_pairs {
         let evidence =
             match pair_evidence(&mut reader, nchr, va, vb, variant_lookup, use_read_pairs) {
-                Some(e) => e,
-                None => continue,
+                Ok(Some(e)) => e,
+                Ok(None) => continue,
+                Err(e) => {
+                    log::warn!("phase_disambiguate: {e}; phase left unresolved");
+                    return PhaseOutcome { resolved: None, pairs, pairs_truncated: true };
+                }
             };
         let cis_count = evidence.counts.cis();
         let trans_count = evidence.counts.trans();
@@ -741,7 +792,7 @@ pub fn disambiguate(
         log::info!("phase_disambiguate: inconclusive for {}", clean_call);
         None
     };
-    PhaseOutcome { resolved, pairs }
+    PhaseOutcome { resolved, pairs, pairs_truncated: false }
 }
 
 /// Check if two variants are on the same haplotype (cis) in a given diplotype.
@@ -927,10 +978,10 @@ mod tests {
             ref_bases: "A".to_string(),
         };
 
-        let single = check_phasing(&mut reader, "chr22", &rv_early, &rv_late, false);
+        let single = check_phasing(&mut reader, "chr22", &rv_early, &rv_late, false).unwrap();
         let single = (single.cis(), single.trans());
         // 100 bp apart, so --phase-readpair takes the same single-fetch path.
-        let readpair = check_phasing(&mut reader, "chr22", &rv_early, &rv_late, true);
+        let readpair = check_phasing(&mut reader, "chr22", &rv_early, &rv_late, true).unwrap();
         let readpair = (readpair.cis(), readpair.trans());
 
         // Clean up before the assertions so a failure still leaves nothing behind.
@@ -1055,6 +1106,108 @@ mod tests {
         dir
     }
 
+    /// An indexed BAM of 1500 fragments whose third BGZF data block has a
+    /// flipped CRC byte, so reading it fails partway. Returns the BAM path.
+    fn write_corrupt_bam(dir: &std::path::Path) -> std::path::PathBuf {
+        // Enough fragments that the BAM spans several BGZF blocks.
+        let mut records = Vec::new();
+        for i in 0..1500 {
+            records.extend(fixture_fragment(&format!("f{i}"), true, true, 60, 60));
+        }
+        let path = write_fixture_bam(dir, "readerr.bam", records);
+        let mut bytes = std::fs::read(&path).unwrap();
+        let size0 = u16::from_le_bytes([bytes[16], bytes[17]]) as usize + 1;
+        let size1 = u16::from_le_bytes([bytes[size0 + 16], bytes[size0 + 17]]) as usize + 1;
+        let off2 = size0 + size1;
+        let size2 = u16::from_le_bytes([bytes[off2 + 16], bytes[off2 + 17]]) as usize + 1;
+        assert!(size2 > 28, "too few records for a third data block");
+        bytes[off2 + size2 - 8] ^= 0xFF;
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn check_phasing_reports_a_read_error_instead_of_partial_counts() {
+        let dir = fixture_dir("readerr");
+        let path = write_corrupt_bam(&dir);
+        let lookup = fixture_lookup();
+        let early = lookup.resolve("g.early").unwrap();
+        let late = lookup.resolve("g.late").unwrap();
+        let mut reader = bam::IndexedReader::from_path(&path).unwrap();
+        let counts = check_phasing(&mut reader, "chr22", &early, &late, false);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(counts.is_err(), "check_phasing gave {counts:?}");
+    }
+
+    #[test]
+    fn an_aborted_run_marks_its_pair_list_truncated() {
+        // The corrupt-BGZF fixture: the read fails partway, so `disambiguate`
+        // stops. It must not decide, and must say its list is incomplete.
+        let dir = fixture_dir("abort_trunc");
+        let bam_path = write_corrupt_bam(&dir);
+        let (call, raw, star_combinations) = phase_tie();
+        let outcome = disambiguate(
+            &call,
+            &raw,
+            &star_combinations,
+            &fixture_lookup(),
+            bam_path.to_str().unwrap(),
+            "chr22",
+            None,
+            None,
+            false,
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(outcome.resolved, None, "an aborted run must not decide");
+        assert!(outcome.pairs_truncated, "an aborted run must mark its list truncated");
+    }
+
+    #[test]
+    fn a_bam_that_cannot_be_opened_marks_the_pair_list_truncated() {
+        // Reaching the reader-open failure: the step stops before counting
+        // anything, so an empty `pairs` with `false` would read as "ran,
+        // nothing to phase" -- indistinguishable from the legitimate empty
+        // case. It must say it was cut short.
+        let dir = fixture_dir("unopenable");
+        let missing = dir.join("does_not_exist.bam");
+        let (call, raw, star_combinations) = phase_tie();
+        let outcome = disambiguate(
+            &call, &raw, &star_combinations, &fixture_lookup(),
+            missing.to_str().unwrap(), "chr22", None, None, false,
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(outcome.resolved, None);
+        assert!(outcome.pairs.is_empty());
+        assert!(outcome.pairs_truncated, "an unopenable BAM must mark the list truncated");
+    }
+
+    #[test]
+    fn a_run_with_nothing_to_phase_is_not_truncated() {
+        // Control for the test above: a run that returns before the reader is
+        // opened because there is nothing to phase (here: not exactly two
+        // diplotype options) is a completed run, not an abort, and must stay
+        // `false`. Without this, a later change could mark every empty list
+        // truncated and nothing would notice.
+        let (_call, _raw, star_combinations) = phase_tie();
+        let outcome = disambiguate(
+            "*1/*1", &["*1_*1".to_string()],
+            &star_combinations, &fixture_lookup(),
+            "/nonexistent/never_read.bam", "chr22", None, None, false,
+        );
+        assert_eq!(outcome, PhaseOutcome::default());
+        assert!(!outcome.pairs_truncated, "a run with nothing to phase is not truncated");
+    }
+
+    #[test]
+    fn a_completed_run_is_not_marked_truncated() {
+        let records = (0..3)
+            .map(|i| spanning_record(&format!("q{i}"), true, true, 30, 0))
+            .collect();
+        let outcome = disambiguate_fixture("complete", records);
+        assert_eq!(outcome.resolved.as_deref(), Some("*1/*A"));
+        assert!(!outcome.pairs_truncated, "a run that finished must not be marked truncated");
+    }
+
     #[test]
     fn check_phasing_tallies_each_fragment_kind_and_anchors_rr_by_max_mapq() {
         let dir = fixture_dir("rr_tally");
@@ -1063,7 +1216,7 @@ mod tests {
         let lookup = fixture_lookup();
         let rv_early = lookup.resolve("g.early").unwrap();
         let rv_late = lookup.resolve("g.late").unwrap();
-        let counts = check_phasing(&mut reader, "chr22", &rv_early, &rv_late, false);
+        let counts = check_phasing(&mut reader, "chr22", &rv_early, &rv_late, false).unwrap();
         drop(reader);
         let _ = std::fs::remove_dir_all(&dir);
 
@@ -1083,7 +1236,7 @@ mod tests {
         let lookup = fixture_lookup();
         let rv_early = lookup.resolve("g.early").unwrap();
         let rv_late = lookup.resolve("g.late").unwrap();
-        let counts = check_phasing(&mut reader, "chr22", &rv_early, &rv_late, false);
+        let counts = check_phasing(&mut reader, "chr22", &rv_early, &rv_late, false).unwrap();
         drop(reader);
         let _ = std::fs::remove_dir_all(&dir);
 
@@ -1108,7 +1261,7 @@ mod tests {
         let lookup = fixture_lookup();
         let rv_early = lookup.resolve("g.early").unwrap();
         let rv_late = lookup.resolve("g.late").unwrap();
-        let counts = check_phasing(&mut reader, "chr22", &rv_early, &rv_late, false);
+        let counts = check_phasing(&mut reader, "chr22", &rv_early, &rv_late, false).unwrap();
         drop(reader);
         let _ = std::fs::remove_dir_all(&dir);
 
@@ -1172,6 +1325,71 @@ mod tests {
         outcome
     }
 
+
+    /// A 150 bp read starting at 990 covers both fixture sites (1000, 1100).
+    fn spanning_record(qname: &str, early_alt: bool, late_alt: bool, qual: u8, flags: u16) -> bam::Record {
+        spanning_record_quals(qname, early_alt, late_alt, vec![qual; 150], flags)
+    }
+
+    /// `spanning_record` with a per-base quality array, so a single base of a
+    /// pattern can be made untrustworthy (review #5).
+    fn spanning_record_quals(
+        qname: &str,
+        early_alt: bool,
+        late_alt: bool,
+        quals: Vec<u8>,
+        flags: u16,
+    ) -> bam::Record {
+        let mut seq = vec![b'A'; 150];
+        seq[(FIXTURE_POS_EARLY - 990) as usize] = if early_alt { b'C' } else { b'G' };
+        seq[(FIXTURE_POS_LATE - 990) as usize] = if late_alt { b'T' } else { b'A' };
+        let cigar = bam::record::CigarString(vec![bam::record::Cigar::Match(150)]);
+        let mut record = bam::Record::new();
+        record.set(qname.as_bytes(), Some(&cigar), &seq, &quals);
+        record.set_tid(0);
+        record.set_pos(990);
+        record.set_mapq(60);
+        record.set_mtid(0);
+        record.set_flags(flags);
+        record
+    }
+
+    #[test]
+    fn disagreeing_mates_give_the_same_result_in_either_order() {
+        // Each fragment: one mate ALT/ALT (cis), the other ALT/REF (trans),
+        // both at the same coordinate. The late site conflicts.
+        let order = |cis_first: bool| -> Vec<bam::Record> {
+            let mut v = Vec::new();
+            for i in 0..3 {
+                let q = format!("f{i}");
+                let cis = spanning_record(&q, true, true, 30, 0x1 | 0x40);
+                let trans = spanning_record(&q, true, false, 30, 0x1 | 0x80);
+                if cis_first { v.push(cis); v.push(trans); } else { v.push(trans); v.push(cis); }
+            }
+            v
+        };
+        let a = disambiguate_fixture("conflict_a", order(true));
+        let b = disambiguate_fixture("conflict_b", order(false));
+        assert_eq!(a.resolved, b.resolved, "record order changed the phase decision");
+        assert_eq!(a.resolved, None, "a conflicting site is not evidence");
+        // Pin the mechanism, not only the outcome. `None` has other possible
+        // causes (no differentiating pair, an aborted run), so assert that the
+        // pair really was evaluated and that every conflicting fragment was
+        // dropped from the tallies instead of being counted on one side.
+        assert!(!a.pairs_truncated, "the run completed; None is not an abort");
+        assert_eq!(
+            a.pairs.len(),
+            1,
+            "the differentiating pair should have been counted: {:?}",
+            a.pairs
+        );
+        let c = a.pairs[0].counts;
+        assert_eq!(
+            (c.aa, c.ar, c.ra, c.rr_all, c.rr_anchored),
+            (0, 0, 0, 0, 0),
+            "a fragment whose mates disagree must reach no count: {c:?}"
+        );
+    }
     #[test]
     fn disambiguate_reports_the_pairs_it_counted_and_an_anchored_rr_decides() {
         // 2 AA + 1 anchored RR = 3 cis, 0 trans: a decisive pair for the cis
@@ -1247,12 +1465,12 @@ mod tests {
         let bam_path = write_rr_fixture_bam(&dir);
         let mut reader = bam::IndexedReader::from_path(&bam_path).unwrap();
         let lookup = fixture_lookup();
-        let pair = count_pair(&mut reader, "chr22", "g.early", "g.late", &lookup);
+        let pair = count_pair(&mut reader, "chr22", "g.early", "g.late", &lookup).unwrap();
         let rv_early = lookup.resolve("g.early").unwrap();
         let rv_late = lookup.resolve("g.late").unwrap();
-        let direct = check_phasing(&mut reader, "chr22", &rv_early, &rv_late, false);
-        let missing_a = count_pair(&mut reader, "chr22", "g.absent", "g.late", &lookup);
-        let missing_b = count_pair(&mut reader, "chr22", "g.early", "g.absent", &lookup);
+        let direct = check_phasing(&mut reader, "chr22", &rv_early, &rv_late, false).unwrap();
+        let missing_a = count_pair(&mut reader, "chr22", "g.absent", "g.late", &lookup).unwrap();
+        let missing_b = count_pair(&mut reader, "chr22", "g.early", "g.absent", &lookup).unwrap();
         drop(reader);
         let _ = std::fs::remove_dir_all(&dir);
 
@@ -1381,5 +1599,102 @@ mod tests {
         };
         assert_eq!(pileup(&record, &longer_ref), Some(false), "the longer REF must win");
         assert_eq!(pileup(&record, &longer_alt), Some(true), "the longer ALT must win");
+    }
+
+    #[test]
+    fn base_quality_zero_reads_do_not_decide_phase() {
+        let records = (0..3).map(|i| spanning_record(&format!("q{i}"), true, true, 0, 0)).collect();
+        assert_eq!(disambiguate_fixture("bq0", records).resolved, None);
+    }
+
+    #[test]
+    fn the_same_reads_at_base_quality_30_do_decide_phase() {
+        // Control: the test above must fail for quality, not for layout.
+        let records = (0..3).map(|i| spanning_record(&format!("q{i}"), true, true, 30, 0)).collect();
+        assert_eq!(disambiguate_fixture("bq30", records).resolved.as_deref(), Some("*1/*A"));
+    }
+
+    #[test]
+    fn quality_12_is_below_the_gate_and_quality_13_is_not() {
+        // The boundary, both sides. 13 is the threshold, so 13 must decide.
+        let at = |q: u8| {
+            let records = (0..3).map(|i| spanning_record(&format!("q{i}"), true, true, q, 0)).collect();
+            disambiguate_fixture(&format!("bq{q}"), records).resolved
+        };
+        assert_eq!(at(12), None);
+        assert_eq!(at(13).as_deref(), Some("*1/*A"));
+    }
+
+    #[test]
+    fn reads_without_base_qualities_do_not_decide_phase() {
+        // A BAM with qualities omitted stores 0xFF. That is "unknown", not
+        // "excellent", so it must not decide (review #5).
+        let records = (0..3)
+            .map(|i| spanning_record(&format!("q{i}"), true, true, QUAL_UNAVAILABLE, 0))
+            .collect();
+        assert_eq!(disambiguate_fixture("bqmissing", records).resolved, None);
+    }
+
+    #[test]
+    fn only_the_compared_bases_quality_matters() {
+        // Low quality ON a discriminating base rejects; low quality on a
+        // neighbouring base does not. This is what proves the gate reads the
+        // compared span and not the whole read.
+        let early = (FIXTURE_POS_EARLY - 990) as usize;
+        let with_low_at = |offset: usize| {
+            let records = (0..3)
+                .map(|i| {
+                    let mut quals = vec![30u8; 150];
+                    quals[offset] = 2;
+                    spanning_record_quals(&format!("q{i}"), true, true, quals, 0)
+                })
+                .collect();
+            disambiguate_fixture(&format!("low{offset}"), records).resolved
+        };
+        assert_eq!(with_low_at(early), None, "low quality on the compared base must reject");
+        assert_eq!(
+            with_low_at(early + 20).as_deref(),
+            Some("*1/*A"),
+            "low quality on an unrelated base must not reject"
+        );
+    }
+
+    /// A single aligned record at `pos` with an all-`Match` CIGAR over `seq`
+    /// and the given per-base qualities.
+    fn pileup_record_with_quals(pos: i64, seq: &[u8], quals: &[u8]) -> bam::Record {
+        let cigar = bam::record::CigarString(vec![bam::record::Cigar::Match(seq.len() as u32)]);
+        let mut record = bam::Record::new();
+        record.set(b"r", Some(&cigar), seq, quals);
+        record.set_pos(pos);
+        record
+    }
+
+    #[test]
+    fn one_bad_base_inside_a_multi_base_pattern_rejects_the_whole_pattern() {
+        // A 4-base ALT pattern where only the third base is poor. The pattern
+        // still matches the sequence, so without the gate it would be
+        // accepted; every compared base must reach the threshold.
+        let rv = ResolvedVariant {
+            pos_0based: 1000,
+            alt_bases: "ACGT".to_string(),
+            ref_bases: "A".to_string(),
+        };
+        let seq = b"ACGT".to_vec();
+        let good = pileup_record_with_quals(1000, &seq, &[30, 30, 30, 30]);
+        let bad = pileup_record_with_quals(1000, &seq, &[30, 30, 2, 30]);
+        assert_eq!(check_allele_pileup(&good, &seq, &rv), Some(true));
+        assert_eq!(check_allele_pileup(&bad, &seq, &rv), None);
+    }
+
+    #[test]
+    fn a_pattern_whose_qualities_are_omitted_is_rejected() {
+        let rv = ResolvedVariant {
+            pos_0based: 1000,
+            alt_bases: "ACGT".to_string(),
+            ref_bases: "A".to_string(),
+        };
+        let seq = b"ACGT".to_vec();
+        let omitted = pileup_record_with_quals(1000, &seq, &[QUAL_UNAVAILABLE; 4]);
+        assert_eq!(check_allele_pileup(&omitted, &seq, &rv), None);
     }
 }

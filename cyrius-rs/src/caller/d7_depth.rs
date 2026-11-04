@@ -86,19 +86,19 @@ fn count_reads_in_region(
     start: i64,
     end: i64,
     min_mapq: u8,
-) -> u64 {
+) -> Option<u64> {
     if reader
         .fetch(bam::FetchDefinition::Region(tid as i32, start, end))
         .is_err()
     {
-        return 0;
+        return None;
     }
 
     let mut count: u64 = 0;
     let mut record = bam::Record::new();
     while let Some(result) = reader.read(&mut record) {
         if result.is_err() {
-            continue;
+            return None;
         }
         if record.mapq() >= min_mapq
             && !record.is_secondary()
@@ -109,7 +109,7 @@ fn count_reads_in_region(
             count += 1;
         }
     }
-    count
+    Some(count)
 }
 
 fn measure_region(
@@ -119,20 +119,20 @@ fn measure_region(
     end: i64,
     min_mapq: u8,
     read_length: f64,
-) -> RegionDepth {
-    let read_count = count_reads_in_region(reader, tid, start, end, min_mapq);
+) -> Option<RegionDepth> {
+    let read_count = count_reads_in_region(reader, tid, start, end, min_mapq)?;
     let region_len = (end - start) as f64;
     let avg_depth = if region_len > 0.0 {
         read_count as f64 * read_length / region_len
     } else {
         0.0
     };
-    RegionDepth {
+    Some(RegionDepth {
         start,
         end,
         read_count,
         avg_depth,
-    }
+    })
 }
 
 /// Compute depth at all CYP2D7 sub-regions.
@@ -163,7 +163,7 @@ pub fn compute_d7_depth(
     let mut n = 0;
     while let Some(result) = reader.read(&mut record) {
         if result.is_err() {
-            continue;
+            return None;
         }
         lengths.push(record.seq_len() as f64);
         n += 1;
@@ -179,12 +179,12 @@ pub fn compute_d7_depth(
 
     let min_mapq = 0; // Match bin_count behavior
 
-    let d7_exon9 = measure_region(&mut reader, tid, D7_EXON9_START, D7_EXON9_END, min_mapq, read_length);
-    let d7_in4_in8 = measure_region(&mut reader, tid, D7_IN4_IN8_START, D7_IN4_IN8_END, min_mapq, read_length);
-    let d7_ex2_in8 = measure_region(&mut reader, tid, D7_EX2_IN8_START, D7_EX2_IN8_END, min_mapq, read_length);
-    let d7_5pr_in1 = measure_region(&mut reader, tid, D7_5PR_IN1_START, D7_5PR_IN1_END, min_mapq, read_length);
-    let d7_3pr_half = measure_region(&mut reader, tid, D7_3PR_HALF_START, D7_3PR_HALF_END, min_mapq, read_length);
-    let d7_5pr_half = measure_region(&mut reader, tid, D7_5PR_HALF_START, D7_5PR_HALF_END, min_mapq, read_length);
+    let d7_exon9 = measure_region(&mut reader, tid, D7_EXON9_START, D7_EXON9_END, min_mapq, read_length)?;
+    let d7_in4_in8 = measure_region(&mut reader, tid, D7_IN4_IN8_START, D7_IN4_IN8_END, min_mapq, read_length)?;
+    let d7_ex2_in8 = measure_region(&mut reader, tid, D7_EX2_IN8_START, D7_EX2_IN8_END, min_mapq, read_length)?;
+    let d7_5pr_in1 = measure_region(&mut reader, tid, D7_5PR_IN1_START, D7_5PR_IN1_END, min_mapq, read_length)?;
+    let d7_3pr_half = measure_region(&mut reader, tid, D7_3PR_HALF_START, D7_3PR_HALF_END, min_mapq, read_length)?;
+    let d7_5pr_half = measure_region(&mut reader, tid, D7_5PR_HALF_START, D7_5PR_HALF_END, min_mapq, read_length)?;
 
     Some(D7DepthProfile {
         d7_exon9,

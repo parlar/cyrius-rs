@@ -284,8 +284,8 @@ pub fn get_allele_counts_var42128936(
 
     let mut record = bam::Record::new();
     while let Some(result) = reader.read(&mut record) {
-        if result.is_err() {
-            continue;
+        if let Err(e) = result {
+            return Err(format!("BAM read failed at g.42128936: {}", e));
         }
         if good_read(&record) {
             let seq = String::from_utf8_lossy(&record.seq().as_bytes()).to_string();
@@ -393,18 +393,54 @@ pub fn call_exon9gc(
     None
 }
 
+/// g.42126938 rule: `Some(true)` (G haplotype, *1/*32) when more than one
+/// read shows it; otherwise **unknown**.
+///
+/// There is deliberately no `Some(false)`. Reads that fail to show the G
+/// pattern do not demonstrate the opposite arrangement -- they may cover
+/// sequence that both candidates share -- so a read count cannot stand in for
+/// negative evidence, however large it is (review #5, second pass).
+///
+/// Reinstating a `false` branch requires an affirmative pattern that only the
+/// non-G arrangement can produce, measured against phase truth. That is not
+/// in scope here and has no plan yet.
+fn phase_signal_42126938(g_reads: u32) -> Option<bool> {
+    if g_reads > 1 {
+        Some(true)
+    } else {
+        None
+    }
+}
+
+/// g.42127803 rule over read patterns at (42127803, 42127941), '1' = CYP2D6
+/// base, '2' = CYP2D7 base: trans (*119/*2, `Some(true)`) needs "12" and "21"
+/// in at least two reads each; cis (*1/*41, `Some(false)`) needs "11" and "22"
+/// in at least two reads each; both or neither is unknown.
+fn phase_signal_42127803(c11: u32, c12: u32, c21: u32, c22: u32) -> Option<bool> {
+    let trans = c12 >= 2 && c21 >= 2;
+    let cis = c11 >= 2 && c22 >= 2;
+    match (trans, cis) {
+        (true, false) => Some(true),
+        (false, true) => Some(false),
+        _ => None,
+    }
+}
+
+/// (D6/D7 base counts, variants called, g.42126938 phase signal).
+type GHaplotypeCall = (Vec<usize>, Vec<String>, Option<bool>);
+
 /// Call variant g.42126938C>T based on read depth and phased haplotypes.
 pub fn call_var42126938(
     reader: &mut bam::IndexedReader,
     full_length_cn: u32,
     base_db: &SnpLookup,
-) -> Result<(Vec<usize>, Vec<String>, bool), String> {
+) -> Result<GHaplotypeCall, String> {
     let mut var_called = Vec::new();
-    let mut g_haplotype = false;
+    let mut g_haplotype: Option<bool> = None;
 
     let (snp_d6, snp_d7, _) = get_supporting_reads(reader, base_db)?;
     if snp_d6.is_empty() || snp_d7.is_empty() {
-        return Ok((vec![], Vec::new(), false));
+        return Ok((vec![], Vec::new(), None));
     }
     let d6_d7_base_count = vec![*snp_d6.last().unwrap(), *snp_d7.last().unwrap()];
 
@@ -422,11 +458,8 @@ pub fn call_var42126938(
                     for _ in 0..(full_length_cn - 2 - cn) {
                         var_called.push("g.42126938C>T".to_string());
                     }
-                    if let Some(count_g) = g_hap_count.get("12") {
-                        if count_g.iter().sum::<u32>() > 1 {
-                            g_haplotype = true;
-                        }
-                    }
+                    let g_reads = g_hap_count.get("12").map_or(0, |v| v.iter().sum::<u32>());
+                    g_haplotype = phase_signal_42126938(g_reads);
                 }
             }
         }
@@ -500,24 +533,16 @@ pub fn call_var42127803hap(
     reader: &mut bam::IndexedReader,
     cnvtag: &str,
     base_db: &SnpLookup,
-) -> Result<bool, String> {
-    let mut diff_haplotype = false;
-    if cnvtag == "cn2" {
-        let n_positions = base_db.dsnp1.len();
-        let positions: Vec<usize> = (0..n_positions).collect();
-        let haplotype_per_read =
-            get_haplotypes_from_bam_single_region(reader, base_db, &positions)?;
-        let recombinant_read_count = extract_hap(&haplotype_per_read, &[0, 1]);
-        if let (Some(c12), Some(c21)) = (
-            recombinant_read_count.get("12"),
-            recombinant_read_count.get("21"),
-        ) {
-            if c12.iter().sum::<u32>() > 1 && c21.iter().sum::<u32>() > 1 {
-                diff_haplotype = true;
-            }
-        }
+) -> Result<Option<bool>, String> {
+    if cnvtag != "cn2" {
+        return Ok(None);
     }
-    Ok(diff_haplotype)
+    let n_positions = base_db.dsnp1.len();
+    let positions: Vec<usize> = (0..n_positions).collect();
+    let haplotype_per_read = get_haplotypes_from_bam_single_region(reader, base_db, &positions)?;
+    let counts = extract_hap(&haplotype_per_read, &[0, 1]);
+    let n = |k: &str| counts.get(k).map_or(0, |v| v.iter().sum::<u32>());
+    Ok(phase_signal_42127803(n("11"), n("12"), n("21"), n("22")))
 }
 
 /// Call haplotype for g.42130655-42130656insA (for *15.003).
@@ -593,12 +618,55 @@ pub fn get_called_variants(
     total_callset
 }
 
+/// Target variants whose dosage could not be called (`None`): no usable
+/// reads, or no copy number reached its posterior cutoff. A missing call is
+/// not a reference call, so these are reported instead of being dropped the
+/// way `get_called_variants` drops them.
+pub fn uncallable_variants(
+    var_list: &[String],
+    cn_calls: &[Option<u32>],
+    starting_index: usize,
+) -> Vec<String> {
+    cn_calls
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.is_none())
+        .map(|(i, _)| var_list[i + starting_index].clone())
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn phase_signal_42127803_needs_affirmative_reads() {
+        assert_eq!(phase_signal_42127803(0, 5, 4, 0), Some(true)); // trans
+        assert_eq!(phase_signal_42127803(6, 0, 0, 3), Some(false)); // cis
+        assert_eq!(phase_signal_42127803(0, 5, 0, 0), None); // one pattern only
+        assert_eq!(phase_signal_42127803(0, 0, 0, 0), None); // no reads
+        assert_eq!(phase_signal_42127803(3, 3, 3, 3), None); // both
+    }
+
+    #[test]
+    fn phase_signal_42126938_only_ever_says_yes() {
+        assert_eq!(phase_signal_42126938(2), Some(true));
+        assert_eq!(phase_signal_42126938(5), Some(true));
+        assert_eq!(phase_signal_42126938(1), None);
+        assert_eq!(phase_signal_42126938(0), None);
+    }
+
+    #[test]
+    fn uncallable_variants_lists_sites_without_a_call_and_not_zero_calls() {
+        let names: Vec<String> = ["g.a", "g.b", "g.c", "g.d"].iter().map(|s| s.to_string()).collect();
+        let calls = [Some(0), None, Some(1)];
+        assert_eq!(uncallable_variants(&names, &calls, 0), vec!["g.b".to_string()]);
+        assert_eq!(uncallable_variants(&names, &[None], 3), vec!["g.d".to_string()]);
+        assert!(uncallable_variants(&names, &[Some(0), Some(2)], 0).is_empty());
+    }
+
     use super::*;
 
     // Finding #24: a zero-depth exon9 site was pushed into d6_values as 0.0,

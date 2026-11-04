@@ -21,8 +21,8 @@ pub fn get_read_count(
     let mut nreads: u64 = 0;
     let mut record = bam::Record::new();
     while let Some(result) = reader.read(&mut record) {
-        if result.is_err() {
-            continue;
+        if let Err(e) = result {
+            return Err(format!("BAM read failed in {}: {}", what, e));
         }
         if record.mapq() >= mapq_cutoff
             && !record.is_secondary()
@@ -45,7 +45,7 @@ pub fn get_read_length(reader: &mut bam::IndexedReader) -> Result<f64, String> {
     reader
         .fetch(bam::FetchDefinition::All)
         .map_err(|e| format!("BAM fetch failed for all reads: {e}"))?;
-    Ok(get_read_length_from_fetched(reader))
+    get_read_length_from_fetched(reader)
 }
 
 /// Return the median read length from a region.
@@ -59,16 +59,16 @@ fn get_read_length_from_region(
     };
     let what = format!("{}:{}-{}", region.0, region.1, region.2);
     fetch_region(reader, tid, region.1, region.2, &what)?;
-    Ok(get_read_length_from_fetched(reader))
+    get_read_length_from_fetched(reader)
 }
 
-fn get_read_length_from_fetched(reader: &mut bam::IndexedReader) -> f64 {
+fn get_read_length_from_fetched(reader: &mut bam::IndexedReader) -> Result<f64, String> {
     let mut read_lengths = Vec::new();
     let mut record = bam::Record::new();
     let mut counter = 0;
     while let Some(result) = reader.read(&mut record) {
-        if result.is_err() {
-            continue;
+        if let Err(e) = result {
+            return Err(format!("BAM read failed while estimating read length: {}", e));
         }
         read_lengths.push(record.seq_len() as f64);
         counter += 1;
@@ -77,9 +77,9 @@ fn get_read_length_from_fetched(reader: &mut bam::IndexedReader) -> f64 {
         }
     }
     if read_lengths.is_empty() {
-        return 150.0;
+        return Ok(150.0);
     }
-    stats::median(&read_lengths)
+    Ok(stats::median(&read_lengths))
 }
 
 /// GC correction using LOWESS smoothing.
@@ -247,8 +247,8 @@ pub fn get_mapq0_counts(
     let (mut mapped, mut mapq0) = (0u64, 0u64);
     let mut record = bam::Record::new();
     while let Some(result) = reader.read(&mut record) {
-        if result.is_err() {
-            continue;
+        if let Err(e) = result {
+            return Err(format!("BAM read failed in {}: {}", what, e));
         }
         if record.is_unmapped()
             || record.is_secondary()
@@ -569,6 +569,79 @@ fn get_count_from_file(count_file: &str) -> Result<std::collections::HashMap<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An indexed BAM of 2,000 mapped 100 bp reads on chr22, starting at 0, 2, 4, ...
+    fn write_test_bam(path: &std::path::Path) {
+        let mut header = bam::header::Header::new();
+        let mut sq = bam::header::HeaderRecord::new(b"SQ");
+        sq.push_tag(b"SN", "chr22");
+        sq.push_tag(b"LN", 50_818_468);
+        header.push_record(&sq);
+        {
+            let mut writer = bam::Writer::from_path(path, &header, bam::Format::Bam).unwrap();
+            let cigar = bam::record::CigarString(vec![bam::record::Cigar::Match(100)]);
+            for i in 0..2000i64 {
+                let seq: Vec<u8> = (0..100).map(|j| b"ACGT"[((i + j) % 4) as usize]).collect();
+                let mut r = bam::Record::new();
+                r.set(format!("r{i}").as_bytes(), Some(&cigar), &seq, &[30u8; 100]);
+                r.set_tid(0);
+                r.set_pos(i * 2);
+                r.set_mapq(60);
+                r.set_flags(0);
+                writer.write(&r).unwrap();
+            }
+        }
+        bam::index::build(path, None::<&std::path::Path>, bam::index::Type::Bai, 1).unwrap();
+    }
+
+    /// Flip one byte of the CRC32 of BGZF block `block` (block 0 holds the
+    /// header). Offsets and the index stay valid, so a fetch succeeds and the
+    /// failure only shows up while the records are read.
+    fn corrupt_bgzf_block(path: &std::path::Path, block: usize) {
+        let mut bytes = std::fs::read(path).unwrap();
+        let mut off = 0usize;
+        for _ in 0..block {
+            off += u16::from_le_bytes([bytes[off + 16], bytes[off + 17]]) as usize + 1;
+        }
+        let size = u16::from_le_bytes([bytes[off + 16], bytes[off + 17]]) as usize + 1;
+        assert!(size > 28, "block {block} is the EOF marker; write more reads");
+        bytes[off + size - 8] ^= 0xFF;
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    fn test_bam_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("cyrius_bamio_{}_{}", tag, std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_corrupt_block_is_an_error_not_a_short_count() {
+        let dir = test_bam_dir("corrupt");
+        let path = dir.join("corrupt.bam");
+        write_test_bam(&path);
+        corrupt_bgzf_block(&path, 2);
+        let region: Region = ("chr22".to_string(), 0, 5000, "test".to_string());
+        let count = get_read_count(&mut bam::IndexedReader::from_path(&path).unwrap(), &region, 0);
+        let mapq0 = get_mapq0_counts(&mut bam::IndexedReader::from_path(&path).unwrap(), &region);
+        let length = get_read_length(&mut bam::IndexedReader::from_path(&path).unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(count.is_err(), "get_read_count gave {count:?}");
+        assert!(mapq0.is_err(), "get_mapq0_counts gave {mapq0:?}");
+        assert!(length.is_err(), "get_read_length gave {length:?}");
+    }
+
+    #[test]
+    fn the_same_bam_uncorrupted_counts_every_read() {
+        // Control: the test above must fail because of the corrupt block.
+        let dir = test_bam_dir("intact");
+        let path = dir.join("ok.bam");
+        write_test_bam(&path);
+        let region: Region = ("chr22".to_string(), 0, 5000, "test".to_string());
+        let count = get_read_count(&mut bam::IndexedReader::from_path(&path).unwrap(), &region, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(count, Ok(2000));
+    }
 
     #[test]
     fn missing_bam_is_an_error_not_a_panic() {

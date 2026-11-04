@@ -158,8 +158,13 @@ pub struct D6Call {
     /// Every differentiating pair the phase step counted (None if the phase
     /// step did not run).
     pub phase_pairs: Option<Vec<PairEvidence>>,
+    /// See `PhaseOutcome.pairs_truncated`. `None` when the phase step did not
+    /// run.
+    pub phase_pairs_truncated: Option<bool>,
     /// See `NormalizedDepth::rep7_mapq0_fraction`.
     pub rep7_mapq0_fraction: Option<f64>,
+    /// Target variants with no dosage call (see `call_variants::uncallable_variants`).
+    pub uncallable_target_sites: Option<Vec<String>>,
 }
 
 impl D6Call {
@@ -189,7 +194,9 @@ impl D6Call {
             resolver_posterior: None,
             resolved_by: None,
             phase_pairs: None,
+            phase_pairs_truncated: None,
             rep7_mapq0_fraction: None,
+            uncallable_target_sites: None,
         }
     }
 }
