@@ -263,3 +263,45 @@ capture gaps) has not been measured.
 than one candidate. It occurs on real data at 25 %: HG02373 is printed
 `*10_*14_*36;*10_*36_*65;*10_*114_*36`, so its phenotype reads as
 Indeterminate although the truth `*14/*36+*10` is the first candidate.
+
+---
+
+## B2 result — K4 PASS. All kill tests passed.
+
+Prototype: `~/cyrius-research/unknown-sites/b2_prototype.patch` (applies cleanly
+to `da0b66a`; the scratch branch was deleted unmerged, as locked). It masks the
+uncallable sites in the main matching path when `CYRIUS_MASK_PROTO` is set,
+skips the rare-allele rule, and formats each candidate on its own. Outputs:
+`~/cyrius-research/unknown-sites/b2/`.
+
+**K4 — PASS.** Damaged NA19920, prototype on: all 9 candidates are reported;
+the resolver scores them exactly equal (log10 likelihood -727.49 each, 0
+decisive reads) and leaves the set ambiguous. Filter `PASS` ->
+`More_than_one_possible_genotype`, confidence 0.95 HIGH -> 0.80 MEDIUM,
+`Clinical_equivalence` `unknown_effect`, `Long_read_recommended` true. The
+phenotype column lists every option. Control, same binary with the prototype
+off: `*1/*10x2`, Normal, `PASS`, 0.95, unchanged from before.
+
+**Invariant held.** All 53 full-depth benchmark files with the prototype on: 0
+differing field values against `accepted/` (every field except `Tool_commit`
+and `Flags`). Prototype off on the 25 % set: 0 differences against `a1b919b`.
+
+**On real thinned holes, prototype on (25 %): 2 of 53 change, both better.**
+- NA21105: `*2/*3` [`Fuzzy_match`] -> `*3/*111` [`PASS`], picked by the
+  resolver from 3 masked candidates with 5 decisive reads (log10 likelihood
+  -185.00 vs -203.46). The 5 reads carry `g.42129759C>T`, `*111`'s defining
+  variant, which had 5 alt / 3 ref reads: too few for the dosage step, so today
+  it is treated as absent. The result equals the truth.
+- NA20289: `*6/*11` unchanged; filter `Fuzzy_match` -> `LowQ_coverage_MAD`. The
+  call no longer needs fuzzy matching, which exposes a coverage warning the
+  fuzzy filter had been hiding. Still not `PASS`; genotype equals the truth.
+
+At 10 %: no change on any sample.
+
+**Caveat carried forward.** NA21105's `PASS` rests on the resolver, whose
+model and posterior are not calibrated (review #8). Here the evidence is five
+reads carrying the allele's own defining variant, which is direct; but the
+implementation plan should not let a resolver pick on a masked set reach
+`PASS` without a stated rule for it.
+
+**Next:** the implementation plan.
