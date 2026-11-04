@@ -366,3 +366,30 @@ implementation plan; NA21105 reaches `PASS` that way. See the final report.
   NA19920 with reads removed at every 10th or every 4th target site (14 or 35
   sites, `~/cyrius-research/unknown-sites/many_holes/`) is refused at the
   copy-number step (no call, ~1 s).
+
+## Result: D2 (Task 7 of the implementation plan) — measured at b322eb2
+
+Decision D2 (user, after the final review): a masked set with more than one
+candidate that read evidence narrows to one answer keeps the answer but reads
+`Unknown_sites_resolved`, never `PASS`. Expectations were locked in `fffad80`
+before the code (`2aa573f`) and the runs.
+
+| Input | Locked expectation | Measured | |
+|---|---|---|---|
+| 53 full-depth samples | 0 differing field-values | gate 7 and 7b: 0 of 53 | met |
+| 25 %, all but NA21105 | identical to the 176cb35 run | identical | met |
+| NA21105, 25 % | `*3/*111`, `Resolved_by` resolver unchanged; `Filter` `PASS` -> `Unknown_sites_resolved`; `Confidence` PREDICTED about 0.66 MEDIUM | `*3/*111`, resolver; `Unknown_sites_resolved`; 0.78 -> 0.66 MEDIUM | met |
+| 10 % | identical | identical | met |
+| Damaged NA19920 | identical except tie order | same 9 diplotypes, all other fields identical | met |
+
+Stop rules: none fired.
+
+**This closes the open item above** ("a resolver pick from a masked set can
+reach `PASS`"): it can no longer. Over every run on this branch, no sample with
+an unknown site and more than one masked candidate reads `PASS`. The P1 plan's
+five required tests now all exist as unit tests or gate checks, test 4 as
+`conflicting_or_unknown_effects_block_a_definitive_interpretation`.
+
+Still open, recorded, not blocking: tie order between runs (pre-existing
+resolver float noise; set, filter and confidence unchanged in 6 runs); the
+masked set has no size cap (not reached in any run).
