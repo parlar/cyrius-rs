@@ -532,6 +532,49 @@ The 9 NA19920 diplotypes: `*1/*10x2`, `*1/*147x2`, `*1/*4x2`, `*145/*147x2`, `*4
 
 ---
 
+## Decision D2 (added 2026-11-04 after the final review; user choice)
+
+**Question.** With unknown sites, the masked lookup can keep several candidates whose effects disagree. Later steps that use read evidence (the resolver, `phase_disambiguate`, the cn2 phase rules in `match_star`) can narrow that set to one diplotype. May that single answer read `PASS`?
+
+**Decided: no.** The answer is kept and shown, but its filter is the new value `Unknown_sites_resolved`, never `PASS`. Reasons: the P1 plan's required test "conflicting or unknown clinical effects block a definitive interpretation"; this plan's Goal sentence; the gate record's B2 caveat; the resolver is not calibrated (review #8). Measured scope: in all runs so far exactly one sample is affected, NA21105 at 25 % (3 masked candidates, resolver picks `*3/*111`, today `PASS`). Every other sample with unknown sites had a masked set of 1 candidate (HG00111, HG00373, NA18973, NA20289 at 25 %; the single-copy samples) or stays ambiguous (damaged NA19920, NA19908).
+
+## Task 7: A narrowed masked set never reads PASS (D2), plus the final-review fixes
+
+**Files:** `match_star_allele.rs` (`match_star`), `types.rs` (`StarCall`), new `cyrius-rs/src/caller/genotype_filter.rs` (+ `pub mod` line in `caller/mod.rs`), `main.rs`, `depth_calling/bin_count.rs`, `README.md`, `docs/reviews/2026-11-04-project-review.md`, `docs/superpowers/plans/2026-11-04-unknown-sites-gate.md`, `examples/mask_audit.rs`.
+
+**Interfaces:**
+- `StarCall.unknown_sites_ambiguous: bool` — true when unknown sites remained (`still_unknown` non-empty) and the masked lookup on that path (`get_star`, `get_star_cn1`, `call_star68`, `call_star68_cn1`) returned more than one entry in `star_call`. Computed from the masked result, before retry/fuzzy and before `apply_cn2_phase_rules`. False on the direct-map and missing-table paths. It and `unknown_sites_unmatched` are never both true.
+- `pub fn genotype_filter(call: &str, high_cn_low_confidence: bool, unknown_sites_unmatched: bool, unknown_sites_ambiguous: bool, is_fuzzy: bool) -> &'static str` in `caller/genotype_filter.rs`, the existing chain moved out of `main.rs` unchanged in order, with one new branch:
+  1. `call` contains `;` -> `More_than_one_possible_genotype`
+  2. no `/` -> `Not_assigned_to_haplotypes`
+  3. `high_cn_low_confidence` -> `LowQ_high_CN`
+  4. `unknown_sites_unmatched` -> `Unknown_sites_unmatched`
+  5. `unknown_sites_ambiguous` -> `Unknown_sites_resolved` (new)
+  6. `is_fuzzy` -> `Fuzzy_match`
+  7. else `PASS`
+
+**Steps:**
+1. Tests first: (a) in `genotype_filter.rs`, an exhaustive test over the four booleans and the call shapes `"*1/*2"`, `"*1/*2;*1/*3"`, `"*1"`: whenever either unknown-sites flag is true the result is not `PASS`; plus one assertion per branch above. (b) In `match_star_allele.rs`, extend `match_star_masks_unknown_sites_and_flags_only_an_unmatched_fallback`: the masked NA19920 call has `unknown_sites_ambiguous == true`; the unmasked one and the `none_fit` one have `false`. (c) The P1 plan's required test 4: `crate::phenotype` `clinical_equivalence` (or the function `main.rs` uses to fill `Clinical_equivalence`) on the masked NA19920 `clean_call` is not `same_effect`. (d) Full-table version of the gate record's "every key of every table" invariant (line ~163): for all ten combination tables, every key equals the sorted `_`-join of its own tokens (`"NA"` for none), and no two keys have the same token multiset; together these make the masked lookup with an irrelevant unknown site equal the exact lookup for every key. (e) Pin `kept.star_call` in `the_star68_paths_do_not_pick_by_habit_when_sites_are_unknown` to its measured value.
+2. Implement the field and the function; `main.rs` calls `genotype_filter` in place of the inline chain, passing `star_called.unknown_sites_ambiguous`.
+3. The three checks that treat `Fuzzy_match` as still a call (`spacer_cn_check` and `consistency_check` in `main.rs`, `downgrade_filter_for_multimapper_depletion` in `bin_count.rs` + its test) also accept `Unknown_sites_resolved`.
+4. Docs (README): filter-table row for `Unknown_sites_resolved`; `Multimapper_depleted` row lists it; in the `Uncallable_target_sites` paragraph: (i) the D1 sentence becomes "never `PASS`: `Unknown_sites_unmatched` unless an earlier filter applies (for example `More_than_one_possible_genotype`, as for NA19908 at 25 %)"; (ii) a narrowed masked set reads `Unknown_sites_resolved`; (iii) NA21105 now reads `*3/*111` `Unknown_sites_resolved`; (iv) HG02373 is marked "(no uncallable sites; this is the formatting fix)"; (v) "errs towards over-reporting … safe direction for a warning" reworded: over-reporting now widens calls, which is the safe direction; (vi) "the listed sites are matched as unknown" gets "unless a dedicated caller has since placed the variant in the call". Known-limits list: replace the "resolver pick can reach PASS" bullet by the D2 behaviour; the tie-order bullet adds that `Confidence` scores only the first alternative, so it could change with the order (not observed). Review doc item 1 status: add D2 and the Task 7 commit.
+5. Gate record: correct the tie-order paragraph of the Task 5 result: it was two builds, not one binary; the same binary (176cb35) run 6 times gave the same order 5 times and a different order once, same set, same `Confidence` 0.80; and `confidence.rs` (~L203) scores completeness from the first alternative only.
+6. `examples/mask_audit.rs`: the header says "Throwaway"; retitle it as the experiment program of the gate record, and note that its `RARE_ALLELES` copy must match `match_star_allele.rs`.
+7. Commit, then gate 7 (expected files empty: the 53 have no unknown sites), then rerun Task 5's runs.
+
+**Expectations, locked before running:**
+| Input | Expected |
+|---|---|
+| 53 full-depth samples | 0 differing field-values |
+| p25, every sample except NA21105 | identical to `final/p25` (176cb35) in every field |
+| NA21105, 25 % | `Genotype` `*3/*111` and `Resolved_by` `resolver` unchanged; `Filter` `PASS` -> `Unknown_sites_resolved`; `Confidence` changes: PREDICTED (not run) about 0.66 MEDIUM (match component penalty 1.0 -> default 0.5; not a stop rule, recorded) |
+| p10 | identical to `final/p10` in every field |
+| damaged NA19920 | identical to `final/dmg` except the order of the `;` alternatives (compared as unordered diplotypes) |
+
+**Stop rules:** any sample other than NA21105 changes; NA21105's genotype changes; any call with either unknown-sites flag reads `PASS`.
+
+---
+
 ## Self-review notes
 
 - Every expected value above is either measured (gate record, B1/B2 outputs, the scan timing, HG02373's full-depth formatting) or labelled PREDICTED.
