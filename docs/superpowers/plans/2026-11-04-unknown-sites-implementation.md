@@ -19,7 +19,7 @@
 - **Expectations before runs.** Expected output changes are written to the gate's expected files *before* the gate runs.
 - **One commit per task**, message prefix `fix:` / `feat:` / `test:` / `docs:`, ending with the `Co-Authored-By` line.
 
-## Decision needed before Task 4
+## Decision D1 (settled 2026-11-04: **D1-a**, user choice)
 
 **D1 — what happens when a sample has unknown sites and *no* table key fits even allowing for them.** The P1 plan agreed "no-call is the fallback". Measured since: in the 25 % thinned data, NA19908 is exactly this case, and today's fallback (fuzzy matching) returns `*1/*46;*43/*45;*12/*43` — three options **including the truth** — already labelled `More_than_one_possible_genotype`. A no-call would discard that.
 
@@ -27,6 +27,8 @@
 - **D1-b:** no-call, as first agreed.
 
 Tasks 1–3 do not depend on D1. Task 4 is written for D1-a; the D1-b variant is given in Task 4 Step 6.
+
+**Decided: D1-a.** Task 4 Step 6 is NOT executed.
 
 ---
 
