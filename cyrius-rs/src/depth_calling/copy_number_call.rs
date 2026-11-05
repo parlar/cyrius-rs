@@ -180,9 +180,12 @@ pub fn process_raw_call_denovo(
 mod tests {
     use super::*;
 
-    /// cn_posterior is the posterior call_reg1_cn decides from. Wherever call_reg1_cn
-    /// returns two options or a stringent single value, they must agree. min_read = -1
-    /// keeps the min-read rule from firing; cn >= 2 keeps the one-copy shortcut out.
+    /// Checks that the decision layer of call_reg1_cn is consistent with the shared posterior:
+    /// wherever call_reg1_cn returns two options or a stringent single value, they must agree
+    /// with cn_posterior. Both sides now use the same code, so this is NOT an independent check
+    /// of the posterior itself. Orientation is pinned by cn_posterior_is_indexed_by_region_1_copies,
+    /// and pre-refactor behaviour by call_reg1_cn_matches_its_pre_refactor_outputs.
+    /// min_read = -1 keeps the min-read rule from firing; cn >= 2 keeps the one-copy shortcut out.
     #[test]
     fn cn_posterior_is_the_posterior_call_reg1_cn_decides_from() {
         let mut checked = 0;
@@ -224,6 +227,48 @@ mod tests {
             let mut fwd = cn_posterior(3, a, b).unwrap();
             fwd.reverse();
             assert_eq!(fwd, cn_posterior(3, b, a).unwrap());
+        }
+    }
+
+    /// Golden outputs of call_reg1_cn(Some(cn), c1, c2, min_read)[0], printed by the code at
+    /// commit da59f5c (before call_reg1_cn was refactored onto cn_posterior).
+    #[test]
+    fn call_reg1_cn_matches_its_pre_refactor_outputs() {
+        fn two(cn1: u32, prob1: f64, cn2: u32, prob2: f64) -> Option<CnProb> {
+            Some(CnProb::TwoOptions { cn1, prob1, cn2, prob2 })
+        }
+        fn one(v: u32) -> Option<CnProb> {
+            Some(CnProb::Single(v))
+        }
+        let golden = vec![
+            ((2, 5.0, 1.0, 4.0), two(2, 0.485, 1, 0.443)),
+            ((2, 20.0, 20.0, 4.0), one(1)),
+            ((2, 21.0, 19.0, 4.0), one(1)),
+            ((3, 30.0, 2.0, 4.0), one(3)),
+            ((2, 3.0, 4.0, 4.0), one(0)),
+            ((1, 5.0, 95.0, 4.0), one(1)),
+            ((0, 10.0, 10.0, 4.0), one(0)),
+            ((2, 0.0, 0.0, 4.0), None),
+            ((4, 30.0, 10.0, 4.0), one(3)),
+            ((3, 10.0, 5.0, 4.0), two(2, 0.803, 1, 0.173)),
+            ((3, 5.0, 10.0, 4.0), two(1, 0.803, 2, 0.173)),
+            ((4, 12.0, 8.0, 4.0), two(2, 0.559, 3, 0.324)),
+            ((4, 8.0, 12.0, 4.0), two(2, 0.559, 1, 0.324)),
+            ((2, 10.0, 10.0, 4.0), two(1, 0.893, 2, 0.107)),
+            ((3, 15.0, 15.0, 4.0), two(2, 0.57, 1, 0.383)),
+            ((2, 1.0, 30.0, 4.0), one(0)),
+            ((2, 30.0, 1.0, 4.0), one(2)),
+            ((1, 3.0, 95.0, 4.0), one(0)),
+            ((2, 9.0, 11.0, 4.0), one(1)),
+            ((3, 8.0, 4.0, 4.0), two(2, 0.738, 1, 0.216)),
+            ((4, 2.0, 3.0, 4.0), two(2, 0.333, 1, 0.291)),
+            ((2, 6.0, 14.0, 4.0), one(1)),
+        ];
+        for ((cn, c1, c2, m), want) in golden {
+            let got = call_reg1_cn(Some(cn), c1, c2, m);
+            assert_eq!(got.len(), 1);
+            // CnProb has no PartialEq; compare Debug output, which carries every field.
+            assert_eq!(format!("{:?}", got[0]), format!("{:?}", want), "cn={cn} {c1}/{c2} min_read={m}");
         }
     }
 }
