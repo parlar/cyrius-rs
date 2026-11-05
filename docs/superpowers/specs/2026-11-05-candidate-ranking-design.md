@@ -112,6 +112,9 @@ Groups where it does not fit are also `not_ranked`.
 This stage comes before any feature code, with a locked plan (plan → code →
 result). Its result fixes the model for Stage B. If it fails, this design stops.
 
+**Locked plan:** `~/cyrius-research/exp-H20/PLAN.md` (H20, plan commit `5dc4e0f`).
+The exact models, folds, thresholds and counts live there, not here.
+
 **Start from H11.** The beta-binomial candidate is H11's frozen `count_lik.py`
 model. It is not re-derived.
 
