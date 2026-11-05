@@ -418,14 +418,19 @@ pub fn sites_and_provenance(
         } else {
             None
         };
-        let mechanism = if mask.is_some() {
-            mask
-        } else if homo {
-            site_mechanism(c.total_cn, alt0 as f64, ref0 as f64, 4.0, None, Some(c.total_cn.saturating_sub(2)), decision)
-        } else {
+        let replay_of = |i: usize| {
             c.total_cn_sites.get(i).and_then(|&tcn| {
                 site_mechanism(tcn, c.alt_final[i] as f64, ref0 as f64, (c.min_read)(name), Some(tcn), None, decision)
             })
+        };
+        let mechanism = if homo {
+            site_mechanism(c.total_cn, alt0 as f64, ref0 as f64, 4.0, None, Some(c.total_cn.saturating_sub(2)), decision)
+        } else if c.total_cn_sites.get(i).is_none() {
+            Some("unexplained")
+        } else if mask.is_some() {
+            if replay_of(i) == Some("unexplained") { Some("unexplained") } else { mask }
+        } else {
+            replay_of(i)
         };
         if let Some(m) = mechanism {
             prov.push(ProvenanceRecord {
@@ -484,15 +489,24 @@ pub fn matching_path(
         .collect();
     if let Some(m) = matched {
         let observed = token_counts(variants_called);
-        let differs = m.keys().chain(observed.keys()).filter(|t| !unknown.contains(t.as_str())).any(|t| {
-            m.get(t).copied().unwrap_or(0) != observed.get(t).copied().unwrap_or(0)
-        });
-        if differs {
-            // retry_add_one_copy needs target_count = N - 2 >= 1, so it cannot act on cn2.
-            let retry_possible = cnvcall.starts_with("cn")
-                && cnvcall.len() <= 3
-                && cnvcall[2..].parse::<u32>().is_ok_and(|n| n >= 3);
-            return if retry_possible { "retry_add_one_copy" } else { "unexplained" };
+        let diffs: Vec<&String> = m
+            .keys()
+            .chain(observed.keys())
+            .filter(|t| !unknown.contains(t.as_str()))
+            .filter(|t| m.get(*t).copied().unwrap_or(0) != observed.get(*t).copied().unwrap_or(0))
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        if !diffs.is_empty() {
+            // retry_add_one_copy adds one copy of one variant observed exactly N - 2 times, N >= 3.
+            let n = if cnvcall.starts_with("cn") && cnvcall.len() <= 3 { cnvcall[2..].parse::<u32>().ok() } else { None };
+            let retry = n.is_some_and(|n| {
+                n >= 3
+                    && diffs.len() == 1
+                    && observed.get(diffs[0]).copied().unwrap_or(0) == n - 2
+                    && m.get(diffs[0]).copied().unwrap_or(0) == observed.get(diffs[0]).copied().unwrap_or(0) + 1
+            });
+            return if retry { "retry_add_one_copy" } else { "unexplained" };
         }
     }
     if unknown.is_empty() { "exact" } else { "masked" }
@@ -532,6 +546,112 @@ mod tests_provenance {
         assert_eq!(matching_path("cn3", Some("unique_match"), &obs, &[], Some(&m(&["g.A", "g.B", "g.B"]))), "retry_add_one_copy");
         assert_eq!(matching_path("cn2", Some("fuzzy_match(score=1.0)"), &obs, &[], Some(&m(&["g.A"]))), "fuzzy_match");
         assert_eq!(matching_path("cn2", Some("unique_match"), &obs, &[], Some(&m(&["g.A"]))), "unexplained");
+        // retry tightening
+        let cn3 = |mm: &[&str]| matching_path("cn3", Some("unique_match"), &obs, &[], Some(&m(mm)));
+        assert_eq!(cn3(&["g.A", "g.B", "g.B"]), "retry_add_one_copy");
+        assert_eq!(cn3(&["g.A", "g.B", "g.B", "g.B"]), "unexplained");
+        assert_eq!(cn3(&["g.A"]), "unexplained");
+        assert_eq!(cn3(&["g.A", "g.A", "g.B", "g.B"]), "unexplained");
+        // cn4 needs the variant observed twice (N - 2); B is observed once, so +1 is not a retry.
+        assert_eq!(matching_path("cn4", Some("unique_match"), &obs, &[], Some(&m(&["g.A", "g.B", "g.B"]))), "unexplained");
+    }
+
+    #[test]
+    fn matching_path_without_a_matched_candidate() {
+        let obs = s(&["g.A"]);
+        assert_eq!(matching_path("cn2", None, &obs, &[], None), "exact");
+        assert_eq!(matching_path("cn2", None, &obs, &s(&["g.C"]), None), "masked");
+    }
+
+    fn one_site<'a>(
+        var_list: &'a [String],
+        alt_final: &'a [usize],
+        alt_sba: &'a [usize],
+        total_cn_sites: &'a [u32],
+        decisions: &'a [Option<u32>],
+    ) -> SiteCalls<'a> {
+        SiteCalls {
+            var_list,
+            alt_original: &[5],
+            alt_after_sba: alt_sba,
+            alt_final,
+            ref_: &[95],
+            homo_alt: &[],
+            homo_ref: &[],
+            total_cn_sites,
+            total_cn: 4,
+            decisions,
+            homo_decisions: &[],
+            min_read: crate::caller::call_variants::min_read_for,
+        }
+    }
+
+    #[test]
+    fn unmasked_target_site_reaches_site_mechanism() {
+        let vl = s(&["g.42129754G>A"]);
+        let c = one_site(&vl, &[5], &[5], &[1], &[Some(1)]);
+        let (_, prov) = sites_and_provenance(&c, &[], &[], "cn2");
+        assert_eq!(prov.iter().find(|p| p.site == vl[0]).map(|p| p.mechanism), Some("one_copy_shortcut"));
+    }
+
+    #[test]
+    fn homology_cap_through_sites_and_provenance() {
+        let vl = s(&["g.42126578C>T"]);
+        let c = SiteCalls {
+            var_list: &vl,
+            alt_original: &[],
+            alt_after_sba: &[],
+            alt_final: &[],
+            ref_: &[],
+            homo_alt: &[30],
+            homo_ref: &[10],
+            total_cn_sites: &[],
+            total_cn: 4,
+            decisions: &[],
+            homo_decisions: &[Some(2)],
+            min_read: crate::caller::call_variants::min_read_for,
+        };
+        let (_, prov) = sites_and_provenance(&c, &[], &[], "cn2");
+        assert_eq!(prov.iter().find(|p| p.site == vl[0]).map(|p| p.mechanism), Some("homology_cap"));
+    }
+
+    #[test]
+    fn masked_site_whose_decision_disagrees_with_the_replay_is_unexplained() {
+        let vl = s(&["g.42129754G>A"]);
+        // strand_bias_all mask (alt 5 -> 0); replay of alt 0, ref 95 at tcn 1 is not Some(1).
+        let c = one_site(&vl, &[0], &[0], &[1], &[Some(1)]);
+        let (_, prov) = sites_and_provenance(&c, &[], &[], "cn2");
+        assert_eq!(prov.iter().find(|p| p.site == vl[0]).map(|p| p.mechanism), Some("unexplained"));
+    }
+
+    #[test]
+    fn missing_copy_number_pattern_is_unexplained() {
+        let vl = s(&["g.42129754G>A"]);
+        let c = one_site(&vl, &[5], &[5], &[], &[Some(1)]);
+        let (_, prov) = sites_and_provenance(&c, &[], &[], "cn2");
+        assert_eq!(prov.iter().find(|p| p.site == vl[0]).map(|p| p.mechanism), Some("unexplained"));
+    }
+
+    #[test]
+    fn star68_token_diff_is_star68_step() {
+        let before = s(&["g.42130692G>A", "g.42130692G>A"]);
+        let after = s(&["g.42130692G>A"]);
+        let c = SiteCalls {
+            var_list: &[],
+            alt_original: &[],
+            alt_after_sba: &[],
+            alt_final: &[],
+            ref_: &[],
+            homo_alt: &[],
+            homo_ref: &[],
+            total_cn_sites: &[],
+            total_cn: 2,
+            decisions: &[],
+            homo_decisions: &[],
+            min_read: crate::caller::call_variants::min_read_for,
+        };
+        let (_, prov) = sites_and_provenance(&c, &before, &after, "star68");
+        assert_eq!(prov.iter().find(|p| p.site == "g.42130692G>A").map(|p| p.mechanism), Some("star68_step"));
     }
 
     #[test]
