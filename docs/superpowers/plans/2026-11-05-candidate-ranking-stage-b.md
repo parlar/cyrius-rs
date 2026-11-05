@@ -970,7 +970,11 @@ pub fn matching_path(
             m.get(t).copied().unwrap_or(0) != observed.get(t).copied().unwrap_or(0)
         });
         if differs {
-            return if cnvcall.starts_with("cn") && cnvcall.len() <= 3 { "retry_add_one_copy" } else { "unexplained" };
+            // retry_add_one_copy needs target_count = N - 2 >= 1, so it never fires for cn2
+            // (corrected during Task 4: the first draft also let cn2 through).
+            let retry_possible = cnvcall.starts_with("cn") && cnvcall.len() <= 3
+                && cnvcall[2..].parse::<u32>().is_ok_and(|n| n >= 3);
+            return if retry_possible { "retry_add_one_copy" } else { "unexplained" };
         }
     }
     if unknown.is_empty() { "exact" } else { "masked" }
