@@ -264,3 +264,303 @@ mod tests_sites {
         assert_eq!(e, vec![("*10_*10_*4.013".to_string(), false)]);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Decision provenance (spec "Decision provenance"), by replaying the caller's own
+// functions per site. A replay that disagrees with the value the call used reads
+// "unexplained", so drift cannot pass silently.
+// ---------------------------------------------------------------------------
+
+/// One provenance record.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProvenanceRecord {
+    pub site: String,
+    pub mechanism: &'static str,
+    pub original_alt: Option<u32>,
+    pub original_ref: Option<u32>,
+    /// The per-site copy count before token rules (None: the site was not called).
+    pub per_site_copies: Option<u32>,
+    /// The copy count in the call's final variant list (`Variants_called`).
+    pub called_copies: u32,
+}
+
+fn argmax(v: &[f64]) -> Option<usize> {
+    let mut best: Option<usize> = None;
+    for (i, x) in v.iter().enumerate() {
+        if best.is_none_or(|b| *x > v[b]) {
+            best = Some(i);
+        }
+    }
+    best
+}
+
+/// The rule that set one site's per-site copy count, or None when the plain posterior did.
+/// `actual` is the value the call used. It is compared with the replay first.
+pub fn site_mechanism(
+    full_cn: u32,
+    alt: f64,
+    ref_: f64,
+    min_read: f64,
+    list_total_cn: Option<u32>,
+    cap: Option<u32>,
+    actual: Option<u32>,
+) -> Option<&'static str> {
+    let raw = call_reg1_cn(Some(full_cn), alt, ref_, min_read)[0];
+    let total = list_total_cn.map(|t| vec![t]);
+    let decided = process_raw_call_denovo(&[CnProbResult(raw)], 0.8, 0.65, total.as_deref(), true)[0];
+    let replay = match cap {
+        Some(c) => decided.map(|v| v.min(c)),
+        None => decided,
+    };
+    if replay != actual {
+        return Some("unexplained");
+    }
+    if cap.is_some() && replay != decided {
+        return Some("homology_cap");
+    }
+    match raw {
+        None => Some("no_call"),
+        Some(CnProb::Single(v)) => {
+            if full_cn == 1 && alt > min_read {
+                return Some("one_copy_shortcut");
+            }
+            let top = cn_posterior(full_cn, alt, ref_).and_then(|p| argmax(&p));
+            if v == 0 && top.is_some_and(|t| t != 0) && alt <= min_read && ref_ >= min_read {
+                Some("min_read_rule")
+            } else {
+                None
+            }
+        }
+        Some(CnProb::TwoOptions { cn1, prob1, .. }) => match decided {
+            None => Some("no_call"),
+            Some(d) if prob1 <= 0.65 && d != cn1 => Some("min_cn_rule"),
+            _ => None,
+        },
+    }
+}
+
+/// Values `d6_star_caller` already has for the read sites and their per-site calls.
+pub struct SiteCalls<'a> {
+    /// Target sites, then homology sites (`params.var_list`).
+    pub var_list: &'a [String],
+    /// Alternate counts after `update_var42128936`, before any strand filter.
+    pub alt_original: &'a [usize],
+    /// After `--strand-bias-all` (equal to `alt_original` without the flag).
+    pub alt_after_sba: &'a [usize],
+    /// After `call_cn_var`'s NOISY_VAR rule: the counts the per-site call used.
+    pub alt_final: &'a [usize],
+    pub ref_: &'a [usize],
+    pub homo_alt: &'a [usize],
+    pub homo_ref: &'a [usize],
+    /// `get_total_cn_per_site` for the target sites (empty if the tag has no pattern).
+    pub total_cn_sites: &'a [u32],
+    pub total_cn: u32,
+    /// `cn_call_var` and `cn_call_var_homo`.
+    pub decisions: &'a [Option<u32>],
+    pub homo_decisions: &'a [Option<u32>],
+    /// `call_variants::min_read_for`.
+    pub min_read: fn(&str) -> f64,
+}
+
+fn count_of(tokens: &[String], t: &str) -> u32 {
+    tokens.iter().filter(|x| *x == t).count() as u32
+}
+
+fn token_counts(tokens: &[String]) -> HashMap<String, u32> {
+    let mut m = HashMap::new();
+    for t in tokens.iter().filter(|t| t.as_str() != "NA") {
+        *m.entry(t.clone()).or_insert(0) += 1;
+    }
+    m
+}
+
+/// Token counts of one raw profile (all its copies' definitions, `NA` dropped).
+fn profile_token_counts(raw: &str, dstar: &HashMap<String, String>) -> Option<HashMap<String, u32>> {
+    let mut m = HashMap::new();
+    for allele in raw.split('_') {
+        for t in dstar.get(allele)?.split('_').filter(|t| !t.is_empty() && *t != "NA") {
+            *m.entry(t.to_string()).or_insert(0) += 1;
+        }
+    }
+    Some(m)
+}
+
+/// Read sites with original counts and filter masks, plus per-site and token-level
+/// provenance records. `before_rules` is the call set before `match_star`.
+pub fn sites_and_provenance(
+    c: &SiteCalls,
+    before_rules: &[String],
+    variants_called: &[String],
+    cnvcall: &str,
+) -> (Vec<ReadSite>, Vec<ProvenanceRecord>) {
+    let specs: HashMap<String, (i64, SiteClass, bool)> =
+        site_specs(crate::data::TARGET_VARIANT, crate::data::TARGET_VARIANT_HOMO)
+            .into_iter()
+            .map(|(n, p, cl, h)| (n, (p, cl, h)))
+            .collect();
+    let n_target = c.alt_original.len();
+    let mut sites = Vec::new();
+    let mut prov = Vec::new();
+    for (i, name) in c.var_list.iter().enumerate() {
+        let homo = i >= n_target;
+        let (alt0, ref0, decision) = if homo {
+            let j = i - n_target;
+            (c.homo_alt[j], c.homo_ref[j], c.homo_decisions[j])
+        } else {
+            (c.alt_original[i], c.ref_[i], c.decisions[i])
+        };
+        let mask = if homo {
+            None
+        } else if c.alt_original[i] > 0 && c.alt_after_sba[i] == 0 {
+            Some("strand_bias_all")
+        } else if c.alt_after_sba[i] > 0 && c.alt_final[i] == 0 {
+            Some("noisy_var_strand_filter")
+        } else {
+            None
+        };
+        let mechanism = if mask.is_some() {
+            mask
+        } else if homo {
+            site_mechanism(c.total_cn, alt0 as f64, ref0 as f64, 4.0, None, Some(c.total_cn.saturating_sub(2)), decision)
+        } else {
+            c.total_cn_sites.get(i).and_then(|&tcn| {
+                site_mechanism(tcn, c.alt_final[i] as f64, ref0 as f64, (c.min_read)(name), Some(tcn), None, decision)
+            })
+        };
+        if let Some(m) = mechanism {
+            prov.push(ProvenanceRecord {
+                site: name.clone(),
+                mechanism: m,
+                original_alt: Some(alt0 as u32),
+                original_ref: Some(ref0 as u32),
+                per_site_copies: decision,
+                called_copies: count_of(variants_called, name),
+            });
+        }
+        if let Some(&(pos, class, h)) = specs.get(name) {
+            sites.push(ReadSite { name: name.clone(), pos, class, homology: h, alt: alt0 as u32, ref_: ref0 as u32, mask });
+        }
+    }
+    let mut tokens: Vec<&String> = before_rules.iter().chain(variants_called).filter(|t| t.as_str() != "NA").collect();
+    tokens.sort();
+    tokens.dedup();
+    for t in tokens {
+        let (before, after) = (count_of(before_rules, t), count_of(variants_called, t));
+        if before != after {
+            let mechanism = if cnvcall.contains("star68") && t == "g.42130692G>A" { "star68_step" } else { "update_variants" };
+            let site = sites.iter().find(|s| &s.name == t);
+            prov.push(ProvenanceRecord {
+                site: t.clone(),
+                mechanism,
+                original_alt: site.map(|s| s.alt),
+                original_ref: site.map(|s| s.ref_),
+                per_site_copies: Some(before),
+                called_copies: after,
+            });
+        }
+    }
+    (sites, prov)
+}
+
+/// Spec `Matching_path`: the whole-call step that produced the call. `matched` holds the
+/// token counts of the call's first raw candidate.
+pub fn matching_path(
+    cnvcall: &str,
+    call_info: Option<&str>,
+    variants_called: &[String],
+    uncallable: &[String],
+    matched: Option<&HashMap<String, u32>>,
+) -> &'static str {
+    if call_info.is_some_and(|c| c.starts_with("fuzzy_match")) {
+        return "fuzzy_match";
+    }
+    if cnvcall.contains("star68") {
+        return "star68_step";
+    }
+    let unknown: HashSet<&str> = uncallable
+        .iter()
+        .map(String::as_str)
+        .filter(|u| !variants_called.iter().any(|v| v == u))
+        .collect();
+    if let Some(m) = matched {
+        let observed = token_counts(variants_called);
+        let differs = m.keys().chain(observed.keys()).filter(|t| !unknown.contains(t.as_str())).any(|t| {
+            m.get(t).copied().unwrap_or(0) != observed.get(t).copied().unwrap_or(0)
+        });
+        if differs {
+            // retry_add_one_copy needs target_count = N - 2 >= 1, so it cannot act on cn2.
+            let retry_possible = cnvcall.starts_with("cn")
+                && cnvcall.len() <= 3
+                && cnvcall[2..].parse::<u32>().is_ok_and(|n| n >= 3);
+            return if retry_possible { "retry_add_one_copy" } else { "unexplained" };
+        }
+    }
+    if unknown.is_empty() { "exact" } else { "masked" }
+}
+
+#[cfg(test)]
+mod tests_provenance {
+    use super::*;
+
+    fn s(v: &[&str]) -> Vec<String> {
+        v.iter().map(|x| x.to_string()).collect()
+    }
+
+    // Read counts chosen from a Python replay of call_reg1_cn and process_raw_call_denovo
+    // (PREDICTED until this test runs).
+    #[test]
+    fn each_rule_is_named_and_an_untouched_site_is_not() {
+        assert_eq!(site_mechanism(2, 20.0, 20.0, 4.0, Some(2), None, Some(1)), None); // control
+        assert_eq!(site_mechanism(1, 5.0, 95.0, 4.0, Some(1), None, Some(1)), Some("one_copy_shortcut"));
+        assert_eq!(site_mechanism(2, 3.0, 4.0, 4.0, Some(2), None, Some(0)), Some("min_read_rule"));
+        assert_eq!(site_mechanism(2, 5.0, 1.0, 4.0, Some(2), None, Some(1)), Some("min_cn_rule"));
+        assert_eq!(site_mechanism(4, 30.0, 10.0, 4.0, None, Some(2), Some(2)), Some("homology_cap"));
+        assert_eq!(site_mechanism(2, 0.0, 0.0, 4.0, Some(2), None, None), Some("no_call"));
+    }
+
+    #[test]
+    fn a_replay_that_disagrees_with_the_call_reads_unexplained() {
+        assert_eq!(site_mechanism(2, 20.0, 20.0, 4.0, Some(2), None, Some(2)), Some("unexplained"));
+    }
+
+    #[test]
+    fn matching_paths() {
+        let m = |v: &[&str]| token_counts(&s(v));
+        let obs = s(&["g.A", "g.B"]);
+        assert_eq!(matching_path("cn2", Some("unique_match"), &obs, &[], Some(&m(&["g.A", "g.B"]))), "exact");
+        assert_eq!(matching_path("cn2", Some("more_than_one_match"), &obs, &s(&["g.C"]), Some(&m(&["g.A", "g.B", "g.C"]))), "masked");
+        assert_eq!(matching_path("cn3", Some("unique_match"), &obs, &[], Some(&m(&["g.A", "g.B", "g.B"]))), "retry_add_one_copy");
+        assert_eq!(matching_path("cn2", Some("fuzzy_match(score=1.0)"), &obs, &[], Some(&m(&["g.A"]))), "fuzzy_match");
+        assert_eq!(matching_path("cn2", Some("unique_match"), &obs, &[], Some(&m(&["g.A"]))), "unexplained");
+    }
+
+    #[test]
+    fn filters_mask_sites_and_token_rules_are_recorded() {
+        let var_list = s(&["g.42129754G>A", "g.42127473C>T", "g.42126578C>T"]);
+        let calls = SiteCalls {
+            var_list: &var_list,
+            alt_original: &[9, 10],
+            alt_after_sba: &[0, 10],
+            alt_final: &[0, 0],
+            ref_: &[11, 12],
+            homo_alt: &[0],
+            homo_ref: &[30],
+            total_cn_sites: &[2, 2],
+            total_cn: 4,
+            decisions: &[Some(0), Some(0)],
+            homo_decisions: &[Some(0)],
+            min_read: crate::caller::call_variants::min_read_for,
+        };
+        let before = s(&["g.42129809T>C"]);
+        let after = s(&["g.42129809T>C", "g.42129819G>T"]);
+        let (sites, prov) = sites_and_provenance(&calls, &before, &after, "cn2");
+        let mech = |n: &str| prov.iter().find(|p| p.site == n).map(|p| p.mechanism);
+        assert_eq!(mech("g.42129754G>A"), Some("strand_bias_all"));
+        assert_eq!(mech("g.42127473C>T"), Some("noisy_var_strand_filter"));
+        assert_eq!(mech("g.42126578C>T"), None);
+        assert_eq!(mech("g.42129819G>T"), Some("update_variants"));
+        let site = |n: &str| sites.iter().find(|x| x.name == n).unwrap().clone();
+        assert_eq!((site("g.42129754G>A").alt, site("g.42129754G>A").mask), (9, Some("strand_bias_all")));
+        assert!(site("g.42126578C>T").homology);
+    }
+}
