@@ -1,4 +1,5 @@
 pub mod call_variants;
+pub mod candidate_ranking;
 pub mod changepoint;
 pub mod clip_evidence;
 pub mod cnv_hybrid;
