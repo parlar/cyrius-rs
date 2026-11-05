@@ -1118,6 +1118,9 @@ pub struct RankingInput<'a> {
     pub raw_call: Option<&'a [String]>,
 }
 
+/// One scored profile: (composite ln-likelihood, table key index, raw diplotype index).
+type ScoredProfile = (f64, u32, u32);
+
 #[derive(Debug, Clone)]
 struct Entry {
     score: f64,
@@ -1155,7 +1158,7 @@ fn rank_with_table(input: RankingInput, table: &HashMap<String, Vec<String>>) ->
     keys.sort();
 
     // Score every profile (each raw diplotype of each key).
-    let scored: Vec<(Vec<(f64, u32, u32)>, usize)> = keys
+    let scored: Vec<(Vec<ScoredProfile>, usize)> = keys
         .par_iter()
         .enumerate()
         .map(|(ki, key)| {
@@ -1175,7 +1178,7 @@ fn rank_with_table(input: RankingInput, table: &HashMap<String, Vec<String>>) ->
         })
         .collect();
     let unscorable: usize = scored.iter().map(|x| x.1).sum();
-    let mut profs: Vec<(f64, u32, u32)> = scored.into_iter().flat_map(|x| x.0).collect();
+    let mut profs: Vec<ScoredProfile> = scored.into_iter().flat_map(|x| x.0).collect();
     if profs.is_empty() {
         return not_ranked("no_scorable_profile");
     }
@@ -1389,7 +1392,10 @@ mod tests_rank {
         assert_eq!(by_ms(&["*34", "*39"]), 1);
         assert!(c.iter().filter(|e| e["Copy_multiset"] == serde_json::json!(["*34", "*39"])).all(|e| e["Rank"] == 1));
         check_sums(&v);
-        assert!(c.iter().any(|e| !e["Discriminating_sites"].as_array().unwrap().is_empty()));
+        // Lookalikes that differ only at unmodelled tokens (*27 g.42126938C>T, *127/*139 g.42127526C>T)
+        // or only by phase (*34/*39) tie with the call: the scored read sites cannot tell them apart.
+        assert_eq!(by_ms(&["*2", "*27"]), 1, "{v}");
+        assert!(c.iter().all(|e| e["Rank"] == 1 && e["Discriminating_sites"].as_array().unwrap().is_empty()), "{v}");
     }
 
     #[test]
@@ -1437,6 +1443,7 @@ mod tests_rank {
         assert_eq!(c.len(), 6, "{v}");
         assert!(v["Call_rank"].as_u64().unwrap() > 5);
         assert_eq!(c[5]["Rank"], v["Call_rank"]);
+        assert!(!c[5]["Discriminating_sites"].as_array().unwrap().is_empty(), "rows to sum: {v}");
         check_sums(&v);
     }
 
@@ -1462,7 +1469,7 @@ mod tests_rank {
 - [ ] **Step 2: Run, expect pass**
 
 Run: `cargo test --locked --lib candidate_ranking 2>&1 | tail -4`
-Expected: `16 passed`.
+Expected: `22 passed` (17 from Tasks 3-4 after the Task 4 fix, plus 5 here; measured at 5a7a5bb).
 
 - [ ] **Step 3: Mutation checks**, restoring the code after each:
   - Delete `tied_at_cutoff += 1;` → `ties_share_a_rank...` FAILS.
@@ -1475,7 +1482,7 @@ Run:
 - `cargo test --locked 2>&1 | grep "^test result" | grep -vc " 0 failed"` → `0`.
 - `cargo clippy --all-targets --locked 2>&1 | grep -cE "^(warning|error)"` → at most `22`.
 
-- [ ] **Step 5:** Remove `#![allow(unused_imports)]` if Task 3 added it. Re-run Step 4.
+- [ ] **Step 5:** Remove the `#![allow(unused_imports, dead_code)]` line Task 3 added. Add no new allow attributes. Re-run Step 4.
 
 - [ ] **Step 6: Commit**
 
