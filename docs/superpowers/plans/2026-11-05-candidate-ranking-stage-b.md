@@ -11,8 +11,10 @@ a per-site decomposition of each gap and the decision provenance of the call.
 - A new `candidate_ranking` module is a pure function of values `d6_star_caller` already has:
   read sites, table, call and per-site decisions. It does no BAM I/O.
 - Provenance is found by **replaying** the caller's own decision functions per site, and is
-  checked at run time against the value the call actually used. The calling code paths are
-  not changed. The only refactor is `min_read_for`, and B3 proves it changes nothing.
+  checked at run time against the value the call actually used. Two behaviour-preserving
+  refactors: `min_read_for`, and `call_reg1_cn` computing its posterior through the new
+  `cn_posterior` (user decision 2026-11-05: one copy of the math, not two). B3 proves
+  neither changes any output.
 - `main.rs` keeps three snapshots of the alternate counts, calls the module once, and inserts
   the field only when the flag is set.
 
@@ -380,6 +382,19 @@ push to:
                 .into(),
         );
 ```
+
+**Shared, not copied (user decision 2026-11-05):** after adding `cn_posterior`, make
+`call_reg1_cn`'s `Some(cn)` arm use it, so the math exists once. Replace everything from
+`let nsum = count_reg1 + count_reg2;` through the `post_prob.reverse();` block with:
+
+```rust
+            let Some(post_prob) = cn_posterior(cn, count_reg1, count_reg2) else {
+                return vec![None];
+            };
+```
+
+Leave the rest of the arm (from `let mut post_prob_sorted` on) unchanged. The `Some(0)` and
+`Some(1) if count_reg1 > min_read` arms stay before it, as they are.
 
 - [ ] **Step 4: Run, expect pass**
 
