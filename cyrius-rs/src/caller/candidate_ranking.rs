@@ -277,9 +277,11 @@ pub struct ProvenanceRecord {
     pub mechanism: &'static str,
     pub original_alt: Option<u32>,
     pub original_ref: Option<u32>,
-    /// The per-site copy count before token rules (None: the site was not called).
+    /// The per-site copy count before token rules (None: the site was not called). For
+    /// mechanism "retry_add_one_copy" or "fuzzy_match" it is the count in `Variants_called`.
     pub per_site_copies: Option<u32>,
-    /// The copy count in the call's final variant list (`Variants_called`).
+    /// The copy count in the call's final variant list (`Variants_called`). For mechanism
+    /// "retry_add_one_copy" or "fuzzy_match" it is the count in the matched raw call.
     pub called_copies: u32,
 }
 
@@ -824,12 +826,13 @@ fn rank_with_table(input: RankingInput, table: &HashMap<String, Vec<String>>) ->
             n_entries += 1;
             let e = Entry { score, key, raw, label, formatted, multiset, rank: current_rank };
             let is_call = call_sets.contains(&e.multiset);
-            if is_call && call_entry.is_none() {
+            let becomes_call = is_call && call_entry.is_none();
+            if becomes_call {
                 call_entry = Some(e.clone());
             }
             if listed.len() < RANKING_LIST_SIZE {
                 listed.push(e);
-            } else if listed[RANKING_LIST_SIZE - 1].score == score {
+            } else if listed[RANKING_LIST_SIZE - 1].score == score && !becomes_call {
                 tied_at_cutoff += 1;
             }
         }
@@ -855,7 +858,7 @@ fn rank_with_table(input: RankingInput, table: &HashMap<String, Vec<String>>) ->
                     "Copies_best": [kb, nb], "Copies_candidate": [kc, nc], "Site_log10_ratio": r})
             })
             .collect();
-        let mut unmod = [0u32; 5];
+        let mut unmod = [0u32; UNMODELLED.len()];
         for c in &copies {
             for (u, v) in unmod.iter_mut().zip(c.unmodelled) {
                 *u += v;
@@ -1002,11 +1005,12 @@ mod tests_rank {
 
     #[test]
     fn ranking_is_deterministic() {
-        let sc = get_hap_table(crate::data::STAR_TABLE, &[TableKind::Dhap2]);
-        let sites = sites_from("*2_*4", &sc);
-        let vc = tokens("*2_*4", &sc);
+        let sc1 = get_hap_table(crate::data::STAR_TABLE, &[TableKind::Dhap2]);
+        let sc2 = get_hap_table(crate::data::STAR_TABLE, &[TableKind::Dhap2]);
+        let (sites1, sites2) = (sites_from("*2_*4", &sc1), sites_from("*2_*4", &sc2));
+        let (vc1, vc2) = (tokens("*2_*4", &sc1), tokens("*2_*4", &sc2));
         let raw = vec!["*2_*4".to_string()];
-        assert_eq!(rank(input(&sc, &sites, &vc, "*2/*4", &raw)), rank(input(&sc, &sites, &vc, "*2/*4", &raw)));
+        assert_eq!(rank(input(&sc1, &sites1, &vc1, "*2/*4", &raw)), rank(input(&sc2, &sites2, &vc2, "*2/*4", &raw)));
     }
 
     #[test]
@@ -1027,6 +1031,27 @@ mod tests_rank {
         assert!(c.iter().all(|e| e["Rank"] == 1));
         assert_eq!(v["Entries_tied_at_cutoff"], 2);
         assert_eq!(v["Call_rank"], 1);
+    }
+
+    #[test]
+    fn a_call_tied_beyond_the_cutoff_is_listed_not_counted() {
+        let sc = get_hap_table(crate::data::STAR_TABLE, &[]);
+        let mut sites = sites_from("*1_*1", &sc);
+        sites.iter_mut().for_each(|s| s.mask = Some("strand_bias_all")); // nothing scored: all tie
+        let table: HashMap<String, Vec<String>> = ["*1_*1", "*1_*2", "*1_*3", "*1_*4", "*1_*6", "*1_*9", "*1_*10"]
+            .iter()
+            .enumerate()
+            .map(|(i, r)| (format!("k{i}"), vec![r.to_string()]))
+            .collect();
+        let vc: Vec<String> = Vec::new();
+        let raw = vec!["*1_*10".to_string()];
+        let v = rank_with_table(input(&sc, &sites, &vc, "*1/*10", &raw), &table);
+        let c = v["Candidates"].as_array().unwrap();
+        assert_eq!(c.len(), 6, "{v}");
+        assert_eq!(c[5]["Genotype"], "*1/*10", "{v}");
+        assert_eq!(v["Entries_tied_at_cutoff"], 1, "only *1/*9 is unlisted: {v}");
+        assert_eq!(v["Call_rank"], 1);
+        assert!(c.iter().all(|e| e["Rank"] == 1));
     }
 
     #[test]
@@ -1051,7 +1076,8 @@ mod tests_rank {
 
     #[test]
     fn not_ranked_reasons() {
-        for (tag, reason) in [("star5_star5", "direct_genotype_tag"), ("star13", "hybrid_dosage_undefined"),
+        for (tag, reason) in [("star5_star5", "direct_genotype_tag"), ("star13_star13", "direct_genotype_tag"),
+            ("star13intron1_star13intron1", "direct_genotype_tag"), ("star5_star5_star68", "direct_genotype_tag"), ("star13", "hybrid_dosage_undefined"),
             ("exon9hyb_star68", "hybrid_dosage_undefined"), ("star5", "group_failed_transfer_test"),
             ("cn4", "group_untested_in_stage_a"), ("exon9hyb_star5", "group_untested_in_stage_a")] {
             assert_eq!(ranking_scope(tag), Err(reason), "{tag}");
