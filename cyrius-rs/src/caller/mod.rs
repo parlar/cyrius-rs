@@ -4,6 +4,7 @@ pub mod clip_evidence;
 pub mod cnv_hybrid;
 pub mod confidence;
 pub mod consistency;
+pub mod count_model;
 pub mod construct_star_table;
 pub mod d7_depth;
 pub mod diplotype_caller;
