@@ -72,7 +72,7 @@ fn run_on_empty_bam(tag: &str, flags: &[&str]) -> (serde_json::Value, String) {
 }
 
 /// Every `FeatureFlags` field, in declaration order.
-const FLAG_NAMES: [&str; 12] = [
+const FLAG_NAMES: [&str; 13] = [
     "strand_bias_all",
     "fuzzy_match",
     "phase_disambiguate",
@@ -85,6 +85,7 @@ const FLAG_NAMES: [&str; 12] = [
     "clip_evidence",
     "d7_depth",
     "kmer_validation",
+    "candidate_ranking",
 ];
 
 fn flags_of(record: &serde_json::Value) -> Vec<(String, bool)> {
