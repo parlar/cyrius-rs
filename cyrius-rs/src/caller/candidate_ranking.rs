@@ -2,7 +2,6 @@
 //! Spec: docs/superpowers/specs/2026-11-05-candidate-ranking-design.md (Stage B).
 //! Output only: nothing in this module changes the call.
 
-#![allow(unused_imports, dead_code)]
 use std::collections::{HashMap, HashSet};
 
 use rayon::prelude::*;
@@ -682,5 +681,388 @@ mod tests_provenance {
         let site = |n: &str| sites.iter().find(|x| x.name == n).unwrap().clone();
         assert_eq!((site("g.42129754G>A").alt, site("g.42129754G>A").mask), (9, Some("strand_bias_all")));
         assert!(site("g.42126578C>T").homology);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Ranking (spec "Profiles and scores", "Ranking", "Decomposition", "Call rank", "Output").
+// ---------------------------------------------------------------------------
+
+/// Which CNV tags Stage A tested and passed (exp-H20 0a4b020). Err is the not_ranked reason.
+pub fn ranking_scope(cnvcall: &str) -> Result<(), &'static str> {
+    const DIRECT: [&str; 4] = ["star5_star5", "star13_star13", "star13intron1_star13intron1", "star5_star5_star68"];
+    const RANKED: [&str; 5] = ["cn2", "cn3", "exon9hyb", "exon9hyb_exon9hyb", "dup_exon9hyb"];
+    if DIRECT.contains(&cnvcall) {
+        Err("direct_genotype_tag")
+    } else if cnvcall.contains("star13") || cnvcall.contains("star68") {
+        Err("hybrid_dosage_undefined")
+    } else if cnvcall == "star5" {
+        Err("group_failed_transfer_test")
+    } else if RANKED.contains(&cnvcall) {
+        Ok(())
+    } else {
+        Err("group_untested_in_stage_a")
+    }
+}
+
+/// Everything the ranking reads. Built in `d6_star_caller`.
+pub struct RankingInput<'a> {
+    pub cnvcall: &'a str,
+    pub spacer_cn: Option<u32>,
+    pub star_combinations: &'a StarCombinations,
+    pub sites: &'a [ReadSite],
+    pub provenance: Vec<ProvenanceRecord>,
+    pub variants_called: &'a [String],
+    pub uncallable: &'a [String],
+    /// The final `Genotype` (after the resolver and the phase steps).
+    pub call: Option<&'a str>,
+    pub call_info: Option<&'a str>,
+    pub raw_call: Option<&'a [String]>,
+}
+
+/// One scored profile: (composite ln-likelihood, table key index, raw diplotype index).
+type ScoredProfile = (f64, u32, u32);
+
+#[derive(Debug, Clone)]
+struct Entry {
+    score: f64,
+    key: u32,
+    raw: u32,
+    label: String,
+    formatted: bool,
+    multiset: Vec<String>,
+    rank: usize,
+}
+
+fn not_ranked(reason: &str) -> serde_json::Value {
+    serde_json::json!({"Status": "not_ranked", "Reason": reason})
+}
+
+/// The `Candidate_ranking` value for one sample.
+pub fn rank(input: RankingInput) -> serde_json::Value {
+    if let Err(reason) = ranking_scope(input.cnvcall) {
+        return not_ranked(reason);
+    }
+    match combination_table_for(input.cnvcall).map(|k| k.table(input.star_combinations)) {
+        Some(t) if !t.is_empty() => rank_with_table(input, t),
+        _ => not_ranked("no_table"),
+    }
+}
+
+fn rank_with_table(input: RankingInput, table: &HashMap<String, Vec<String>>) -> serde_json::Value {
+    let Some(call) = input.call.filter(|c| !c.is_empty()) else {
+        return not_ranked("no_call");
+    };
+    let sites = input.sites;
+    let defs = allele_defs(&input.star_combinations.dstar, sites);
+    let ll = ll_table(sites);
+    let mut keys: Vec<&String> = table.keys().collect();
+    keys.sort();
+
+    // Score every profile (each raw diplotype of each key).
+    let scored: Vec<(Vec<ScoredProfile>, usize)> = keys
+        .par_iter()
+        .enumerate()
+        .map(|(ki, key)| {
+            let mut buf = vec![(0u8, 0u8); sites.len()];
+            let mut out = Vec::new();
+            let mut bad = 0usize;
+            for (ri, raw) in table[*key].iter().enumerate() {
+                match copies_of(raw, &defs) {
+                    Some(c) if c.len() + 2 < MAX_N => {
+                        dosage_into(&c, sites, &mut buf);
+                        out.push((profile_score(&buf, &ll), ki as u32, ri as u32));
+                    }
+                    _ => bad += 1,
+                }
+            }
+            (out, bad)
+        })
+        .collect();
+    let unscorable: usize = scored.iter().map(|x| x.1).sum();
+    let mut profs: Vec<ScoredProfile> = scored.into_iter().flat_map(|x| x.0).collect();
+    if profs.is_empty() {
+        return not_ranked("no_scorable_profile");
+    }
+    profs.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+    let raw_of = |key: u32, raw: u32| -> &String { &table[keys[key as usize]][raw as usize] };
+
+    // Walk in score order. Each distinct (multiset, label) is one entry.
+    let call_sets: Vec<Vec<String>> = call.split(';').map(|g| copy_multiset(g.trim())).collect();
+    let mut seen: HashSet<(Vec<String>, String)> = HashSet::new();
+    let (mut listed, mut call_entry): (Vec<Entry>, Option<Entry>) = (Vec::new(), None);
+    let (mut n_entries, mut tied_at_cutoff, mut current_rank) = (0usize, 0usize, 1usize);
+    let mut last_score: Option<f64> = None;
+    let mut i = 0;
+    while i < profs.len() {
+        let (score, key, _) = profs[i];
+        let mut j = i;
+        while j < profs.len() && profs[j].0 == score && profs[j].1 == key {
+            j += 1;
+        }
+        if last_score != Some(score) {
+            current_rank = n_entries + 1;
+            last_score = Some(score);
+        }
+        let fifth = listed.get(RANKING_LIST_SIZE - 1).map(|e| e.score);
+        if fifth.is_some_and(|f| score < f) && call_entry.is_some() {
+            break;
+        }
+        let mut labels: Vec<(String, bool, u32)> = Vec::new();
+        for p in &profs[i..j] {
+            for (l, f) in entry_labels(raw_of(p.1, p.2), input.cnvcall, input.spacer_cn) {
+                labels.push((l, f, p.2));
+            }
+        }
+        labels.sort();
+        labels.dedup_by(|a, b| a.0 == b.0);
+        for (label, formatted, raw) in labels {
+            let multiset = copy_multiset(&label);
+            if !seen.insert((multiset.clone(), label.clone())) {
+                continue;
+            }
+            n_entries += 1;
+            let e = Entry { score, key, raw, label, formatted, multiset, rank: current_rank };
+            let is_call = call_sets.contains(&e.multiset);
+            if is_call && call_entry.is_none() {
+                call_entry = Some(e.clone());
+            }
+            if listed.len() < RANKING_LIST_SIZE {
+                listed.push(e);
+            } else if listed[RANKING_LIST_SIZE - 1].score == score {
+                tied_at_cutoff += 1;
+            }
+        }
+        i = j;
+    }
+
+    // Decomposition against the rank-1 entry's profile.
+    let ln10 = std::f64::consts::LN_10;
+    let best = listed[0].clone();
+    let d_best = dosage(&copies_of(raw_of(best.key, best.raw), &defs).unwrap(), sites);
+    let observed = token_counts(input.variants_called);
+    let entry_json = |e: &Entry| -> serde_json::Value {
+        let copies = copies_of(raw_of(e.key, e.raw), &defs).unwrap();
+        let d = dosage(&copies, sites);
+        let rows: Vec<serde_json::Value> = sites
+            .iter()
+            .enumerate()
+            .filter(|(i, s)| s.scored() && d[*i] != d_best[*i])
+            .map(|(i, s)| {
+                let ((kb, nb), (kc, nc)) = (d_best[i], d[i]);
+                let r = (ll[i][nb as usize * MAX_N + kb as usize] - ll[i][nc as usize * MAX_N + kc as usize]) / ln10;
+                serde_json::json!({"Site": s.name, "Alt_reads": s.alt, "Ref_reads": s.ref_,
+                    "Copies_best": [kb, nb], "Copies_candidate": [kc, nc], "Site_log10_ratio": r})
+            })
+            .collect();
+        let mut unmod = [0u32; 5];
+        for c in &copies {
+            for (u, v) in unmod.iter_mut().zip(c.unmodelled) {
+                *u += v;
+            }
+        }
+        let um: Vec<serde_json::Value> = UNMODELLED
+            .iter()
+            .zip(unmod)
+            .filter_map(|(t, cand)| {
+                let in_call = observed.get(*t).copied().unwrap_or(0);
+                (in_call != cand).then(|| serde_json::json!({"Token": t, "Copies_call": in_call, "Copies_candidate": cand}))
+            })
+            .collect();
+        serde_json::json!({"Rank": e.rank, "Genotype": e.label, "Copy_multiset": e.multiset,
+            "Label_formatted": e.formatted, "Best_profile_key": keys[e.key as usize],
+            "Delta_composite_log10_likelihood": (best.score - e.score) / ln10,
+            "Discriminating_sites": rows, "Unmodelled_differences": um})
+    };
+    let mut candidates: Vec<serde_json::Value> = listed.iter().map(&entry_json).collect();
+    if let Some(ce) = &call_entry {
+        if !listed.iter().any(|e| e.key == ce.key && e.label == ce.label) {
+            candidates.push(entry_json(ce));
+        }
+    }
+
+    // Matching path, and records for retry / fuzzy differences from the observed profile.
+    let matched = input
+        .raw_call
+        .and_then(|r| r.first())
+        .and_then(|raw| profile_token_counts(raw, &input.star_combinations.dstar));
+    let path = matching_path(input.cnvcall, input.call_info, input.variants_called, input.uncallable, matched.as_ref());
+    let mut provenance = input.provenance;
+    if let (Some(m), "retry_add_one_copy" | "fuzzy_match") = (&matched, path) {
+        let mut toks: Vec<&String> = m.keys().chain(observed.keys()).collect();
+        toks.sort();
+        toks.dedup();
+        for t in toks {
+            let (o, k) = (observed.get(t).copied().unwrap_or(0), m.get(t).copied().unwrap_or(0));
+            if o != k {
+                let site = sites.iter().find(|s| &s.name == t);
+                provenance.push(ProvenanceRecord {
+                    site: t.clone(),
+                    mechanism: path,
+                    original_alt: site.map(|s| s.alt),
+                    original_ref: site.map(|s| s.ref_),
+                    per_site_copies: Some(o),
+                    called_copies: k,
+                });
+            }
+        }
+    }
+    let prov_json: Vec<serde_json::Value> = provenance
+        .iter()
+        .map(|p| serde_json::json!({"Site": p.site, "Mechanism": p.mechanism, "Original_alt": p.original_alt,
+            "Original_ref": p.original_ref, "Per_site_copies": p.per_site_copies, "Called_copies": p.called_copies}))
+        .collect();
+    let masked: Vec<&str> = sites.iter().filter(|s| s.mask.is_some()).map(|s| s.name.as_str()).collect();
+    serde_json::json!({
+        "Status": "ranked",
+        "Model": MODEL_ID,
+        "Evidence_scale": "uncalibrated_composite",
+        "Hypothesis_space": input.cnvcall,
+        "Profiles_evaluated": profs.len(),
+        "Profiles_unscorable": unscorable,
+        "Matching_path": path,
+        "Masked_sites": masked,
+        "Unmodelled_tokens": UNMODELLED,
+        "Call_rank": call_entry.as_ref().map(|e| e.rank),
+        "Call_delta_composite_log10_likelihood": call_entry.as_ref().map(|e| (best.score - e.score) / ln10),
+        "Entries_tied_at_cutoff": tied_at_cutoff,
+        "Candidates": candidates,
+        "Decision_provenance": prov_json,
+    })
+}
+
+#[cfg(test)]
+mod tests_rank {
+    use super::*;
+    use crate::caller::construct_star_table::{get_hap_table, TableKind};
+
+    /// Sites with reads drawn from one profile: 40 reads, alt = round(40 k / n).
+    fn sites_from(raw: &str, sc: &StarCombinations) -> Vec<ReadSite> {
+        let blank: Vec<ReadSite> = site_specs(crate::data::TARGET_VARIANT, crate::data::TARGET_VARIANT_HOMO)
+            .into_iter()
+            .map(|(name, pos, class, homology)| ReadSite { name, pos, class, homology, alt: 0, ref_: 40, mask: None })
+            .collect();
+        let defs = allele_defs(&sc.dstar, &blank);
+        let d = dosage(&copies_of(raw, &defs).unwrap(), &blank);
+        blank
+            .into_iter()
+            .zip(d)
+            .map(|(mut s, (k, n))| {
+                let alt = if n == 0 { 0 } else { (40.0 * k as f64 / n as f64).round() as u32 };
+                s.alt = alt;
+                s.ref_ = 40 - alt;
+                s
+            })
+            .collect()
+    }
+
+    fn tokens(raw: &str, sc: &StarCombinations) -> Vec<String> {
+        let mut v: Vec<String> = profile_token_counts(raw, &sc.dstar)
+            .unwrap()
+            .into_iter()
+            .flat_map(|(t, n)| std::iter::repeat_n(t, n as usize))
+            .collect();
+        v.sort();
+        v
+    }
+
+    fn input<'a>(sc: &'a StarCombinations, sites: &'a [ReadSite], vc: &'a [String], call: &'a str, raw: &'a [String]) -> RankingInput<'a> {
+        RankingInput { cnvcall: "cn2", spacer_cn: Some(2), star_combinations: sc, sites, provenance: Vec::new(),
+            variants_called: vc, uncallable: &[], call: Some(call), call_info: Some("unique_match"), raw_call: Some(raw) }
+    }
+
+    fn check_sums(v: &serde_json::Value) {
+        for c in v["Candidates"].as_array().unwrap() {
+            let s: f64 = c["Discriminating_sites"].as_array().unwrap().iter().map(|r| r["Site_log10_ratio"].as_f64().unwrap()).sum();
+            assert!((s - c["Delta_composite_log10_likelihood"].as_f64().unwrap()).abs() < 1e-9, "{c}");
+        }
+    }
+
+    #[test]
+    fn an_exact_cn2_call_ranks_first_and_its_equivalent_ties_with_it() {
+        let sc = get_hap_table(crate::data::STAR_TABLE, &[TableKind::Dhap2]);
+        let sites = sites_from("*1_*2", &sc);
+        let vc = tokens("*1_*2", &sc);
+        let raw = vec!["*1_*2".to_string()];
+        let v = rank(input(&sc, &sites, &vc, "*1/*2", &raw));
+        assert_eq!(v["Status"], "ranked", "{v}");
+        assert_eq!(v["Call_rank"], 1);
+        assert_eq!(v["Matching_path"], "exact");
+        let c = v["Candidates"].as_array().unwrap();
+        let by_ms = |ms: &[&str]| c.iter().filter(|e| e["Copy_multiset"] == serde_json::json!(ms)).count();
+        assert_eq!(by_ms(&["*1", "*2"]), 1, "each genotype appears once");
+        assert_eq!(by_ms(&["*34", "*39"]), 1);
+        assert!(c.iter().filter(|e| e["Copy_multiset"] == serde_json::json!(["*34", "*39"])).all(|e| e["Rank"] == 1));
+        check_sums(&v);
+        // Lookalikes that differ only at unmodelled tokens (*27 g.42126938C>T, *127/*139 g.42127526C>T)
+        // or only by phase (*34/*39) tie with the call: the scored read sites cannot tell them apart.
+        assert_eq!(by_ms(&["*2", "*27"]), 1, "{v}");
+        assert!(c.iter().all(|e| e["Rank"] == 1 && e["Discriminating_sites"].as_array().unwrap().is_empty()), "{v}");
+    }
+
+    #[test]
+    fn ranking_is_deterministic() {
+        let sc = get_hap_table(crate::data::STAR_TABLE, &[TableKind::Dhap2]);
+        let sites = sites_from("*2_*4", &sc);
+        let vc = tokens("*2_*4", &sc);
+        let raw = vec!["*2_*4".to_string()];
+        assert_eq!(rank(input(&sc, &sites, &vc, "*2/*4", &raw)), rank(input(&sc, &sites, &vc, "*2/*4", &raw)));
+    }
+
+    #[test]
+    fn ties_share_a_rank_and_are_counted_at_the_cutoff() {
+        let sc = get_hap_table(crate::data::STAR_TABLE, &[]);
+        let mut sites = sites_from("*1_*1", &sc);
+        sites.iter_mut().for_each(|s| s.mask = Some("strand_bias_all")); // nothing scored: all tie
+        let table: HashMap<String, Vec<String>> = ["*1_*1", "*1_*2", "*1_*3", "*1_*4", "*1_*6", "*1_*9", "*1_*10"]
+            .iter()
+            .enumerate()
+            .map(|(i, r)| (format!("k{i}"), vec![r.to_string()]))
+            .collect();
+        let vc: Vec<String> = Vec::new();
+        let raw = vec!["*1_*1".to_string()];
+        let v = rank_with_table(input(&sc, &sites, &vc, "*1/*1", &raw), &table);
+        let c = v["Candidates"].as_array().unwrap();
+        assert_eq!(c.len(), 5);
+        assert!(c.iter().all(|e| e["Rank"] == 1));
+        assert_eq!(v["Entries_tied_at_cutoff"], 2);
+        assert_eq!(v["Call_rank"], 1);
+    }
+
+    #[test]
+    fn a_call_below_the_list_is_appended() {
+        let sc = get_hap_table(crate::data::STAR_TABLE, &[]);
+        let sites = sites_from("*1_*1", &sc);
+        let table: HashMap<String, Vec<String>> = ["*1_*1", "*1_*2", "*1_*3", "*1_*4", "*1_*6", "*1_*9", "*4_*10"]
+            .iter()
+            .enumerate()
+            .map(|(i, r)| (format!("k{i}"), vec![r.to_string()]))
+            .collect();
+        let vc = tokens("*4_*10", &sc);
+        let raw = vec!["*4_*10".to_string()];
+        let v = rank_with_table(input(&sc, &sites, &vc, "*4/*10", &raw), &table);
+        let c = v["Candidates"].as_array().unwrap();
+        assert_eq!(c.len(), 6, "{v}");
+        assert!(v["Call_rank"].as_u64().unwrap() > 5);
+        assert_eq!(c[5]["Rank"], v["Call_rank"]);
+        assert!(!c[5]["Discriminating_sites"].as_array().unwrap().is_empty(), "rows to sum: {v}");
+        check_sums(&v);
+    }
+
+    #[test]
+    fn not_ranked_reasons() {
+        for (tag, reason) in [("star5_star5", "direct_genotype_tag"), ("star13", "hybrid_dosage_undefined"),
+            ("exon9hyb_star68", "hybrid_dosage_undefined"), ("star5", "group_failed_transfer_test"),
+            ("cn4", "group_untested_in_stage_a"), ("exon9hyb_star5", "group_untested_in_stage_a")] {
+            assert_eq!(ranking_scope(tag), Err(reason), "{tag}");
+        }
+        for tag in ["cn2", "cn3", "exon9hyb", "exon9hyb_exon9hyb", "dup_exon9hyb"] {
+            assert_eq!(ranking_scope(tag), Ok(()), "{tag}");
+        }
+        let sc = get_hap_table(crate::data::STAR_TABLE, &[TableKind::Dhap2]);
+        let sites = sites_from("*1_*1", &sc);
+        let mut i = input(&sc, &sites, &[], "", &[]);
+        i.call = None;
+        assert_eq!(rank(i)["Reason"], "no_call");
     }
 }
