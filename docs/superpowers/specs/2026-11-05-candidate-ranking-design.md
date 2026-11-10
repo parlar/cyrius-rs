@@ -102,7 +102,7 @@ variant, `k_s(K)`. Both come from the **profile**, not from the caller's
   These hybrids are not table alleles (no `*13` or `*68` line in
   `star_table.txt`). Their copies are implied by the tag, so the profile cannot
   say which sites they cover. These samples are `not_ranked` with reason
-  `hybrid_dosage_undefined`.
+  `hybrid_dosage_undefined`, except the direct-genotype tags listed below.
 
 Stage A tests whether this translation fits real counts in each tag group.
 Only the CNV groups that passed are ranked: `cn2`, `cn3`, `exon9hyb`,
@@ -112,8 +112,11 @@ Only the CNV groups that passed are ranked: `cn2`, `cn3`, `exon9hyb`,
   `star13intron1_star13intron1` and `star5_star5_star68`: reason
   `direct_genotype_tag`;
 - other tags with `star13` or `star68`: `hybrid_dosage_undefined`;
-- `star5`: `group_failed_transfer_test`. Its read counts were a depth
-  artefact in Stage A, so the dosage translation does not fit;
+- `star5`: `group_failed_transfer_test`. This is the locked Stage A verdict.
+  A post hoc analysis, written after the result was read, attributes the
+  failure to a depth artefact in the transfer statistic rather than a misfit
+  (−0.0035 nats per reading; exp-H20 `results/POSTHOC_star5_transfer.md`). The
+  verdict was not changed;
 - any other tag: `group_untested_in_stage_a`.
 
 ## Stage A — choose the count model by measurement
@@ -303,7 +306,8 @@ Details:
 - **`retry_add_one_copy`** is labelled only when all of these hold:
   - the tag is `cnN` with N >= 3;
   - exactly one token differs between `Variants_called` and the call's first
-    raw candidate;
+    raw candidate, not counting uncallable tokens that are absent from
+    `Variants_called`;
   - that token's count in the raw candidate is its observed count + 1;
   - its observed count is N - 2.
 
@@ -425,7 +429,10 @@ does not change them. Check B3 proves that no call changes.
 
 ### Implementation checks (locked before the Stage B run)
 
-These establish consistency, arithmetic and backward compatibility only.
+These establish consistency, arithmetic and backward compatibility only. The
+locked wording, with the vacuity guards, is in the Stage B plan
+(`docs/superpowers/plans/2026-11-05-candidate-ranking-stage-b.md`, Global
+Constraints). Where the two differ, the plan governs.
 
 - **B1.** In every output file (53 benchmark, 25% and 10% thinned, damaged
   NA19920, and the 7 regression samples once available), every listed entry's
@@ -434,9 +441,9 @@ These establish consistency, arithmetic and backward compatibility only.
 - **B3.** Without the flag, every field except build provenance (`Tool_commit`,
   `Flags`) is identical to master `baf3459`. With the flag, every existing field
   is identical as well.
-- **B4.** For every read site, provenance `Called_copies` equals the count the
-  call used, and no record reads `unexplained`. Records for `retry_add_one_copy`
-  and `fuzzy_match` are excluded: their counts have the second meaning.
+- **B4.** No `Decision_provenance` record and no `Matching_path` reads
+  `unexplained`. Every `update_variants` or `star68_step` record has
+  `Called_copies` equal to that token's count in `Variants_called`.
 
 ## Stage C — validation before any evidential reading
 
