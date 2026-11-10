@@ -186,6 +186,21 @@ contribute 0. Each candidate lists where it differs from the call at them
 - **Profiles.** Every key of the table `match_star` uses for the called group
   (`get_dic(cnvcall)`, or `dhap` for one-copy groups). There are up to 1,551,523
   ([match_star_allele.rs:79](../../../cyrius-rs/src/caller/match_star_allele.rs#L79)).
+- **Hybrid count (amendment 2026-11-10).** Only profiles with as many `exon9gc`
+  copies as `Variants_called` has `exon9gc` tokens are scored. The others are
+  counted in `Profiles_other_exon9gc_count`. Why:
+  - The hybrid count comes from depth, as the CNV group does. The read model
+    cannot score it.
+  - A profile with more `exon9gc` copies has fewer counted copies at exon-9 sites
+    (dosage translation). At `n_s = 0` the site term is 0, the largest possible,
+    so that profile ignores the site's reads.
+  - Measured at `15c57b4` on 9 hybrid-family or exon-9 benchmark samples: in 7,
+    the top entry had more `exon9gc` copies than the call. NA18526 (truth
+    `*1/*36+*36+*10`) was topped by `*36_*36_*36_*83`, with 4 copies against 2, by
+    +1.82 log10, all at `g.42126611C>G` (17 alt, 33 ref).
+  - Every profile in a ranked table has the same number of copies (measured: cn2
+    2, cn3 3, exon9hyb 3, exon9hyb_exon9hyb 4, dup_exon9hyb 4). So with the
+    hybrid count fixed, `n_s` is the same for every profile at every site.
 - **Profile score** `S(K)`: the sum over unmasked read sites, in `var_list`
   order, of `log10 P(a_s | n_s, k_s(K), n_s(K))` under the Stage A model, after
   dosage translation. This is a composite log-likelihood.
@@ -273,7 +288,8 @@ and check B3 proves that no call changes.
   "Model": "<Stage A model id>",
   "Evidence_scale": "uncalibrated_composite",
   "Hypothesis_space": "<cnv group>",
-  "Profiles_evaluated": <int>, "Matching_path": "<exact | masked | …>",
+  "Profiles_evaluated": <int>, "Profiles_other_exon9gc_count": <int>,
+  "Matching_path": "<exact | masked | …>",
   "Masked_sites": [...], "Unmodelled_tokens": [...],
   "Call_rank": <int or null>, "Call_delta_composite_log10_likelihood": <float or null>,
   "Entries_tied_at_cutoff": <int>,
@@ -306,7 +322,9 @@ and check B3 proves that no call changes.
   - `no_table`;
   - `no_call`;
   - `hybrid_dosage_undefined`;
-  - `group_failed_transfer_test`.
+  - `group_failed_transfer_test`;
+  - `no_profile_with_called_exon9gc_count` (amendment 2026-11-10: every
+    scorable profile has another `exon9gc` count).
 
 ### Code layout
 

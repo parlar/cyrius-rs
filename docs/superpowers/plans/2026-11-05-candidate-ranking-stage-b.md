@@ -1626,6 +1626,137 @@ git commit -m "feat(ranking): --candidate-ranking flag adds Candidate_ranking to
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
+### Task 6b: Hybrid count fixed to the call's (amendment 2026-11-10)
+
+Why: spec "Profiles and scores", **Hybrid count**. In the Task 6 smoke run, profiles with
+more `exon9gc` copies than the call had `n_s = 0` at exon-9 sites, where the site term is 0
+(the maximum), and topped 7 of 9 hybrid-family or exon-9 samples. Design choice this patches:
+"Profiles = every key of the called group's table". It is the first patch to that choice.
+
+**Files:**
+- Modify: `cyrius-rs/src/caller/candidate_ranking.rs` (`rank_with_table`, one struct, one test)
+
+**Interfaces:**
+- Consumes: `count_of(tokens: &[String], t: &str) -> u32`, `copies_of`, `AlleleDef.gc`.
+- Produces: JSON field `Profiles_other_exon9gc_count` (int), and the `not_ranked` reason
+  `no_profile_with_called_exon9gc_count`.
+
+- [ ] **Step 1: Write the failing test** (in `mod tests_rank`):
+
+```rust
+    #[test]
+    fn profiles_with_another_exon9gc_count_are_not_scored() {
+        let sc = get_hap_table(crate::data::STAR_TABLE, &[]);
+        let sites = sites_from("*10_*36_*36", &sc);
+        let vc = tokens("*10_*36_*36", &sc);
+        assert_eq!(count_of(&vc, "exon9gc"), 2);
+        let raw = vec!["*10_*36_*36".to_string()];
+        let table: HashMap<String, Vec<String>> = ["*10_*36_*36", "*36_*36_*36", "*36_*36_*83"]
+            .iter()
+            .enumerate()
+            .map(|(i, r)| (format!("k{i}"), vec![r.to_string()]))
+            .collect();
+        let mut i = input(&sc, &sites, &vc, "*36/*36+*10", &raw);
+        i.cnvcall = "exon9hyb";
+        let v = rank_with_table(i, &table);
+        assert_eq!(v["Profiles_evaluated"], 1, "{v}");
+        assert_eq!(v["Profiles_other_exon9gc_count"], 2, "{v}");
+        assert_eq!(v["Call_rank"], 1, "{v}");
+        let only_other: HashMap<String, Vec<String>> = [("k0".to_string(), vec!["*36_*36_*83".to_string()])].into();
+        let mut i = input(&sc, &sites, &vc, "*36/*36+*10", &raw);
+        i.cnvcall = "exon9hyb";
+        assert_eq!(rank_with_table(i, &only_other)["Reason"], "no_profile_with_called_exon9gc_count");
+    }
+```
+
+- [ ] **Step 2: Run it, expect FAIL**
+
+Run: `cargo test --locked --lib profiles_with_another_exon9gc_count_are_not_scored 2>&1 | tail -5`
+Expected: FAIL on `Profiles_evaluated` (3, not 1).
+
+- [ ] **Step 3: Implement.** Directly above `fn rank_with_table`, add:
+
+```rust
+/// One table key's scored profiles, and how many of its raws were left out.
+struct KeyScores {
+    profiles: Vec<ScoredProfile>,
+    unscorable: usize,
+    other_exon9gc: usize,
+}
+```
+
+In `rank_with_table`, replace the block from `// Score every profile` through the
+`if profs.is_empty() { ... }` check with:
+
+```rust
+    // Score every profile (each raw diplotype of each key) that has the called number of
+    // exon9gc copies (spec "Profiles and scores", Hybrid count).
+    let called_gc = count_of(input.variants_called, "exon9gc") as usize;
+    let scored: Vec<KeyScores> = keys
+        .par_iter()
+        .enumerate()
+        .map(|(ki, key)| {
+            let mut buf = vec![(0u8, 0u8); sites.len()];
+            let mut ks = KeyScores { profiles: Vec::new(), unscorable: 0, other_exon9gc: 0 };
+            for (ri, raw) in table[*key].iter().enumerate() {
+                match copies_of(raw, &defs) {
+                    Some(c) if c.len() + 2 < MAX_N => {
+                        if c.iter().filter(|d| d.gc).count() != called_gc {
+                            ks.other_exon9gc += 1;
+                        } else {
+                            dosage_into(&c, sites, &mut buf);
+                            ks.profiles.push((profile_score(&buf, &ll), ki as u32, ri as u32));
+                        }
+                    }
+                    _ => ks.unscorable += 1,
+                }
+            }
+            ks
+        })
+        .collect();
+    let unscorable: usize = scored.iter().map(|x| x.unscorable).sum();
+    let other_exon9gc: usize = scored.iter().map(|x| x.other_exon9gc).sum();
+    let mut profs: Vec<ScoredProfile> = scored.into_iter().flat_map(|x| x.profiles).collect();
+    if profs.is_empty() {
+        return not_ranked(if other_exon9gc > 0 { "no_profile_with_called_exon9gc_count" } else { "no_scorable_profile" });
+    }
+```
+
+In the final `serde_json::json!({ ... })`, directly after `"Profiles_unscorable": unscorable,`, add:
+
+```rust
+        "Profiles_other_exon9gc_count": other_exon9gc,
+```
+
+- [ ] **Step 4: Run, expect PASS.** `cargo test --locked --lib candidate_ranking 2>&1 | tail -4` → 24 passed.
+
+- [ ] **Step 5: Mutation check.** Replace `!= called_gc` with `!= usize::MAX` (no profile excluded).
+  Expect `profiles_with_another_exon9gc_count_are_not_scored` to FAIL. Restore.
+
+- [ ] **Step 6: Full suite and lint count** (as Task 5, Step 4): 0 failing lines; clippy at most 22,
+  with no new allow attributes.
+
+- [ ] **Step 7: Re-run the 9 samples (descriptive).** Build release. For NA18526, HG00463,
+  NA18563, NA18564, NA18565, NA18572, HG02373, NA18545 and HG00421 (benchmark BAMs, flags
+  `--strand-bias-all --fuzzy-match --changepoint-hybrid --het-check --candidate-ranking`), report:
+  Genotype, CNV_group, Status, Call_rank, Call_delta, the top entry's genotype and its
+  `Best_profile_key` exon9gc count, the call's exon9gc count, `Profiles_evaluated`,
+  `Profiles_other_exon9gc_count`, and wall time. Before (15c57b4): call ranks 2, 6, 38, 1, 2, 5,
+  1, 6, 1. This step is descriptive: the fix is judged by Steps 2-5, not by these ranks.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add cyrius-rs/src/caller/candidate_ranking.rs
+git commit -m "fix(ranking): score only profiles with the call's exon9gc copy count
+
+A profile with more exon9gc copies had n_s = 0 at exon-9 sites and a free
+site term of 0 (spec amendment 2026-11-10, Hybrid count). Patches design
+choice: hypothesis space = every key of the called group's table (patch 1).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
 ### Task 7: Spec and README
 
 **Files:**
