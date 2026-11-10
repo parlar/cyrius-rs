@@ -2206,3 +2206,72 @@ of each binary on that file, with the same flags:
 So the base binary itself prints this file's options in a run-dependent order. The
 difference was not introduced by this branch. Run 2's base printed A, and noflag and flag1
 printed B. The locked verdict stands: **B3a and B3b fail**. No check or threshold was changed.
+
+### Run 3 (2026-11-10, at bbc455a after the final-review fix wave): B1, B2, B4 pass; B3a and B3b FAIL on the same 1 of 160 files
+
+Commit and binary measured:
+
+```
+bbc455a
+f2afdbcafcb9efb3eb1393cddaccda6b75395590a85146f58e8bebb9258579a4  /home/parlar_ai/dev/cyrius-rs/cyrius-rs/target/release/cyrius-rs
+```
+
+`runtime.txt` (shared machine, wall seconds not comparable across runs):
+
+```
+base 34s 0 nonzero-exit
+noflag 34s 0 nonzero-exit
+flag1 52s 0 nonzero-exit
+flag2 48s 0 nonzero-exit
+```
+
+`check_b.json`:
+
+```json
+{
+ "fails": [
+  "B3a: 1 differences without the flag, e.g. [(('dmg', 'dmg'), 'Genotype')]",
+  "B3b: 1 existing-field differences with the flag, e.g. [(('dmg', 'dmg'), 'Genotype')]"
+ ],
+ "status": {
+  "ranked": 54,
+  "not_ranked": 106
+ },
+ "not_ranked_reasons": {
+  "hybrid_dosage_undefined": 5,
+  "group_failed_transfer_test": 6,
+  "direct_genotype_tag": 3,
+  "no_call": 92
+ },
+ "matching_paths": {
+  "exact": 46,
+  "masked": 6,
+  "fuzzy_match": 2
+ },
+ "call_ranks": {
+  "1": 42,
+  "4": 3,
+  "2": 6,
+  "14": 1,
+  "3": 1,
+  "13": 1
+ },
+ "b1_worst": 3.552713678800501e-15,
+ "candidates_with_rows": 141,
+ "provenance_records": 70,
+ "files": [
+  160,
+  160,
+  160,
+  160
+ ]
+}
+```
+
+All vacuity guards pass. Compared with run 2, only `provenance_records` changed (66 to 70).
+That is the per-option whole-call records on the two fuzzy files. The B3 difference is again
+damaged NA19920 only: the same nine `Genotype` options, with base's order different from
+noflag's and flag1's (checked after the run). This is the pre-existing order flake from run 2.
+The locked verdict stands: **B3a and B3b fail**. No check or threshold was changed. The order
+flake is to be fixed separately from master (user decision, 2026-11-10). Outputs of runs 1 and 2
+are archived at `~/cyrius-research/candidate-ranking/run1/` and `run2/`; run 3 is in place.
