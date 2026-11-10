@@ -72,7 +72,10 @@ configurations:
     token's count in `Variants_called`.
 - **Vacuity guards** (a check that saw nothing proves nothing). Each of these fails the run:
   - fewer than 160 files in any configuration;
-  - fewer than 80 `ranked` files in flag1. PREDICTED (not run): about 120;
+  - fewer than 40 `ranked` files in flag1. Amendment 2026-11-10: the first value, 80, rested on
+    "PREDICTED (not run): about 120". Earlier outputs on the same files measure about 54
+    (44 benchmark, 9 at 25%, 0 at 10%, 1 damaged; 92 of 160 stop before a CNV group). 40 is
+    about three quarters of 54;
   - fewer than 10 listed candidates with at least one discriminating row;
   - no provenance record at all;
   - `Genotype` missing anywhere in base.
@@ -1757,6 +1760,82 @@ choice: hypothesis space = every key of the called group's table (patch 1).
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
+### Task 6c: Every flagged output carries Candidate_ranking (amendment 2026-11-10)
+
+Why: an early no-call (no total copy number, or no CNV group) returns before `cr::rank` runs,
+so its flagged JSON had no `Candidate_ranking`. Earlier outputs on the Task 8 files show this for
+92 of 160 (unknown-sites `final`, b322eb2; exp-H20 `runs/getrm`). The spec says a sample with
+no possible ranking gets `not_ranked`. Design choice this patches: "rank only at the final
+`D6Call` literal" (patch 1).
+
+**Files:**
+- Modify: `cyrius-rs/src/caller/candidate_ranking.rs` (`fn not_ranked` becomes `pub fn not_ranked`)
+- Modify: `cyrius-rs/src/main.rs` (the `Candidate_ranking` insert before `json_map.insert(sample_id.clone(), call_json);`)
+- Test: `cyrius-rs/tests/output_provenance.rs`
+
+- [ ] **Step 1: Write the failing test** (append to `tests/output_provenance.rs`):
+
+```rust
+#[test]
+fn candidate_ranking_is_present_on_an_early_no_call_only_with_the_flag() {
+    let (on, _) = run_on_empty_bam("cr_on", &["--candidate-ranking"]);
+    assert_eq!(on["Candidate_ranking"], serde_json::json!({"Status": "not_ranked", "Reason": "no_call"}), "{on}");
+    let (off, _) = run_on_empty_bam("cr_off", &[]);
+    assert!(off.get("Candidate_ranking").is_none(), "{off}");
+}
+```
+
+- [ ] **Step 2: Run it, expect FAIL** (`Candidate_ranking` is null with the flag):
+  `cargo test --locked --test output_provenance candidate_ranking_is_present 2>&1 | tail -5`
+
+- [ ] **Step 3: Implement.**
+  - In `candidate_ranking.rs`: `fn not_ranked(reason: &str)` → `pub fn not_ranked(reason: &str)`.
+  - In `main.rs`, replace
+
+```rust
+    if let Some(cr) = &cyp2d6_call.candidate_ranking {
+        call_json
+            .as_object_mut()
+            .expect("call_json is a JSON object")
+            .insert("Candidate_ranking".to_string(), cr.clone());
+    }
+```
+
+  with
+
+```rust
+    // An early no-call never reached the ranking; with the flag it still says so (spec "Output").
+    let candidate_ranking = cyp2d6_call.candidate_ranking.clone().or_else(|| {
+        features
+            .candidate_ranking
+            .then(|| cyrius_rs::caller::candidate_ranking::not_ranked("no_call"))
+    });
+    if let Some(cr) = candidate_ranking {
+        call_json
+            .as_object_mut()
+            .expect("call_json is a JSON object")
+            .insert("Candidate_ranking".to_string(), cr);
+    }
+```
+
+  `features` is the `FeatureFlags` built at `let features = feature_flags(&cli);`. If it is not
+  in scope at this block, stop and report.
+
+- [ ] **Step 4: Run, expect PASS.** The Step 2 command, then
+  `cargo test --locked 2>&1 | grep "^test result" | grep -vc " 0 failed"` → `0`, and
+  `cargo clippy --all-targets --locked 2>&1 | grep -cE "^(warning|error)"` → at most `22`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add cyrius-rs/src/caller/candidate_ranking.rs cyrius-rs/src/main.rs cyrius-rs/tests/output_provenance.rs
+git commit -m "fix(ranking): an early no-call carries Candidate_ranking not_ranked/no_call with the flag
+
+Patches design choice: rank only at the final D6Call literal (patch 1).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+```
+
 ### Task 7: Spec and README
 
 **Files:**
@@ -1907,7 +1986,7 @@ for k, v in sorted(f1.items()):
         if r["Mechanism"] in ("update_variants", "star68_step") and r["Called_copies"] != called.count(r["Site"]):
             fails.append(f"B4: Called_copies mismatch at {k} {r['Site']}")
 if worst > 1e-9: fails.append(f"B1: worst |sum(rows) - delta| = {worst}")
-if status["ranked"] < 80: fails.append(f"vacuous: {status['ranked']} ranked files (< 80)")
+if status["ranked"] < 40: fails.append(f"vacuous: {status['ranked']} ranked files (< 40)")
 if rows_nonempty < 10: fails.append(f"vacuous: {rows_nonempty} candidates with discriminating rows (< 10)")
 if n_rec == 0: fails.append("vacuous: no provenance record")
 report = {"fails": fails, "status": status, "not_ranked_reasons": reasons, "matching_paths": paths,

@@ -379,6 +379,9 @@ does not change them. Check B3 proves that no call changes.
   best entry if it ranks lower.
 - `Entries_tied_at_cutoff` counts unlisted entries that share the fifth entry's
   rank. An unlisted call entry tied at the cutoff is listed and not counted.
+- With the flag, every output carries the field. A sample that stops before a
+  CNV group or total copy number gets `not_ranked` with reason `no_call`
+  (amendment 2026-11-10).
 - If no ranking is possible, the field is `{"Status": "not_ranked", "Reason": …}`,
   where the reason is one of:
   - `direct_genotype_tag`;
@@ -431,8 +434,8 @@ does not change them. Check B3 proves that no call changes.
 
 These establish consistency, arithmetic and backward compatibility only. The
 locked wording, with the vacuity guards, is in the Stage B plan
-(`docs/superpowers/plans/2026-11-05-candidate-ranking-stage-b.md`, Global
-Constraints). Where the two differ, the plan governs.
+(`docs/superpowers/plans/2026-11-05-candidate-ranking-stage-b.md`, Locked
+checks). Where the two differ, the plan governs.
 
 - **B1.** In every output file (53 benchmark, 25% and 10% thinned, damaged
   NA19920, and the 7 regression samples once available), every listed entry's
