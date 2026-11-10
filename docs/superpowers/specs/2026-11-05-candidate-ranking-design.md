@@ -275,7 +275,8 @@ the homology cap per site. The replay uses the caller's own functions plus
 `unexplained`, and check B4 requires none. When a rule is recorded (code
 behaviour, `site_mechanism`):
 - `one_copy_shortcut` and `no_call` are recorded whenever they apply, whether or
-  not the plain posterior would have agreed.
+  not the plain posterior would have agreed. The homology-cap check runs first:
+  a value the cap changes is recorded as `homology_cap`.
 - `min_read_rule` applies only when the posterior's top value is not 0, so it
   always changes the value.
 - `min_cn_rule` and `homology_cap` are recorded only when they change the
@@ -348,6 +349,9 @@ records cannot fail. The value stays in both lists for completeness.
   - `Per_site_copies` is the count in `Variants_called`;
   - `Called_copies` is the count in that profile;
   - `Genotype_option` is the sorted list of the option labels with that profile.
+    The labels are the raw candidates' own formatted labels (`entry_labels`),
+    so a raw candidate's second arrangement can be listed even when the final
+    `Genotype` dropped it.
 - Every other record has `Genotype_option: null`.
 - Basis: the final review found p25 HG02373 (fuzzy; options `*14/*36+*10`,
   `*36+*10/*65` and `*36+*10/*114`) with a single record, built from the first
@@ -573,7 +577,7 @@ flag stays opt-in.
 ## Known limits (Stage B measurements)
 
 Source: the outputs of run 2 of the locked checks, with the binary built at
-`7d68260`. That is 160 files: 53 benchmark, 53 at 25% depth, 53 at 10% depth,
+`7d68260` (archived at `~/cyrius-research/candidate-ranking/run2/`). That is 160 files: 53 benchmark, 53 at 25% depth, 53 at 10% depth,
 and the damaged NA19920. Run 2 predates the per-option records (`63ee1ab`),
 which change only `Decision_provenance`. Re-run at `63ee1ab`, p25 HG02373
 differs from run 2 only in `Decision_provenance` and `Tool_commit`. No model
@@ -625,8 +629,11 @@ Groups by mechanism:
    - At 25% depth, 2 alt reads remain of 25 and of 31. With the two D7 copies
      (n = 4 and 5) and the homology class (ε ≈ 0.0007), this favours one
      carrier copy over none by 1.58 and 1.48.
-   - Here the ranking does not support the truth. The call `*2/*21` is wrong,
-     and the truth `*1/*21` is not among the listed entries.
+   - For NA18973 the caller itself made no call at this site: its provenance
+     record is `no_call` (2 alt, 23 ref, `Per_site_copies` null), the site is in
+     `Uncallable_target_sites`, and `Matching_path` is `masked`. For NA18973 the
+     ranking does not support the truth either: the call `*2/*21` is wrong, and
+     the truth `*1/*21` is not among the listed entries.
 3. **One stray read at an indel site (1 call).** HG01094 is the only benchmark
    sample without `*21` that has an alt read at g.42128218-42128219insG.
    - Under M4's indel class (ρ = 0.316), its 1 read in 42 favours one copy over
@@ -665,7 +672,9 @@ from the same transcription.
   - After (`98cb61d`): 1, 4, 14, 1, 1, 3, 1, 4, 1.
   - Run 2 gives the same ranks as after.
 - **Runtime.** Measured on the release build of the code committed as
-  `63ee1ab`, built from the working tree just before that commit.
+  `63ee1ab`, built from the working tree just before that commit (the outputs
+  carry `Tool_commit` `30c39bf-dirty`). Outputs and `times.tsv`:
+  `~/cyrius-research/candidate-ranking/task9_runtime/`.
   - Flags: `--strand-bias-all --fuzzy-match --changepoint-hybrid --het-check`.
   - Two runs each, on a shared 72-core machine at a load average of about 5.
   - Wall time and maximum resident memory, flag off to on:

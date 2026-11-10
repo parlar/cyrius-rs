@@ -1236,13 +1236,14 @@ mod tests_rank {
     #[test]
     fn fuzzy_records_are_made_per_genotype_option() {
         let sc = get_hap_table(crate::data::STAR_TABLE, &[]);
-        let raws = ["*10.002_*14_*36", "*10.002_*114_*36", "*10.002_*36_*65", "*10.002_*36_*41"];
+        // Raws out of label order, so the test needs the sort.
+        let raws = ["*10.002_*36_*65", "*10.002_*36_*41", "*10.002_*114_*36", "*10.002_*14_*36"];
         let raw = strings(&raws);
         let vc = strings(&["exon9gc", "g.42126611C>G", "g.42126611C>G", "g.42126611C>G", "g.42127941G>A",
             "g.42129033C>T", "g.42129130C>G", "g.42129130C>G", "g.42129130C>G", "g.42129754G>A",
             "g.42129754G>A", "g.42130692G>A", "g.42130692G>A", "g.42130692G>A"]);
         let before: Vec<String> = vc.iter().filter(|t| *t != "exon9gc").cloned().collect();
-        let sites = sites_from(raws[0], &sc);
+        let sites = sites_from("*10.002_*14_*36", &sc);
         let mut i = input(&sc, &sites, &vc, "*14/*36+*10;*36+*10/*65;*36+*10/*114", &raw);
         i.cnvcall = "exon9hyb";
         i.call_info = Some("fuzzy_match(score=1.0)");
@@ -1268,14 +1269,14 @@ mod tests_rank {
         let sites = sites_from("*1_*2", &sc);
         let opt = |l: &[&str]| serde_json::json!(l);
 
-        let raws = ["*1_*2", "*34_*39"];
+        let raws = ["*34_*39", "*1_*2"]; // out of label order: the labels must be sorted
         let raw = strings(&raws);
         let mut i = input(&sc, &sites, &vc, "*1/*2;*34/*39", &raw);
         i.call_info = Some("fuzzy_match(score=1.0)");
         let v = rank_with_table(i, &table_of(&raws));
         assert_eq!(records(&v), vec![rec("g.42129130C>G", "fuzzy_match", 1, 0, opt(&["*1/*2", "*34/*39"]))], "{v}");
 
-        let raws = ["*1_*2", "*1_*34"];
+        let raws = ["*1_*34", "*1_*2"]; // out of order: the groups must be sorted
         let raw = strings(&raws);
         let mut i = input(&sc, &sites, &vc, "*1/*1", &raw);
         i.call_info = Some("fuzzy_match(score=1.0)");
