@@ -150,3 +150,11 @@ fn json_flags_follow_the_command_line() {
         .collect();
     assert_eq!(flags_of(&record), expected);
 }
+
+#[test]
+fn candidate_ranking_is_present_on_an_early_no_call_only_with_the_flag() {
+    let (on, _) = run_on_empty_bam("cr_on", &["--candidate-ranking"]);
+    assert_eq!(on["Candidate_ranking"], serde_json::json!({"Status": "not_ranked", "Reason": "no_call"}), "{on}");
+    let (off, _) = run_on_empty_bam("cr_off", &[]);
+    assert!(off.get("Candidate_ranking").is_none(), "{off}");
+}

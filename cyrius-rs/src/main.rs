@@ -1401,11 +1401,17 @@ fn main() {
         "Tool_commit": TOOL_COMMIT,
         "Flags": flags_json,
     });
-    if let Some(cr) = &cyp2d6_call.candidate_ranking {
+    // An early no-call never reached the ranking; with the flag it still says so (spec "Output").
+    let candidate_ranking = cyp2d6_call.candidate_ranking.clone().or_else(|| {
+        features
+            .candidate_ranking
+            .then(|| cyrius_rs::caller::candidate_ranking::not_ranked("no_call"))
+    });
+    if let Some(cr) = candidate_ranking {
         call_json
             .as_object_mut()
             .expect("call_json is a JSON object")
-            .insert("Candidate_ranking".to_string(), cr.clone());
+            .insert("Candidate_ranking".to_string(), cr);
     }
     json_map.insert(sample_id.clone(), call_json);
     let json_output = serde_json::to_string(&json_map).unwrap();

@@ -736,7 +736,7 @@ struct Entry {
     rank: usize,
 }
 
-fn not_ranked(reason: &str) -> serde_json::Value {
+pub fn not_ranked(reason: &str) -> serde_json::Value {
     serde_json::json!({"Status": "not_ranked", "Reason": reason})
 }
 
