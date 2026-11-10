@@ -262,15 +262,25 @@ For each listed entry, against the rank-1 entry's best key:
 - `Discriminating_sites`: one row per unmasked read site where the two profiles'
   translated `(k_s, n_s)` differ. Each row has the reads, both `(k_s, n_s)`, and
   `Site_log10_ratio`. The rows sum to the delta (tolerance 1e-9).
-- `Unmodelled_differences`: as above.
+- `Unmodelled_differences`: one row per unmodelled token whose count in the
+  entry's best profile (`Copies_candidate`) differs from its count in
+  `Variants_called` (`Copies_call`). These rows compare with the call's variant
+  list, not with the rank-1 entry.
 
 ### Decision provenance
 
 Provenance is found by replaying `call_reg1_cn`, `process_raw_call_denovo` and
 the homology cap per site. The replay uses the caller's own functions plus
 `cn_posterior`. A replay that disagrees with the value the call used reads
-`unexplained`, and check B4 requires none. Rule-decided values are recorded
-whether or not the plain posterior would have agreed.
+`unexplained`, and check B4 requires none. When a rule is recorded (code
+behaviour, `site_mechanism`):
+- `one_copy_shortcut` and `no_call` are recorded whenever they apply, whether or
+  not the plain posterior would have agreed.
+- `min_read_rule` applies only when the posterior's top value is not 0, so it
+  always changes the value.
+- `min_cn_rule` and `homology_cap` are recorded only when they change the
+  value. `min_cn_rule` takes the smaller of the two options, so it is recorded
+  only when the smaller option is not the top option.
 
 One record per read site whose call came from anything other than the plain
 argmax:
@@ -283,9 +293,11 @@ argmax:
   - `homology_cap` ([call_variants.rs:207](../../../cyrius-rs/src/caller/call_variants.rs#L207));
   - `noisy_var_strand_filter`, `strand_bias_all`;
   - `update_variants` ([match_star_allele.rs:761](../../../cyrius-rs/src/caller/match_star_allele.rs#L761));
-  - `star68_step` ([:314-326](../../../cyrius-rs/src/caller/match_star_allele.rs#L314-L326));
-  - `retry_add_one_copy` ([:901](../../../cyrius-rs/src/caller/match_star_allele.rs#L901)), recorded at the promoted site;
-  - `fuzzy_match`, recorded at each token that differs;
+  - `star68_step` ([:314-326](../../../cyrius-rs/src/caller/match_star_allele.rs#L314-L326)),
+    which cannot appear in a ranked output (below);
+  - `retry_add_one_copy` ([:901](../../../cyrius-rs/src/caller/match_star_allele.rs#L901)),
+    recorded at the promoted site, per genotype option;
+  - `fuzzy_match`, recorded at each token that differs, per genotype option;
   - `no_call`;
   - `unexplained`.
 - `Original_alt`, `Original_ref`
@@ -293,10 +305,13 @@ argmax:
   the site was not called.
 - `Called_copies`: the copy count in the call's final variant list
   (`Variants_called`).
+- `Genotype_option`: the genotype options that a whole-call record holds for
+  (below), or `null`.
 
 For `retry_add_one_copy` and `fuzzy_match` records the two counts change
 meaning. `Per_site_copies` is the count in `Variants_called`, and
-`Called_copies` is the count in the matched raw call.
+`Called_copies` is the count in the genotype option's profile (Whole-call
+records, below).
 
 Details:
 - **Masked target sites** are also replayed. If the replay disagrees with the
@@ -316,6 +331,11 @@ Details:
 Whole-call steps are named in `Matching_path`: `exact`, `masked`,
 `retry_add_one_copy`, `fuzzy_match`, `star68_step` or `unexplained`. The path is
 derived from the call's first raw candidate against `Variants_called`.
+
+**star68.** Tags that contain `star68` are not ranked (`direct_genotype_tag` or
+`hybrid_dosage_undefined`, Output). So `star68_step` cannot appear in a ranked
+output, as a record or as a `Matching_path`, and the B4 clause on `star68_step`
+records cannot fail. The value stays in both lists for completeness.
 
 **Whole-call records, per genotype option (amendment 2026-11-10b).** For
 `retry_add_one_copy` and `fuzzy_match` calls:
@@ -345,6 +365,12 @@ does not change them. Check B3 proves that no call changes.
   on `;`.
 - `Call_rank` is the best rank of any entry whose copy multiset equals the
   multiset of one of the call's genotypes. It is `null` if none does.
+- An entry is scored by its best profile (`Best_profile_key`, Genotype
+  identity). So `Call_rank` ranks the genotype's best entry, which may be
+  another sub-allele version than the called raw candidate. Example (run 2,
+  benchmark HG00421, `*2/*10x2`): the raw call `*10.001_*10.001_*2.002` has
+  `g.42129754G>A` once, as `Variants_called` does, while the entry's best
+  profile has it twice.
 - `Call_delta_composite_log10_likelihood` is that entry's delta. It is `null`
   when `Call_rank` is.
 - `Call_rank` is `null` when no scored entry has the call's copy multiset. One
@@ -424,28 +450,74 @@ does not change them. Check B3 proves that no call changes.
 
 ### Tests (unit, by name)
 
-- `binomial_model_is_symmetric_in_ref_and_alt` (with `β = 1`).
+The tests as built, in `candidate_ranking.rs` unless noted. Where an earlier
+version of this list named a test that was folded into another, the earlier
+name follows in brackets.
+
+Count model (`count_model.rs`):
+- `matches_the_stage_a_python_model`, `is_a_distribution_over_the_alt_count`,
+  `variant_types_map_to_classes`.
+- `binomial_model_is_symmetric_in_ref_and_alt`: with `β = 1`, for ρ = 0 and
+  ρ > 0. The fitted SNP bias breaks the symmetry.
+
+Sites and genotype identity:
+- `there_are_158_scored_sites_19_of_them_homology`.
 - `exon9_converted_copies_do_not_count_in_the_exon9_region`: `*10_*36_*36` at
   `g.42126611C>G` gives `(k, n) = (1, 1)`.
 - `homology_sites_add_two_d7_copies`.
-- `star13_and_star68_tags_are_not_ranked`.
-- `read_evidence_is_kept_where_a_rule_decided`: the 5/95 CN=1 case, with
-  provenance `one_copy_shortcut`.
-- `strand_filtered_site_is_masked_not_scored`: the 20/20 → 0/20 case.
-- `arrangements_are_separate_entries_with_one_rank`: `*36/*36+*10` and
-  `*10/*36x2`.
 - `copy_multiset_matches_across_formats`: `*10/*2` ≡ `*2/*10`;
   `*4.013/*10+*10` ≡ `*10_*10_*4.013`.
-- `unformatted_diplotypes_are_kept_and_flagged`.
-- `each_genotype_appears_once`: `*1/*2` and `*34/*39` are separate entries.
-- `retry_records_the_promoted_site`.
-- `canonical_key_breaks_ties`, `ranking_is_deterministic`.
-- `decomposition_sums_to_delta`.
-- `ties_share_a_rank_and_are_counted_at_the_cutoff`.
-- `resolver_narrowed_call_finds_its_rank`.
-- `mechanism_is_reported_for_each_rule`: one case per mechanism, each with an
-  untouched control site.
-- `not_ranked_reasons`: one case per reason.
+- `arrangements_are_separate_entries_with_one_multiset`
+  [`arrangements_are_separate_entries_with_one_rank`]: `*10_*36_*36` gives two
+  formatted entries with one multiset. They share a rank because they share a
+  profile.
+- `a_cn2_profile_formats_to_its_main_alleles`.
+- `unformatted_profiles_are_kept_and_flagged`
+  [`unformatted_diplotypes_are_kept_and_flagged`].
+
+Decision provenance:
+- `each_rule_is_named_and_an_untouched_site_is_not`
+  [`mechanism_is_reported_for_each_rule`, `read_evidence_is_kept_where_a_rule_decided`]:
+  `one_copy_shortcut` (5/95 at CN 1), `min_read_rule`, `min_cn_rule`,
+  `homology_cap` and `no_call`, with an untouched control site. It tests the
+  mechanism, not that the site keeps its counts.
+- `a_replay_that_disagrees_with_the_call_reads_unexplained`,
+  `masked_site_whose_decision_disagrees_with_the_replay_is_unexplained`,
+  `missing_copy_number_pattern_is_unexplained`.
+- `unmasked_target_site_reaches_site_mechanism`,
+  `homology_cap_through_sites_and_provenance`.
+- `filters_mask_sites_and_token_rules_are_recorded`
+  [`strand_filtered_site_is_masked_not_scored`]: `strand_bias_all`,
+  `noisy_var_strand_filter` and `update_variants`. A masked site keeps its
+  original alternate count and its mask.
+- `star68_token_diff_is_star68_step`.
+- `matching_paths`, `matching_path_without_a_matched_candidate`.
+- `retry_record_names_the_promoted_site_and_its_option`
+  [`retry_records_the_promoted_site`]: a cn3 retry gives exactly one record.
+- `fuzzy_records_are_made_per_genotype_option`: the p25 HG02373 shape, with one
+  record per option, and no record for a raw candidate the call does not name.
+- `fuzzy_raws_with_one_profile_share_records_and_an_unnamed_call_uses_all_raws`.
+
+Ranking:
+- `an_exact_cn2_call_ranks_first_and_its_equivalent_ties_with_it`
+  [`each_genotype_appears_once`]: also checks that the rows sum to the delta.
+- `ranking_is_deterministic`.
+- `canonical_key_breaks_ties`: in an all-tied table, the listed order follows
+  the sorted key names.
+- `ties_share_a_rank_and_are_counted_at_the_cutoff`,
+  `a_call_tied_beyond_the_cutoff_is_listed_not_counted`.
+- `a_call_below_the_list_is_appended` [`decomposition_sums_to_delta`, with the
+  test above]: an appended entry with rows that sum to its delta.
+- `resolver_narrowed_call_finds_its_rank`: `Call_rank` is the best rank over
+  the call's `;` options, in either order.
+- `profiles_with_another_exon9gc_count_are_not_scored`: also gives
+  `no_profile_with_called_exon9gc_count`.
+- `not_ranked_reasons` [`star13_and_star68_tags_are_not_ranked`]: every reason
+  that `ranking_scope` gives, and `no_call`. `no_table` and
+  `no_scorable_profile` have no test.
+
+Integration (`tests/output_provenance.rs`):
+- `candidate_ranking_is_present_on_an_early_no_call_only_with_the_flag`.
 
 ### Implementation checks (locked before the Stage B run)
 
@@ -500,7 +572,81 @@ flag stays opt-in.
 
 ## Known limits (Stage B measurements)
 
-These were measured on the Stage B build. No model change followed any of them.
+Source: the outputs of run 2 of the locked checks, with the binary built at
+`7d68260`. That is 160 files: 53 benchmark, 53 at 25% depth, 53 at 10% depth,
+and the damaged NA19920. Run 2 predates the per-option records (`63ee1ab`),
+which change only `Decision_provenance`. Re-run at `63ee1ab`, p25 HG02373
+differs from run 2 only in `Decision_provenance` and `Tool_commit`. No model
+change followed any of these measurements.
+
+### Calls below rank 1
+
+54 of the 160 outputs are ranked. The call ranks 1 in 42 of them and below 1 in
+12. No ranked output has `Call_rank: null`. In 11 of the 12, the call names the
+truth among its options. The exception is p25 NA18973.
+
+For each of the 12, the table gives the site that carries most of the gap, read
+from the call entry's `Discriminating_sites` against the rank-1 entry. Gap and
+site ratio are in log10. Where the entry has a second row, that row is given
+after a semicolon.
+
+| Group | Set | Sample | Truth | Call | Rank | Gap | Site | Alt/ref | (k, n) rank 1 / call | Site ratio |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | benchmark | HG00463 | `*36+*10/*36+*10` | `*36+*10/*36+*10` | 4 | 1.68 | `g.42127634C>A` | 8/90 | (1, 4) / (0, 4) | 1.68 |
+| 1 | benchmark | NA18545 | `*5/*36x2+*10x2` | `*5/*36x2+*10x2` | 4 | 1.86 | `g.42127634C>A` | 9/95 | (1, 4) / (0, 4) | 1.86 |
+| 1 | benchmark | NA18563 | `*1/*36+*10` | `*1/*36+*10` | 14 | 1.87 | `g.42127634C>A` | 9/70 | (1, 3) / (0, 3) | 1.87 |
+| 1 | benchmark | NA18572 | `*36+*10/*41` | `*36+*10/*41` | 3 | 0.31 | `g.42127634C>A` | 9/102 | (1, 3) / (0, 3) | 0.31 |
+| 1 | benchmark | NA18617 | `*36+*10/*36+*10` | `*36+*10/*36+*10` | 4 | 0.78 | `g.42127634C>A` | 5/79 | (1, 4) / (0, 4) | 0.78 |
+| 1 | benchmark | NA18632 | `*36+*36+*10/*52` | `*36+*36+*10/*52` | 2 | 1.19 | `g.42127634C>A` | 7/93 | (1, 4) / (0, 4) | 1.19 |
+| 1 | 25% | HG02373 | `*14/*36+*10` | `*14/*36+*10;*36+*10/*65;*36+*10/*114` | 2 | 1.11 | `g.42127634C>A` | 2/23 | (1, 3) / (0, 3) | 1.11 |
+| 1 | 25% | NA18565 | `*10/*36x2` | `*10/*36x2;*36/*36+*10` | 2 | 1.11 | `g.42127634C>A` | 2/23 | (1, 3) / (0, 3) | 1.11 |
+| 2 | 25% | NA18959 | `*2/*36+*10` | `*2/*36+*10` | 13 | 2.72 | `g.42126634A>C` | 2/29 | (1, 5) / (0, 5) | 1.48; `g.42127634C>A` 3/31: 1.24 |
+| 2 | 25% | NA18973 | `*1/*21` | `*2/*21` | 2 | 1.58 | `g.42126634A>C` | 2/23 | (1, 4) / (0, 4) | 1.58 |
+| 3 | benchmark | HG01094 | `*1/*31` | `*1/*31` | 2 | 1.10 | `g.42128218-42128219insG` | 1/41 | (1, 2) / (0, 2) | 1.10 |
+| 4 | benchmark | NA18959 | `*2/*36+*10` | `*2/*36+*10` | 2 | 0.13 | `g.42130692G>A` | 39/43 | (1, 3) / (2, 3) | 0.13 |
+
+Groups by mechanism:
+
+1. **Alternate-read background at g.42127634C>A (8 calls).** The site is the only
+   row, so it carries the whole gap. Each rank-1 entry carries `*177`, the only
+   allele in `star_table.txt` with this variant. Across run 2's 53 benchmark
+   outputs (`Variant_raw_count`), no truth carries `*177`. Even so, all 13
+   samples whose truth has `*36` show alt reads at this site, at 3.4-12.6%. Of
+   the other 39 with reads, 13 show alt reads, up to 26.3% (HG01190,
+   `*68+*4/*5`). The M4 SNP error rate (ε ≈ 0.0004) does not model this
+   background. It is left to Stage C.
+2. **Alternate-read background at the homology site g.42126634A>C, at 25% depth
+   (2 calls).** The rank-1 entries carry `*85`, the only allele with this
+   variant: `*21/*85` for NA18973, and `*177_*36_*85` for NA18959, which also
+   carries `*177` (the second row).
+   - At full depth the same samples have 3 alt reads of 98 and 3 of 124 there.
+     Across the 53 benchmark outputs the alt fraction at this site is at most
+     3.2%, and no truth carries `*85`.
+   - At 25% depth, 2 alt reads remain of 25 and of 31. With the two D7 copies
+     (n = 4 and 5) and the homology class (ε ≈ 0.0007), this favours one
+     carrier copy over none by 1.58 and 1.48.
+   - Here the ranking does not support the truth. The call `*2/*21` is wrong,
+     and the truth `*1/*21` is not among the listed entries.
+3. **One stray read at an indel site (1 call).** HG01094 is the only benchmark
+   sample without `*21` that has an alt read at g.42128218-42128219insG.
+   - Under M4's indel class (ρ = 0.316), its 1 read in 42 favours one copy over
+     none by 1.10. 0 alt reads in 42 would favour none by only 1.44.
+   - With the same ε and β but ρ = 0, the same 1 of 42 favours none by 7.44.
+     The overdispersion is what lets one read reverse the order.
+4. **A rule decides against the reads (1 call).** For benchmark NA18959, the
+   per-site call at g.42130692G>A was 1 copy, and `update_variants` set it to
+   2. The provenance record shows both counts (`Per_site_copies` 1,
+   `Called_copies` 2).
+   - The reads, 39 alt and 43 ref at n = 3, favour 1 copy by 0.13.
+   - The rank-1 entry `*2_*36_*39` keeps the per-site count. The call agrees
+     with the truth. This works as designed.
+
+The site ratios of groups 2-4, and NA18563's, are reproduced by a Python
+transcription of `site_ln_likelihood` that matches the reference values in
+`matches_the_stage_a_python_model`. The values for 0 of 42, and for ρ = 0, come
+from the same transcription.
+
+### Other limits
 
 - **Lookalike ties.** Entries that differ from the call only at unmodelled
   tokens, or only by phase, tie with it at delta 0. On the Dhap2 table, `*1/*2`
@@ -508,26 +654,25 @@ These were measured on the Stage B build. No model change followed any of them.
   - Basis: `*27` = g.42126938C>T, `*139` = g.42127526C>T, and `*127` =
     g.42127556T>C + g.42127526C>T. All of these tokens are unmodelled. `*34/*39`
     carries the same variants as `*1/*2`, in a different phase.
-  - In the smoke runs, NA19920 (`*1/*4x2`) and HG00337 (`*2x2/*22`) both had the
-    call at rank 1, tied with lookalikes.
-- **Site g.42127634C>A background.** After the hybrid-count rule, four of nine
-  hybrid-family or exon-9 benchmark samples still rank the call below 1:
-  HG00463 rank 4, NA18545 rank 4, NA18563 rank 14, NA18572 rank 3.
-  - In each, the entries above the call carry `*177`, whose definition includes
-    g.42127634C>A. The whole gap comes from that site: 8-9 alt reads out of
-    79-111.
-  - Across the GeT-RM benchmark runs (exp-H20), that site's alt fraction is
-    3-13% in all 13 `*36`-family samples, and up to 26% in others (`*68`
-    hybrids, `*99`). No truth genotype among them carries the variant.
-  - The M4 SNP error rate (eps about 0.0004) does not model this background.
-    It is left to Stage C.
-- **Hybrid count, before and after the amendment.** Same nine samples, in the
-  order NA18526, HG00463, NA18563, NA18564, NA18565, NA18572, HG02373, NA18545,
-  HG00421. Call ranks before (commit `15c57b4`): 2, 6, 38, 1, 2, 5, 1, 6, 1.
-  After (`98cb61d`): 1, 4, 14, 1, 1, 3, 1, 4, 1.
-- **Runtime.** Measured before the hybrid-count rule (`15c57b4`). Wall seconds,
-  flag off to on: NA19920 1.34 to 1.45, HG00337 1.39 to 1.50, NA18526 2.25 to
-  2.72.
+  - In run 2, 29 of the 42 calls at rank 1 share that rank with at least one
+    other listed entry, and none of those entries has a discriminating row.
+    Examples: benchmark NA19920 (`*1/*4x2`, 5 entries at rank 1) and HG00337
+    (`*2x2/*22`, 3).
+- **Hybrid count, before and after the amendment.** Nine samples, in the order
+  NA18526, HG00463, NA18563, NA18564, NA18565, NA18572, HG02373, NA18545,
+  HG00421.
+  - Call ranks before (commit `15c57b4`): 2, 6, 38, 1, 2, 5, 1, 6, 1.
+  - After (`98cb61d`): 1, 4, 14, 1, 1, 3, 1, 4, 1.
+  - Run 2 gives the same ranks as after.
+- **Runtime.** Measured on the release build of the code committed as
+  `63ee1ab`, built from the working tree just before that commit.
+  - Flags: `--strand-bias-all --fuzzy-match --changepoint-hybrid --het-check`.
+  - Two runs each, on a shared 72-core machine at a load average of about 5.
+  - Wall time and maximum resident memory, flag off to on:
+    - NA18563 (exon9hyb): 4.27-4.69 s to 7.16-7.19 s (+2.5 to 2.9 s), and
+      558 MiB to 644-646 MiB.
+    - HG01094 (cn2): 1.15-1.16 s to 1.22 s (+0.06 to 0.07 s), and 18-20 MiB
+      in both.
 - **Scores are not probabilities.** They are an uncalibrated composite (fragment
   reuse median 96.1%, exp-H20). Candidate ranks are descriptive and do not
   change the call.
