@@ -417,11 +417,18 @@ fn collect_reads_dual_region(
         }
     }
 
-    profiles
+    // Fixed order: callers sum per-read scores, and float sums depend on the order (see
+    // collect_reads_dual_region_returns_reads_in_a_fixed_order).
+    let mut reads: Vec<ReadObs> = profiles
         .into_iter()
-        .map(|(name, observations)| ReadObs { name, observations })
+        .map(|(name, mut observations)| {
+            observations.sort_unstable();
+            ReadObs { name, observations }
+        })
         .filter(|p| !p.observations.is_empty())
-        .collect()
+        .collect();
+    reads.sort_unstable_by(|a, b| a.name.cmp(&b.name));
+    reads
 }
 
 // ---------------------------------------------------------------------------
@@ -1090,5 +1097,35 @@ mod tests {
             "a failed D7 fetch must yield no reads, not the D6 half: got {}",
             d7_failed.len()
         );
+    }
+
+    // `score_candidates` sums per-read scores in read order, and `resolve` orders tied options
+    // by those sums to the last bit. If reads or their observations come out in hash order,
+    // a tied call's `;` options change order between runs (damaged NA19920, 2026-11-10).
+    #[test]
+    fn collect_reads_dual_region_returns_reads_in_a_fixed_order() {
+        use crate::depth_calling::utilities::get_var_names;
+        let bam = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../benchmark/HG00096_pgx_regions.bam");
+        if !bam.exists() {
+            eprintln!("skipping: benchmark BAM not present");
+            return;
+        }
+        let mut var_list = get_var_names(crate::data::TARGET_VARIANT);
+        var_list.extend(get_var_names(crate::data::TARGET_VARIANT_HOMO));
+        let sites = build_unified_sites(&var_list, crate::data::SNP_FILE);
+        let ((d6s, d6e), (d7s, d7e)) = fetch_windows(&sites);
+        let mut reader = bam::IndexedReader::from_path(&bam).unwrap();
+
+        let reads = collect_reads_dual_region(&mut reader, "chr22", &sites, d6s, d6e, d7s, d7e);
+        assert!(reads.len() > 10, "control: enough reads to show an order, got {}", reads.len());
+        assert!(reads.windows(2).all(|w| w[0].name < w[1].name), "reads must be sorted by name");
+        assert!(
+            reads.iter().all(|r| r.observations.windows(2).all(|w| w[0] <= w[1])),
+            "each read's observations must be sorted"
+        );
+        let again = collect_reads_dual_region(&mut reader, "chr22", &sites, d6s, d6e, d7s, d7e);
+        let key = |rs: &[ReadObs]| rs.iter().map(|r| (r.name.clone(), r.observations.clone())).collect::<Vec<_>>();
+        assert_eq!(key(&reads), key(&again), "two calls must return the same reads in the same order");
     }
 }
