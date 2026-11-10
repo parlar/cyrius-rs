@@ -1915,6 +1915,7 @@ for cfg in base noflag flag1 flag2; do
     done
     echo "$B $C/$cfg/dmg dmg /home/parlar_ai/cyrius-research/review-fixes/na19920_missing_splice/NA19920_missing_splice.bam $X"
   } > $C/$cfg/list.txt
+  sed -i 's/[[:space:]]*$//' $C/$cfg/list.txt  # xargs -L 1 joins a line that ends in a blank (run 1)
   start=$(date +%s)
   xargs -P 8 -L 1 bash $C/run_one_b.sh < $C/$cfg/list.txt
   echo "$cfg $(( $(date +%s) - start ))s $(cat $C/$cfg/*/exit.txt | awk '$2!=0' | wc -l) nonzero-exit" | tee -a $C/runtime.txt
