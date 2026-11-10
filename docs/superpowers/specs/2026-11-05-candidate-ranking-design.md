@@ -316,8 +316,25 @@ Details:
 Whole-call steps are named in `Matching_path`: `exact`, `masked`,
 `retry_add_one_copy`, `fuzzy_match`, `star68_step` or `unexplained`. The path is
 derived from the call's first raw candidate against `Variants_called`.
-`retry_add_one_copy` and `fuzzy_match` also add one provenance record per
-differing token.
+
+**Whole-call records, per genotype option (amendment 2026-11-10b).** For
+`retry_add_one_copy` and `fuzzy_match` calls:
+- The options are the raw candidates in `Raw_star_allele` whose copy multiset
+  is one of the final `Genotype`'s options. If none is, all raw candidates are
+  used.
+- Raw candidates with the same token profile share one set of records.
+- For each distinct profile, there is one record per token whose count differs
+  from `Variants_called`:
+  - `Per_site_copies` is the count in `Variants_called`;
+  - `Called_copies` is the count in that profile;
+  - `Genotype_option` is the sorted list of the option labels with that profile.
+- Every other record has `Genotype_option: null`.
+- Basis: the final review found p25 HG02373 (fuzzy; options `*14/*36+*10`,
+  `*36+*10/*65` and `*36+*10/*114`) with a single record, built from the first
+  raw candidate, that holds for `*14` only. This replaces "one record per
+  differing token of the first raw candidate". It was the third patch on that
+  design choice, which was reopened with the user; the user chose per-option
+  records.
 
 The replay runs in `candidate_ranking.rs` and calls the caller's functions. It
 does not change them. Check B3 proves that no call changes.
@@ -364,7 +381,7 @@ does not change them. Check B3 proves that no call changes.
   "Decision_provenance": [
     {"Site": "g.…", "Mechanism": "…", "Original_alt": <int or null>,
      "Original_ref": <int or null>, "Per_site_copies": <int or null>,
-     "Called_copies": <int>}]
+     "Called_copies": <int>, "Genotype_option": [<label>, …] or null}]
 }
 ```
 

@@ -1836,6 +1836,53 @@ Patches design choice: rank only at the final D6Call literal (patch 1).
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
+### Task 9: Final-review fixes (amendment 2026-11-10b)
+
+Source: final whole-branch review of baf3459..409444e (verdict "with fixes"). One fix wave.
+
+**Design change (user decision: per-option records).** Spec "Decision provenance", the
+amendment 2026-11-10b paragraph. In `rank_with_table`, the retry/fuzzy record block now
+works per genotype option:
+- select the raws in `raw_call` whose copy multiset (of any of their `entry_labels`) is in
+  the call's `;` options (`call_sets`); if none, use all raws;
+- group them by `profile_token_counts`;
+- for each group, emit one record per token that differs from `Variants_called`, with
+  `Per_site_copies` = observed, `Called_copies` = that profile's count, and
+  `Genotype_option` = the sorted labels of the group's options.
+
+`ProvenanceRecord` gains `genotype_option: Option<Vec<String>>`. JSON emits
+`"Genotype_option"` on every record (null except on these records). `Matching_path` is
+unchanged.
+
+**Tests (all in `candidate_ranking.rs`, red first where they test new behaviour):**
+- `fuzzy_records_are_made_per_genotype_option`: two or more raws with different token
+  profiles, `call_info` `"fuzzy_match(score=1.0)"`, a `;` call naming both options. Each
+  differing token appears once per profile with the right counts and labels.
+- `retry_record_names_the_promoted_site_and_its_option`: a cn3 retry (one token +1, observed
+  N-2), exactly one record.
+- `resolver_narrowed_call_finds_its_rank` (spec-named): a `;` call whose second option ranks
+  higher. `Call_rank` is the best rank over its options.
+- `binomial_model_is_symmetric_in_ref_and_alt` (spec-named; in `count_model.rs`, beta = 1).
+- `canonical_key_breaks_ties` (spec-named): in the all-tied table, the listed order follows
+  the sorted key names.
+
+**Docs:**
+- Spec "Known limits": rewrite from run 2 (`~/cyrius-research/candidate-ranking/flag1/`).
+  List every call below rank 1, grouped by mechanism, and measure each from its
+  `Discriminating_sites`. The final review names three mechanisms: the g.42127634C>A
+  background; one stray read at an indel or homology site under M4's indel overdispersion
+  (HG01094: 1 alt in 42 at g.42128218-42128219insG); and a rule deciding against the reads
+  (NA18959: `update_variants` at g.42130692G>A). Re-measure the runtime on NA18563
+  (exon9hyb) and one cn2 sample, flag off and on, two runs each.
+- Spec: state that `Call_rank` ranks the genotype's best entry, which may be a sub-allele
+  version other than the called raw. State that `Copies_call` is the count in
+  `Variants_called`. State that `min_cn_rule` is recorded only when it changes the value
+  (code behaviour). State that star68 tags are not ranked, so `star68_step` cannot appear.
+  Reconcile "Tests (unit, by name)" with the tests that exist.
+
+**Checks:** candidate_ranking tests and the full suite pass; clippy at most 22. Then re-run
+the locked checks unchanged as run 3 and record it under "Result".
+
 ### Task 7: Spec and README
 
 **Files:**
