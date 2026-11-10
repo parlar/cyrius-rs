@@ -2009,3 +2009,77 @@ Expected: `check exit=0`, with `fails` empty.
   measured, `runtime.txt`, and `check_b.json` verbatim. Commit it as:
   `result: candidate ranking Stage B checks — B1-B4 <pass|fail>`.
   On any failure, record it, stop and report. No threshold is changed.
+
+## Result
+
+### Run 1 (2026-11-10): FAIL, harness. B3 not evaluated.
+
+Commit and binary measured:
+
+```
+a8841b2
+6695b2224bbc6acccec7e6a52dbaa32857bf1b509d85dbf06c51579f068b8e61  /home/parlar_ai/dev/cyrius-rs/cyrius-rs/target/release/cyrius-rs
+```
+
+`runtime.txt`:
+
+```
+base 0s 1 nonzero-exit
+noflag 0s 1 nonzero-exit
+flag1 88s 0 nonzero-exit
+flag2 28s 0 nonzero-exit
+```
+
+`check_b.json`:
+
+```json
+{
+ "fails": [
+  "file counts [0, 0, 160, 160], want 160 each",
+  "Genotype missing in base: refusing a vacuous B3"
+ ],
+ "status": {
+  "ranked": 54,
+  "not_ranked": 106
+ },
+ "not_ranked_reasons": {
+  "hybrid_dosage_undefined": 5,
+  "group_failed_transfer_test": 6,
+  "direct_genotype_tag": 3,
+  "no_call": 92
+ },
+ "matching_paths": {
+  "exact": 46,
+  "masked": 6,
+  "fuzzy_match": 2
+ },
+ "call_ranks": {
+  "1": 42,
+  "4": 3,
+  "2": 6,
+  "14": 1,
+  "3": 1,
+  "13": 1
+ },
+ "b1_worst": 3.552713678800501e-15,
+ "candidates_with_rows": 141,
+ "provenance_records": 66,
+ "files": [
+  0,
+  0,
+  160,
+  160
+ ]
+}
+```
+
+Cause (diagnosed after the run, from `base/list.txt` and `base/bench/HG00111.log`):
+`run_b.sh` writes each list line as `"... BAM $X"`. With `X=""` (base, noflag) every
+line ends in a blank. `xargs -L 1` treats a trailing blank as a continuation, so the 160
+lines became one command. `cyrius-rs` printed its usage error and exited 2 (`HG00111 2`
+in `base/bench/exit.txt`). Zero base and zero noflag files were written. The flagged lists
+end in `--candidate-ranking` and ran normally.
+
+The vacuity guards caught it: "file counts [0, 0, 160, 160]" and "Genotype missing in
+base". B1, B2 and B4 were evaluated on the flagged runs and raised no failure. B3a and B3b
+had nothing to compare, so they are not evaluated. No threshold or check was changed.
