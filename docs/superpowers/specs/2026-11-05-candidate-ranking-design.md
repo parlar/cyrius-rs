@@ -1,7 +1,7 @@
 # Design: Ranked candidate genotypes — read evidence and decision provenance
 
 **Date:** 2026-11-05 (revised twice the same day after review)
-**Status:** Design revised; not implemented
+**Status:** Stage A done (M4). Stage B implemented as described below, with the hybrid-count amendment of 2026-11-10. Stage C open.
 **Scope:** short-read only; output only (no call, filter, confidence, or TSV changes)
 
 ## Problem
@@ -105,7 +105,16 @@ variant, `k_s(K)`. Both come from the **profile**, not from the caller's
   `hybrid_dosage_undefined`.
 
 Stage A tests whether this translation fits real counts in each tag group.
-Groups where it does not fit are also `not_ranked`.
+Only the CNV groups that passed are ranked: `cn2`, `cn3`, `exon9hyb`,
+`exon9hyb_exon9hyb` and `dup_exon9hyb` (`ranking_scope` in
+`candidate_ranking.rs`; exp-H20 `0a4b020`). Every other group is `not_ranked`:
+- the direct-genotype tags `star5_star5`, `star13_star13`,
+  `star13intron1_star13intron1` and `star5_star5_star68`: reason
+  `direct_genotype_tag`;
+- other tags with `star13` or `star68`: `hybrid_dosage_undefined`;
+- `star5`: `group_failed_transfer_test`. Its read counts were a depth
+  artefact in Stage A, so the dosage translation does not fit;
+- any other tag: `group_untested_in_stage_a`.
 
 ## Stage A — choose the count model by measurement
 
@@ -167,7 +176,8 @@ absent, and everything except build provenance is identical to today.
 ### Read sites and counts
 
 - The 159 target sites: 140 in `data/CYP2D6_target_variant_38.txt` and 19 in
-  `data/CYP2D6_target_variant_homology_region_38.txt`.
+  `data/CYP2D6_target_variant_homology_region_38.txt`. One of them,
+  `g.42130655-42130656insA`, is an unmodelled token (below), so 158 are scored.
 - Counts are the **original** counts, before the NOISY_VAR strand filter
   ([call_variants.rs:229-236](../../../cyrius-rs/src/caller/call_variants.rs#L229-L236))
   and before `--strand-bias-all`.
@@ -202,8 +212,13 @@ contribute 0. Each candidate lists where it differs from the call at them
     2, cn3 3, exon9hyb 3, exon9hyb_exon9hyb 4, dup_exon9hyb 4). So with the
     hybrid count fixed, `n_s` is the same for every profile at every site.
 - **Profile score** `S(K)`: the sum over unmasked read sites, in `var_list`
-  order, of `log10 P(a_s | n_s, k_s(K), n_s(K))` under the Stage A model, after
-  dosage translation. This is a composite log-likelihood.
+  order, of `ln P(a_s | n_s, k_s(K), n_s(K))` under the Stage A model (M4,
+  constants in `count_model.rs`), after dosage translation. This is a composite
+  log-likelihood. A site with no reads adds 0. The output reports differences
+  in log10.
+- **Unscorable profiles.** A profile with an allele that has no definition, or
+  with too many copies for the likelihood table, is not scored. It is counted in
+  `Profiles_unscorable`.
 
 ### Genotype identity
 
@@ -248,6 +263,12 @@ For each listed entry, against the rank-1 entry's best key:
 
 ### Decision provenance
 
+Provenance is found by replaying `call_reg1_cn`, `process_raw_call_denovo` and
+the homology cap per site. The replay uses the caller's own functions plus
+`cn_posterior`. A replay that disagrees with the value the call used reads
+`unexplained`, and check B4 requires none. Rule-decided values are recorded
+whether or not the plain posterior would have agreed.
+
 One record per read site whose call came from anything other than the plain
 argmax:
 
@@ -261,16 +282,41 @@ argmax:
   - `update_variants` ([match_star_allele.rs:761](../../../cyrius-rs/src/caller/match_star_allele.rs#L761));
   - `star68_step` ([:314-326](../../../cyrius-rs/src/caller/match_star_allele.rs#L314-L326));
   - `retry_add_one_copy` ([:901](../../../cyrius-rs/src/caller/match_star_allele.rs#L901)), recorded at the promoted site;
-  - `no_call`.
+  - `fuzzy_match`, recorded at each token that differs;
+  - `no_call`;
+  - `unexplained`.
 - `Original_alt`, `Original_ref`
-- `Called_copies`
+- `Per_site_copies`: the per-site copy count before token rules, or `null` when
+  the site was not called.
+- `Called_copies`: the copy count in the call's final variant list
+  (`Variants_called`).
 
-Whole-call steps are recorded once, in `Matching_path`: `exact`, `masked`,
-`retry_add_one_copy`, `fuzzy_match` or `star68_step`.
+For `retry_add_one_copy` and `fuzzy_match` records the two counts change
+meaning. `Per_site_copies` is the count in `Variants_called`, and
+`Called_copies` is the count in the matched raw call.
 
-The functions involved report the mechanism alongside each value (for
-`retry_add_one_copy`, the promoted site). The caller keeps using only the value,
-and check B3 proves that no call changes.
+Details:
+- **Masked target sites** are also replayed. If the replay disagrees with the
+  value the call used, the site reads `unexplained`. Otherwise it carries the
+  filter mechanism (`strand_bias_all` or `noisy_var_strand_filter`).
+- A target site with no copy-number pattern entry reads `unexplained`.
+- **`retry_add_one_copy`** is labelled only when all of these hold:
+  - the tag is `cnN` with N >= 3;
+  - exactly one token differs between `Variants_called` and the call's first
+    raw candidate;
+  - that token's count in the raw candidate is its observed count + 1;
+  - its observed count is N - 2.
+
+  Any other difference gives `unexplained`.
+
+Whole-call steps are named in `Matching_path`: `exact`, `masked`,
+`retry_add_one_copy`, `fuzzy_match`, `star68_step` or `unexplained`. The path is
+derived from the call's first raw candidate against `Variants_called`.
+`retry_add_one_copy` and `fuzzy_match` also add one provenance record per
+differing token.
+
+The replay runs in `candidate_ranking.rs` and calls the caller's functions. It
+does not change them. Check B3 proves that no call changes.
 
 ### Call rank
 
@@ -278,18 +324,23 @@ and check B3 proves that no call changes.
   on `;`.
 - `Call_rank` is the best rank of any entry whose copy multiset equals the
   multiset of one of the call's genotypes. It is `null` if none does.
-- `Call_delta_composite_log10_likelihood` is that entry's delta.
+- `Call_delta_composite_log10_likelihood` is that entry's delta. It is `null`
+  when `Call_rank` is.
+- `Call_rank` is `null` when no scored entry has the call's copy multiset. One
+  case: the call's own profile has another `exon9gc` count than
+  `Variants_called`, so it was not scored (Hybrid count).
 
 ### Output
 
 ```
 "Candidate_ranking": {
   "Status": "ranked",
-  "Model": "<Stage A model id>",
+  "Model": "M4 (exp-H20 0a4b020)",
   "Evidence_scale": "uncalibrated_composite",
   "Hypothesis_space": "<cnv group>",
-  "Profiles_evaluated": <int>, "Profiles_other_exon9gc_count": <int>,
-  "Matching_path": "<exact | masked | …>",
+  "Profiles_evaluated": <int>, "Profiles_unscorable": <int>,
+  "Profiles_other_exon9gc_count": <int>,
+  "Matching_path": "<exact | masked | retry_add_one_copy | fuzzy_match | star68_step | unexplained>",
   "Masked_sites": [...], "Unmodelled_tokens": [...],
   "Call_rank": <int or null>, "Call_delta_composite_log10_likelihood": <float or null>,
   "Entries_tied_at_cutoff": <int>,
@@ -307,22 +358,32 @@ and check B3 proves that no call changes.
        {"Token": "…", "Copies_call": <int>, "Copies_candidate": <int>}]}
   ],
   "Decision_provenance": [
-    {"Site": "g.…", "Mechanism": "…", "Original_alt": <int>,
-     "Original_ref": <int>, "Called_copies": <int or null>}]
+    {"Site": "g.…", "Mechanism": "…", "Original_alt": <int or null>,
+     "Original_ref": <int or null>, "Per_site_copies": <int or null>,
+     "Called_copies": <int>}]
 }
 ```
 
+- `Profiles_evaluated` counts scored profiles. `Profiles_unscorable` counts
+  profiles that could not be scored. `Profiles_other_exon9gc_count` counts
+  profiles left out by the hybrid-count rule.
+- `Unmodelled_tokens` lists `exon9gc`, `g.42126938C>T`, `g.42127526C>T`,
+  `g.42127556T>C` and `g.42130655-42130656insA`.
+- `Original_alt` and `Original_ref` are `null` for a token-level record whose
+  token is not a read site.
 - `Candidates` holds the first `RANKING_LIST_SIZE = 5` entries, plus the call's
   best entry if it ranks lower.
 - `Entries_tied_at_cutoff` counts unlisted entries that share the fifth entry's
-  rank.
+  rank. An unlisted call entry tied at the cutoff is listed and not counted.
 - If no ranking is possible, the field is `{"Status": "not_ranked", "Reason": …}`,
   where the reason is one of:
   - `direct_genotype_tag`;
-  - `no_table`;
-  - `no_call`;
   - `hybrid_dosage_undefined`;
   - `group_failed_transfer_test`;
+  - `group_untested_in_stage_a`;
+  - `no_table`;
+  - `no_call`;
+  - `no_scorable_profile` (no profile could be scored);
   - `no_profile_with_called_exon9gc_count` (amendment 2026-11-10: every
     scorable profile has another `exon9gc` count).
 
@@ -332,8 +393,8 @@ and check B3 proves that no call changes.
   with no BAM I/O.
 - The count model and the dosage translation each get their own small module.
   The Stage A parameters are constants, with the measurement that set them cited.
-- The decision functions gain a mechanism alongside each value. The values are
-  unchanged.
+- The decision functions are unchanged. The module replays them per site to
+  find the mechanism (Decision provenance).
 - `main.rs` keeps the original counts, calls the module once after the final
   call is set (only with the flag), and writes the field.
 
@@ -374,7 +435,8 @@ These establish consistency, arithmetic and backward compatibility only.
   `Flags`) is identical to master `baf3459`. With the flag, every existing field
   is identical as well.
 - **B4.** For every read site, provenance `Called_copies` equals the count the
-  call used.
+  call used, and no record reads `unexplained`. Records for `retry_add_one_copy`
+  and `fuzzy_match` are excluded: their counts have the second meaning.
 
 ## Stage C — validation before any evidential reading
 
@@ -408,6 +470,40 @@ samples. Until such a set exists, Stage C cannot pass.
 
 Until all four pass, `Evidence_scale` stays `uncalibrated_composite` and the
 flag stays opt-in.
+
+## Known limits (Stage B measurements)
+
+These were measured on the Stage B build. No model change followed any of them.
+
+- **Lookalike ties.** Entries that differ from the call only at unmodelled
+  tokens, or only by phase, tie with it at delta 0. On the Dhap2 table, `*1/*2`
+  ties with `*2/*27`, `*2/*127`, `*2/*139` and `*34/*39`.
+  - Basis: `*27` = g.42126938C>T, `*139` = g.42127526C>T, and `*127` =
+    g.42127556T>C + g.42127526C>T. All of these tokens are unmodelled. `*34/*39`
+    carries the same variants as `*1/*2`, in a different phase.
+  - In the smoke runs, NA19920 (`*1/*4x2`) and HG00337 (`*2x2/*22`) both had the
+    call at rank 1, tied with lookalikes.
+- **Site g.42127634C>A background.** After the hybrid-count rule, four of nine
+  hybrid-family or exon-9 benchmark samples still rank the call below 1:
+  HG00463 rank 4, NA18545 rank 4, NA18563 rank 14, NA18572 rank 3.
+  - In each, the entries above the call carry `*177`, whose definition includes
+    g.42127634C>A. The whole gap comes from that site: 8-9 alt reads out of
+    79-111.
+  - Across the GeT-RM benchmark runs (exp-H20), that site's alt fraction is
+    3-13% in all 13 `*36`-family samples, and up to 26% in others (`*68`
+    hybrids, `*99`). No truth genotype among them carries the variant.
+  - The M4 SNP error rate (eps about 0.0004) does not model this background.
+    It is left to Stage C.
+- **Hybrid count, before and after the amendment.** Same nine samples, in the
+  order NA18526, HG00463, NA18563, NA18564, NA18565, NA18572, HG02373, NA18545,
+  HG00421. Call ranks before (commit `15c57b4`): 2, 6, 38, 1, 2, 5, 1, 6, 1.
+  After (`98cb61d`): 1, 4, 14, 1, 1, 3, 1, 4, 1.
+- **Runtime.** Measured before the hybrid-count rule (`15c57b4`). Wall seconds,
+  flag off to on: NA19920 1.34 to 1.45, HG00337 1.39 to 1.50, NA18526 2.25 to
+  2.72.
+- **Scores are not probabilities.** They are an uncalibrated composite (fragment
+  reuse median 96.1%, exp-H20). Candidate ranks are descriptive and do not
+  change the call.
 
 ## Limits
 
