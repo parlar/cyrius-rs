@@ -751,6 +751,13 @@ pub fn rank(input: RankingInput) -> serde_json::Value {
     }
 }
 
+/// One table key's scored profiles, and how many of its raws were left out.
+struct KeyScores {
+    profiles: Vec<ScoredProfile>,
+    unscorable: usize,
+    other_exon9gc: usize,
+}
+
 fn rank_with_table(input: RankingInput, table: &HashMap<String, Vec<String>>) -> serde_json::Value {
     let Some(call) = input.call.filter(|c| !c.is_empty()) else {
         return not_ranked("no_call");
@@ -761,30 +768,36 @@ fn rank_with_table(input: RankingInput, table: &HashMap<String, Vec<String>>) ->
     let mut keys: Vec<&String> = table.keys().collect();
     keys.sort();
 
-    // Score every profile (each raw diplotype of each key).
-    let scored: Vec<(Vec<ScoredProfile>, usize)> = keys
+    // Score every profile (each raw diplotype of each key) that has the called number of
+    // exon9gc copies (spec "Profiles and scores", Hybrid count).
+    let called_gc = count_of(input.variants_called, "exon9gc") as usize;
+    let scored: Vec<KeyScores> = keys
         .par_iter()
         .enumerate()
         .map(|(ki, key)| {
             let mut buf = vec![(0u8, 0u8); sites.len()];
-            let mut out = Vec::new();
-            let mut bad = 0usize;
+            let mut ks = KeyScores { profiles: Vec::new(), unscorable: 0, other_exon9gc: 0 };
             for (ri, raw) in table[*key].iter().enumerate() {
                 match copies_of(raw, &defs) {
                     Some(c) if c.len() + 2 < MAX_N => {
-                        dosage_into(&c, sites, &mut buf);
-                        out.push((profile_score(&buf, &ll), ki as u32, ri as u32));
+                        if c.iter().filter(|d| d.gc).count() != called_gc {
+                            ks.other_exon9gc += 1;
+                        } else {
+                            dosage_into(&c, sites, &mut buf);
+                            ks.profiles.push((profile_score(&buf, &ll), ki as u32, ri as u32));
+                        }
                     }
-                    _ => bad += 1,
+                    _ => ks.unscorable += 1,
                 }
             }
-            (out, bad)
+            ks
         })
         .collect();
-    let unscorable: usize = scored.iter().map(|x| x.1).sum();
-    let mut profs: Vec<ScoredProfile> = scored.into_iter().flat_map(|x| x.0).collect();
+    let unscorable: usize = scored.iter().map(|x| x.unscorable).sum();
+    let other_exon9gc: usize = scored.iter().map(|x| x.other_exon9gc).sum();
+    let mut profs: Vec<ScoredProfile> = scored.into_iter().flat_map(|x| x.profiles).collect();
     if profs.is_empty() {
-        return not_ranked("no_scorable_profile");
+        return not_ranked(if other_exon9gc > 0 { "no_profile_with_called_exon9gc_count" } else { "no_scorable_profile" });
     }
     profs.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
     let raw_of = |key: u32, raw: u32| -> &String { &table[keys[key as usize]][raw as usize] };
@@ -923,6 +936,7 @@ fn rank_with_table(input: RankingInput, table: &HashMap<String, Vec<String>>) ->
         "Hypothesis_space": input.cnvcall,
         "Profiles_evaluated": profs.len(),
         "Profiles_unscorable": unscorable,
+        "Profiles_other_exon9gc_count": other_exon9gc,
         "Matching_path": path,
         "Masked_sites": masked,
         "Unmodelled_tokens": UNMODELLED,
@@ -1090,5 +1104,29 @@ mod tests_rank {
         let mut i = input(&sc, &sites, &[], "", &[]);
         i.call = None;
         assert_eq!(rank(i)["Reason"], "no_call");
+    }
+
+    #[test]
+    fn profiles_with_another_exon9gc_count_are_not_scored() {
+        let sc = get_hap_table(crate::data::STAR_TABLE, &[]);
+        let sites = sites_from("*10_*36_*36", &sc);
+        let vc = tokens("*10_*36_*36", &sc);
+        assert_eq!(count_of(&vc, "exon9gc"), 2);
+        let raw = vec!["*10_*36_*36".to_string()];
+        let table: HashMap<String, Vec<String>> = ["*10_*36_*36", "*36_*36_*36", "*36_*36_*83"]
+            .iter()
+            .enumerate()
+            .map(|(i, r)| (format!("k{i}"), vec![r.to_string()]))
+            .collect();
+        let mut i = input(&sc, &sites, &vc, "*36/*36+*10", &raw);
+        i.cnvcall = "exon9hyb";
+        let v = rank_with_table(i, &table);
+        assert_eq!(v["Profiles_evaluated"], 1, "{v}");
+        assert_eq!(v["Profiles_other_exon9gc_count"], 2, "{v}");
+        assert_eq!(v["Call_rank"], 1, "{v}");
+        let only_other: HashMap<String, Vec<String>> = [("k0".to_string(), vec!["*36_*36_*83".to_string()])].into();
+        let mut i = input(&sc, &sites, &vc, "*36/*36+*10", &raw);
+        i.cnvcall = "exon9hyb";
+        assert_eq!(rank_with_table(i, &only_other)["Reason"], "no_profile_with_called_exon9gc_count");
     }
 }
