@@ -175,6 +175,8 @@ pub struct D6Call {
     pub rep7_mapq0_fraction: Option<f64>,
     /// Target variants with no dosage call (see `call_variants::uncallable_variants`).
     pub uncallable_target_sites: Option<Vec<String>>,
+    /// `Candidate_ranking` JSON (only with --candidate-ranking).
+    pub candidate_ranking: Option<serde_json::Value>,
 }
 
 impl D6Call {
@@ -207,6 +209,7 @@ impl D6Call {
             phase_pairs_truncated: None,
             rep7_mapq0_fraction: None,
             uncallable_target_sites: None,
+            candidate_ranking: None,
         }
     }
 }
@@ -289,4 +292,6 @@ pub struct FeatureFlags {
     pub d7_depth: bool,
     /// Use k-mer-based paralog ratio validation
     pub kmer_validation: bool,
+    /// Add `Candidate_ranking` to the JSON (output only; uncalibrated)
+    pub candidate_ranking: bool,
 }

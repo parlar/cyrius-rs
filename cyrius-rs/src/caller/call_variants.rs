@@ -208,6 +208,17 @@ pub fn call_cn_var_homo(
         .collect()
 }
 
+/// The read minimum `call_cn_var` gives `call_reg1_cn` for a site (2 clean, 7 noisy, else 4).
+pub fn min_read_for(var: &str) -> f64 {
+    if CLEAN_VAR.contains(&var) {
+        2.0
+    } else if NOISY_VAR.contains(&var) {
+        7.0
+    } else {
+        4.0
+    }
+}
+
 /// Call CN for variant sites in non-homology regions.
 pub fn call_cn_var(
     cnvtag: &str,
@@ -237,16 +248,8 @@ pub fn call_cn_var(
             }
         }
 
-        let min_read = if CLEAN_VAR.contains(&var_list[i].as_str()) {
-            2
-        } else if NOISY_VAR.contains(&var_list[i].as_str()) {
-            7
-        } else {
-            4
-        };
-
         cn_prob.push(
-            call_reg1_cn(Some(total_cn[i]), total_var as f64, total_ref as f64, min_read as f64)[0]
+            call_reg1_cn(Some(total_cn[i]), total_var as f64, total_ref as f64, min_read_for(&var_list[i]))[0]
                 .into(),
         );
     }
@@ -805,5 +808,12 @@ mod tests {
         for tag in CNV_ACCEPTED {
             assert_eq!(reportable_cnvtag(Some(tag)), Some(tag.to_string()), "{tag}");
         }
+    }
+
+    #[test]
+    fn min_read_follows_the_site_lists() {
+        assert_eq!(min_read_for("g.42126611C>G"), 2.0); // CLEAN_VAR
+        assert_eq!(min_read_for("g.42127473C>T"), 7.0); // NOISY_VAR
+        assert_eq!(min_read_for("g.42129754G>A"), 4.0); // neither
     }
 }

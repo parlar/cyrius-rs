@@ -149,6 +149,9 @@ struct Cli {
 
     #[arg(long = "kmer-validation", help = "Use alignment-free k-mer paralog ratio validation")]
     kmer_validation: bool,
+
+    #[arg(long = "candidate-ranking", help = "Add Candidate_ranking to the JSON: ranked genotypes in the call's CNV group, a site-wise decomposition and decision provenance (output only; uncalibrated)")]
+    candidate_ranking: bool,
 }
 
 /// The effective feature flags for a parsed command line.
@@ -168,6 +171,7 @@ fn feature_flags(cli: &Cli) -> FeatureFlags {
         clip_evidence: cli.clip_evidence,
         d7_depth: cli.d7_depth,
         kmer_validation: cli.kmer_validation,
+        candidate_ranking: cli.candidate_ranking,
     }
 }
 
@@ -430,6 +434,7 @@ fn d6_star_caller(
         long_ins_read,
         short_ins_read,
     );
+    let var_alt_original = var_alt.clone();
 
     // Build raw count dict
     let mut raw_count = IndexMap::new();
@@ -466,7 +471,7 @@ fn d6_star_caller(
             variants_called: None, cnv_group: None, genotype: None, filter: None,
             raw_star_allele: None, call_info: None, exon9_cn: None, cnv_consensus: None,
             d67_snp_call: None, d67_snp_raw: None, variant_raw_count: Some(raw_count),
-            kmer_validation: None, resolver_posterior: None,
+            kmer_validation: None, resolver_posterior: None, candidate_ranking: None,
             resolved_by: None, phase_pairs: None, phase_pairs_truncated: None,
             rep7_mapq0_fraction: normalized_depth.rep7_mapq0_fraction,
             uncallable_target_sites: None,
@@ -675,7 +680,7 @@ fn d6_star_caller(
             d67_snp_call: Some(cn_call_snp_str),
             d67_snp_raw: Some(raw_d6_cn_str),
             variant_raw_count: Some(raw_count),
-            kmer_validation: None, resolver_posterior: None,
+            kmer_validation: None, resolver_posterior: None, candidate_ranking: None,
             resolved_by: None, phase_pairs: None, phase_pairs_truncated: None,
             rep7_mapq0_fraction: normalized_depth.rep7_mapq0_fraction,
             uncallable_target_sites: None,
@@ -753,6 +758,7 @@ fn d6_star_caller(
             log::info!("strand_bias_all: filtered {} additional variant sites", filtered);
         }
     }
+    let var_alt_after_sba = var_alt.clone();
 
     let cn_call_var_homo = call_cn_var_homo(total_cn, &var_homo_alt, &var_homo_ref);
     let cn_call_var = call_cn_var(
@@ -831,6 +837,7 @@ fn d6_star_caller(
     total_callset.extend(var42126938);
     total_callset.extend(var42127526);
     total_callset.extend(var42130655ins_a);
+    let callset_before_rules = total_callset.clone();
 
     let exon9_values = Exon9Values {
         exon9_cn: exon9gc_call_stringent,
@@ -1036,6 +1043,52 @@ fn d6_star_caller(
         }
     }
 
+    // Feature: candidate_ranking. Output only (spec 2026-11-05-candidate-ranking-design.md).
+    let candidate_ranking = if features.candidate_ranking {
+        use cyrius_rs::caller::candidate_ranking as cr;
+        let variants_called: Vec<String> = star_called
+            .variants_called
+            .as_deref()
+            .unwrap_or("")
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
+        let total_cn_sites = cyrius_rs::caller::call_variants::get_total_cn_per_site(
+            &cnvtag_str, &params.var_db, &params.var_list,
+        )
+        .unwrap_or_default();
+        let calls = cr::SiteCalls {
+            var_list: &params.var_list,
+            alt_original: &var_alt_original,
+            alt_after_sba: &var_alt_after_sba,
+            alt_final: &var_alt,
+            ref_: &var_ref,
+            homo_alt: &var_homo_alt,
+            homo_ref: &var_homo_ref,
+            total_cn_sites: &total_cn_sites,
+            total_cn,
+            decisions: &cn_call_var,
+            homo_decisions: &cn_call_var_homo,
+            min_read: cyrius_rs::caller::call_variants::min_read_for,
+        };
+        let (sites, provenance) =
+            cr::sites_and_provenance(&calls, &callset_before_rules, &variants_called, &cnvtag_str);
+        Some(cr::rank(cr::RankingInput {
+            cnvcall: &cnvtag_str,
+            spacer_cn: raw_cn_call.spacer_cn,
+            star_combinations: &star_combinations,
+            sites: &sites,
+            provenance,
+            variants_called: &variants_called,
+            uncallable: &uncallable_target_sites,
+            call: final_star_allele_call.as_deref(),
+            call_info: star_called.call_info.as_deref(),
+            raw_call: star_called.raw_call.as_deref(),
+        }))
+    } else {
+        None
+    };
+
     D6Call {
         coverage_mad: normalized_depth.mad,
         median_depth: normalized_depth.mediandepth,
@@ -1064,6 +1117,7 @@ fn d6_star_caller(
         phase_pairs_truncated,
         rep7_mapq0_fraction: normalized_depth.rep7_mapq0_fraction,
         uncallable_target_sites: Some(uncallable_target_sites),
+        candidate_ranking,
     }
 }
 
@@ -1309,7 +1363,7 @@ fn main() {
     });
 
     let mut json_map = serde_json::Map::new();
-    let call_json = serde_json::json!({
+    let mut call_json = serde_json::json!({
         "Coverage_MAD": cyp2d6_call.coverage_mad,
         "Median_depth": cyp2d6_call.median_depth,
         "REP7_MAPQ0_fraction": cyp2d6_call.rep7_mapq0_fraction,
@@ -1347,6 +1401,18 @@ fn main() {
         "Tool_commit": TOOL_COMMIT,
         "Flags": flags_json,
     });
+    // An early no-call never reached the ranking; with the flag it still says so (spec "Output").
+    let candidate_ranking = cyp2d6_call.candidate_ranking.clone().or_else(|| {
+        features
+            .candidate_ranking
+            .then(|| cyrius_rs::caller::candidate_ranking::not_ranked("no_call"))
+    });
+    if let Some(cr) = candidate_ranking {
+        call_json
+            .as_object_mut()
+            .expect("call_json is a JSON object")
+            .insert("Candidate_ranking".to_string(), cr);
+    }
     json_map.insert(sample_id.clone(), call_json);
     let json_output = serde_json::to_string(&json_map).unwrap();
     write_file_or_exit(&out_json, &json_output);

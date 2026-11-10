@@ -1162,7 +1162,7 @@ mod tests {
             strand_bias_all: false, fuzzy_match: false, phase_disambiguate: false,
             phase_readpair: false, changepoint_hybrid: false, het_check: false,
             spacer_cn_check: false, consistency_check: false, hmm_cnv: false,
-            clip_evidence: false, d7_depth: false, kmer_validation: false,
+            clip_evidence: false, d7_depth: false, kmer_validation: false, candidate_ranking: false,
         };
         let na19920 = obs(&["g.42126611C>G", "g.42126611C>G", "g.42129130C>G", "g.42129130C>G",
                             "g.42129754G>A", "g.42129754G>A", "g.42130692G>A", "g.42130692G>A"]);
@@ -1204,7 +1204,7 @@ mod tests {
             strand_bias_all: false, fuzzy_match: true, phase_disambiguate: false,
             phase_readpair: false, changepoint_hybrid: false, het_check: false,
             spacer_cn_check: false, consistency_check: false, hmm_cnv: false,
-            clip_evidence: false, d7_depth: false, kmer_validation: false,
+            clip_evidence: false, d7_depth: false, kmer_validation: false, candidate_ranking: false,
         };
         let vars = obs(&["g.42127941G>A", "g.42129075C>T", "g.42130715C>T"]);
         let call = match_star(&mut vars.clone(), &obs(&["g.42128945C>T"]), "cn2", Some(2), &c, &exon9, None, None, &features);

@@ -72,7 +72,7 @@ fn run_on_empty_bam(tag: &str, flags: &[&str]) -> (serde_json::Value, String) {
 }
 
 /// Every `FeatureFlags` field, in declaration order.
-const FLAG_NAMES: [&str; 12] = [
+const FLAG_NAMES: [&str; 13] = [
     "strand_bias_all",
     "fuzzy_match",
     "phase_disambiguate",
@@ -85,6 +85,7 @@ const FLAG_NAMES: [&str; 12] = [
     "clip_evidence",
     "d7_depth",
     "kmer_validation",
+    "candidate_ranking",
 ];
 
 fn flags_of(record: &serde_json::Value) -> Vec<(String, bool)> {
@@ -148,4 +149,12 @@ fn json_flags_follow_the_command_line() {
         .map(|&n| (n.to_string(), n == "het_check"))
         .collect();
     assert_eq!(flags_of(&record), expected);
+}
+
+#[test]
+fn candidate_ranking_is_present_on_an_early_no_call_only_with_the_flag() {
+    let (on, _) = run_on_empty_bam("cr_on", &["--candidate-ranking"]);
+    assert_eq!(on["Candidate_ranking"], serde_json::json!({"Status": "not_ranked", "Reason": "no_call"}), "{on}");
+    let (off, _) = run_on_empty_bam("cr_off", &[]);
+    assert!(off.get("Candidate_ranking").is_none(), "{off}");
 }

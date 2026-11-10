@@ -277,6 +277,7 @@ These flags add **independent observations** to the output or the log without mo
 | `--kmer-validation` | Alignment-free paralog-dosage check (189 diagnostic 31-mers). Emits a `Kmer_validation` JSON block with AGREE/DISAGREE. |
 | `--clip-evidence` | Soft-clip cluster scan in the D6+D7+spacer region; flags candidate structural breakpoints. |
 | `--d7-depth` | Per-region CYP2D7 depth profile; logs elevation/depletion signals consistent with `*36` and `*13` hybrids. |
+| `--candidate-ranking` | Adds `Candidate_ranking` (output only, uncalibrated). See the [spec](docs/superpowers/specs/2026-11-05-candidate-ranking-design.md). |
 
 ## Output
 
@@ -332,6 +333,8 @@ One further JSON field reports evidence that the call does not use:
   - `true`: the list was cut short, either by a BAM read error partway through or by the file not opening at all.
 
   Every pair listed is a complete measurement even when the list is truncated: it is the list that is short, not the numbers.
+
+With `--candidate-ranking`, the JSON also contains `Candidate_ranking`. It holds ranked candidate genotypes from the call's CNV group, each scored by a read-count model on the per-site alt/ref counts. For each candidate it gives the site-wise decomposition of its score gap to rank 1. It also gives the call's rank, the matching path, and decision provenance: the sites where a rule or filter set the copy count, with the original read counts. The scores are an uncalibrated composite, not probabilities, and the ranks do not change the call. Only these CNV groups are ranked: `cn2`, `cn3`, `exon9hyb`, `exon9hyb_exon9hyb` and `dup_exon9hyb`. Other groups give `{"Status": "not_ranked", "Reason": ...}`. See the [spec](docs/superpowers/specs/2026-11-05-candidate-ranking-design.md).
 
 When `--kmer-validation` is enabled, the JSON additionally contains a `Kmer_validation` object summarizing an alignment-free paralog-dosage check:
 
