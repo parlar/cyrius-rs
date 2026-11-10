@@ -2084,3 +2084,78 @@ end in `--candidate-ranking` and ran normally.
 The vacuity guards caught it: "file counts [0, 0, 160, 160]" and "Genotype missing in
 base". B1, B2 and B4 were evaluated on the flagged runs and raised no failure. B3a and B3b
 had nothing to compare, so they are not evaluated. No threshold or check was changed.
+
+### Run 2 (2026-11-10, after harness fix 7d68260): B1, B2, B4 pass; B3a and B3b FAIL on 1 of 160 files
+
+Commit and binary measured:
+
+```
+7d68260
+394f376a5994811931ef97105205bf643e17b3bb40463d6b7a28b8a6adaf2174  /home/parlar_ai/dev/cyrius-rs/cyrius-rs/target/release/cyrius-rs
+```
+
+`runtime.txt`:
+
+```
+base 21s 0 nonzero-exit
+noflag 22s 0 nonzero-exit
+flag1 27s 0 nonzero-exit
+flag2 28s 0 nonzero-exit
+```
+
+`check_b.json`:
+
+```json
+{
+ "fails": [
+  "B3a: 1 differences without the flag, e.g. [(('dmg', 'dmg'), 'Genotype')]",
+  "B3b: 1 existing-field differences with the flag, e.g. [(('dmg', 'dmg'), 'Genotype')]"
+ ],
+ "status": {
+  "ranked": 54,
+  "not_ranked": 106
+ },
+ "not_ranked_reasons": {
+  "hybrid_dosage_undefined": 5,
+  "group_failed_transfer_test": 6,
+  "direct_genotype_tag": 3,
+  "no_call": 92
+ },
+ "matching_paths": {
+  "exact": 46,
+  "masked": 6,
+  "fuzzy_match": 2
+ },
+ "call_ranks": {
+  "1": 42,
+  "4": 3,
+  "2": 6,
+  "14": 1,
+  "3": 1,
+  "13": 1
+ },
+ "b1_worst": 3.552713678800501e-15,
+ "candidates_with_rows": 141,
+ "provenance_records": 66,
+ "files": [
+  160,
+  160,
+  160,
+  160
+ ]
+}
+```
+
+Every vacuity guard passed: 160 files per configuration, 54 ranked (at least 40), 141
+candidates with rows (at least 10), 66 provenance records, and `Genotype` present in base.
+
+The one B3 difference, diagnosed after the run: damaged NA19920 (`dmg`). Its `Genotype` holds
+the same nine `;`-separated options in a different order. `Raw_star_allele`,
+`Variants_called`, `Filter`, `Call_info` and `CNV_group` are identical. Six repeat runs
+of each binary on that file, with the same flags:
+- base `baf3459`: order A 5 times, order B once;
+- this branch (`7d68260`, no flag): order A 4 times, order B twice.
+
+So the base binary itself prints this file's options in a run-dependent order. The
+difference was not introduced by this branch. Run 2's base printed A, and noflag and flag1
+printed B. The locked verdict stands: **B3a and B3b fail**. No check or threshold was changed.
