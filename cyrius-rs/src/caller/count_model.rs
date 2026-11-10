@@ -56,7 +56,11 @@ fn ln_choose(n: f64, a: f64) -> f64 {
 /// p = (k/n)(1 - eps) + (1 - k/n) eps, biased by beta, beta-binomial with rho (binomial when
 /// rho < 1e-6).
 pub fn site_ln_likelihood(class: SiteClass, alt: u32, ref_: u32, k: u32, n: u32) -> f64 {
-    let (eps, beta, rho) = class.params();
+    ln_likelihood_with(class.params(), alt, ref_, k, n)
+}
+
+/// `site_ln_likelihood` with explicit (error rate, allele bias, overdispersion).
+fn ln_likelihood_with((eps, beta, rho): (f64, f64, f64), alt: u32, ref_: u32, k: u32, n: u32) -> f64 {
     let (a, r) = (alt as f64, ref_ as f64);
     let f = k as f64 / n as f64;
     let p = f * (1.0 - eps) + (1.0 - f) * eps;
@@ -102,6 +106,26 @@ mod tests {
             let total: f64 = (0..=30).map(|a| site_ln_likelihood(class, a, 30 - a, 1, 2).exp()).sum();
             assert!((total - 1.0).abs() < 1e-9, "{class:?}: {total}");
         }
+    }
+
+    /// Spec "Tests": with no allele bias (beta = 1), swapping the alt and ref reads and
+    /// replacing k by n - k gives the same likelihood, for the binomial (rho = 0) and the
+    /// beta-binomial (rho > 0). With the fitted SNP bias (beta 0.934) it does not.
+    #[test]
+    fn binomial_model_is_symmetric_in_ref_and_alt() {
+        for rho in [0.0, 0.023, 0.316] {
+            for n in 1..=4u32 {
+                for k in 0..=n {
+                    for (a, r) in [(0, 30), (3, 40), (20, 20), (7, 33), (12, 0)] {
+                        let p = (0.0004, 1.0, rho);
+                        let (x, y) = (ln_likelihood_with(p, a, r, k, n), ln_likelihood_with(p, r, a, n - k, n));
+                        assert!((x - y).abs() < 1e-9, "rho={rho} n={n} k={k} {a}/{r}: {x} vs {y}");
+                    }
+                }
+            }
+        }
+        let biased = |a, r, k| site_ln_likelihood(SiteClass::Snp, a, r, k, 2);
+        assert!((biased(7, 33, 1) - biased(33, 7, 1)).abs() > 1e-3);
     }
 
     #[test]

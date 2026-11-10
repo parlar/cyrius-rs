@@ -281,8 +281,11 @@ pub struct ProvenanceRecord {
     /// mechanism "retry_add_one_copy" or "fuzzy_match" it is the count in `Variants_called`.
     pub per_site_copies: Option<u32>,
     /// The copy count in the call's final variant list (`Variants_called`). For mechanism
-    /// "retry_add_one_copy" or "fuzzy_match" it is the count in the matched raw call.
+    /// "retry_add_one_copy" or "fuzzy_match" it is the count in the genotype option's profile.
     pub called_copies: u32,
+    /// The sorted labels of the genotype options with this record's profile. Set only for
+    /// "retry_add_one_copy" and "fuzzy_match" records (spec amendment 2026-11-10b).
+    pub genotype_option: Option<Vec<String>>,
 }
 
 fn argmax(v: &[f64]) -> Option<usize> {
@@ -441,6 +444,7 @@ pub fn sites_and_provenance(
                 original_ref: Some(ref0 as u32),
                 per_site_copies: decision,
                 called_copies: count_of(variants_called, name),
+                genotype_option: None,
             });
         }
         if let Some(&(pos, class, h)) = specs.get(name) {
@@ -462,6 +466,7 @@ pub fn sites_and_provenance(
                 original_ref: site.map(|s| s.ref_),
                 per_site_copies: Some(before),
                 called_copies: after,
+                genotype_option: None,
             });
         }
     }
@@ -758,6 +763,65 @@ struct KeyScores {
     other_exon9gc: usize,
 }
 
+/// A raw profile's token counts as a sorted (token, count) list, so profiles can be compared.
+type TokenProfile = Vec<(String, u32)>;
+
+/// Spec "Whole-call records, per genotype option" (amendment 2026-11-10b), for a
+/// `retry_add_one_copy` or `fuzzy_match` call. The options are the raws whose copy multiset is
+/// one of the call's `;` options (all raws if none is), grouped by token profile. Each profile
+/// gets one record per token whose count differs from `Variants_called`.
+fn whole_call_records(input: &RankingInput, call_sets: &[Vec<String>], mechanism: &'static str) -> Vec<ProvenanceRecord> {
+    let labelled: Vec<(&String, Vec<String>)> = input
+        .raw_call
+        .unwrap_or(&[])
+        .iter()
+        .map(|r| (r, entry_labels(r, input.cnvcall, input.spacer_cn).into_iter().map(|(l, _)| l).collect()))
+        .collect();
+    let named: Vec<&(&String, Vec<String>)> =
+        labelled.iter().filter(|(_, ls)| ls.iter().any(|l| call_sets.contains(&copy_multiset(l)))).collect();
+    let options = if named.is_empty() { labelled.iter().collect() } else { named };
+    // (labels, profile), one per distinct profile.
+    let mut groups: Vec<(Vec<String>, TokenProfile)> = Vec::new();
+    for (raw, ls) in options {
+        let Some(m) = profile_token_counts(raw, &input.star_combinations.dstar) else { continue };
+        let mut profile: TokenProfile = m.into_iter().collect();
+        profile.sort();
+        match groups.iter_mut().find(|(_, p)| *p == profile) {
+            Some((labels, _)) => labels.extend(ls.iter().cloned()),
+            None => groups.push((ls.clone(), profile)),
+        }
+    }
+    for (labels, _) in &mut groups {
+        labels.sort();
+        labels.dedup();
+    }
+    groups.sort();
+    let observed = token_counts(input.variants_called);
+    let mut out = Vec::new();
+    for (labels, profile) in groups {
+        let m: HashMap<&str, u32> = profile.iter().map(|(t, n)| (t.as_str(), *n)).collect();
+        let mut toks: Vec<&str> = m.keys().copied().chain(observed.keys().map(String::as_str)).collect();
+        toks.sort_unstable();
+        toks.dedup();
+        for t in toks {
+            let (o, k) = (observed.get(t).copied().unwrap_or(0), m.get(t).copied().unwrap_or(0));
+            if o != k {
+                let site = input.sites.iter().find(|s| s.name == t);
+                out.push(ProvenanceRecord {
+                    site: t.to_string(),
+                    mechanism,
+                    original_alt: site.map(|s| s.alt),
+                    original_ref: site.map(|s| s.ref_),
+                    per_site_copies: Some(o),
+                    called_copies: k,
+                    genotype_option: Some(labels.clone()),
+                });
+            }
+        }
+    }
+    out
+}
+
 fn rank_with_table(input: RankingInput, table: &HashMap<String, Vec<String>>) -> serde_json::Value {
     let Some(call) = input.call.filter(|c| !c.is_empty()) else {
         return not_ranked("no_call");
@@ -897,36 +961,23 @@ fn rank_with_table(input: RankingInput, table: &HashMap<String, Vec<String>>) ->
         }
     }
 
-    // Matching path, and records for retry / fuzzy differences from the observed profile.
+    // Matching path (from the first raw candidate), and whole-call records per genotype option.
     let matched = input
         .raw_call
         .and_then(|r| r.first())
         .and_then(|raw| profile_token_counts(raw, &input.star_combinations.dstar));
     let path = matching_path(input.cnvcall, input.call_info, input.variants_called, input.uncallable, matched.as_ref());
+    let mut whole_call = match path {
+        "retry_add_one_copy" | "fuzzy_match" => whole_call_records(&input, &call_sets, path),
+        _ => Vec::new(),
+    };
     let mut provenance = input.provenance;
-    if let (Some(m), "retry_add_one_copy" | "fuzzy_match") = (&matched, path) {
-        let mut toks: Vec<&String> = m.keys().chain(observed.keys()).collect();
-        toks.sort();
-        toks.dedup();
-        for t in toks {
-            let (o, k) = (observed.get(t).copied().unwrap_or(0), m.get(t).copied().unwrap_or(0));
-            if o != k {
-                let site = sites.iter().find(|s| &s.name == t);
-                provenance.push(ProvenanceRecord {
-                    site: t.clone(),
-                    mechanism: path,
-                    original_alt: site.map(|s| s.alt),
-                    original_ref: site.map(|s| s.ref_),
-                    per_site_copies: Some(o),
-                    called_copies: k,
-                });
-            }
-        }
-    }
+    provenance.append(&mut whole_call);
     let prov_json: Vec<serde_json::Value> = provenance
         .iter()
         .map(|p| serde_json::json!({"Site": p.site, "Mechanism": p.mechanism, "Original_alt": p.original_alt,
-            "Original_ref": p.original_ref, "Per_site_copies": p.per_site_copies, "Called_copies": p.called_copies}))
+            "Original_ref": p.original_ref, "Per_site_copies": p.per_site_copies, "Called_copies": p.called_copies,
+            "Genotype_option": p.genotype_option}))
         .collect();
     let masked: Vec<&str> = sites.iter().filter(|s| s.mask.is_some()).map(|s| s.name.as_str()).collect();
     serde_json::json!({
@@ -1128,5 +1179,165 @@ mod tests_rank {
         let mut i = input(&sc, &sites, &vc, "*36/*36+*10", &raw);
         i.cnvcall = "exon9hyb";
         assert_eq!(rank_with_table(i, &only_other)["Reason"], "no_profile_with_called_exon9gc_count");
+    }
+
+    /// One key per raw, named k0, k1, ... in the order given.
+    fn table_of(raws: &[&str]) -> HashMap<String, Vec<String>> {
+        raws.iter().enumerate().map(|(i, r)| (format!("k{i}"), vec![r.to_string()])).collect()
+    }
+
+    fn strings(v: &[&str]) -> Vec<String> {
+        v.iter().map(|x| x.to_string()).collect()
+    }
+
+    /// (Site, Mechanism, Per_site_copies, Called_copies, Genotype_option) of one record. An
+    /// absent Genotype_option reads "<absent>", so absent and null are told apart.
+    type Rec = (String, String, Option<u64>, u64, serde_json::Value);
+
+    fn rec(site: &str, mechanism: &str, per_site: u64, called: u64, option: serde_json::Value) -> Rec {
+        (site.to_string(), mechanism.to_string(), Some(per_site), called, option)
+    }
+
+    fn records(v: &serde_json::Value) -> Vec<Rec> {
+        v["Decision_provenance"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| {
+                (p["Site"].as_str().unwrap().to_string(), p["Mechanism"].as_str().unwrap().to_string(),
+                    p["Per_site_copies"].as_u64(), p["Called_copies"].as_u64().unwrap(),
+                    p.get("Genotype_option").cloned().unwrap_or_else(|| serde_json::json!("<absent>")))
+            })
+            .collect()
+    }
+
+    /// Token-rule records (`update_variants`) from `sites_and_provenance`, with no read sites.
+    fn token_rule_records(before: &[String], after: &[String]) -> Vec<ProvenanceRecord> {
+        let c = SiteCalls {
+            var_list: &[], alt_original: &[], alt_after_sba: &[], alt_final: &[], ref_: &[],
+            homo_alt: &[], homo_ref: &[], total_cn_sites: &[], total_cn: 3, decisions: &[],
+            homo_decisions: &[], min_read: crate::caller::call_variants::min_read_for,
+        };
+        sites_and_provenance(&c, before, after, "exon9hyb").1
+    }
+
+    /// The p25 HG02373 shape (spec "Whole-call records, per genotype option"). Definitions in
+    /// data/star_table.txt:
+    /// - *10.002: g.42130692G>A g.42126611C>G g.42129754G>A g.42129130C>G
+    /// - *14: g.42129033C>T g.42127941G>A g.42126611C>G g.42129130C>G
+    /// - *36: g.42130692G>A exon9gc g.42126611C>G g.42129754G>A g.42129130C>G
+    /// - *65: g.42130692G>A g.42127941G>A g.42126611C>G g.42129130C>G
+    /// - *114: g.42130692G>A g.42129033C>T g.42127941G>A g.42126611C>G
+    /// - *41: g.42127941G>A g.42127803C>T g.42126611C>G g.42129130C>G
+    ///
+    /// Observed: g.42130692G>A x3, g.42129130C>G x3, g.42129033C>T x1. Each named option differs
+    /// at one token: *14 at g.42130692G>A (2), *65 at g.42129033C>T (0), *114 at g.42129130C>G
+    /// (2). The call does not name *41, so the *41 raw gets no record.
+    #[test]
+    fn fuzzy_records_are_made_per_genotype_option() {
+        let sc = get_hap_table(crate::data::STAR_TABLE, &[]);
+        let raws = ["*10.002_*14_*36", "*10.002_*114_*36", "*10.002_*36_*65", "*10.002_*36_*41"];
+        let raw = strings(&raws);
+        let vc = strings(&["exon9gc", "g.42126611C>G", "g.42126611C>G", "g.42126611C>G", "g.42127941G>A",
+            "g.42129033C>T", "g.42129130C>G", "g.42129130C>G", "g.42129130C>G", "g.42129754G>A",
+            "g.42129754G>A", "g.42130692G>A", "g.42130692G>A", "g.42130692G>A"]);
+        let before: Vec<String> = vc.iter().filter(|t| *t != "exon9gc").cloned().collect();
+        let sites = sites_from(raws[0], &sc);
+        let mut i = input(&sc, &sites, &vc, "*14/*36+*10;*36+*10/*65;*36+*10/*114", &raw);
+        i.cnvcall = "exon9hyb";
+        i.call_info = Some("fuzzy_match(score=1.0)");
+        i.provenance = token_rule_records(&before, &vc);
+        let v = rank_with_table(i, &table_of(&raws));
+        assert_eq!(v["Matching_path"], "fuzzy_match", "{v}");
+        let opt = |l: &[&str]| serde_json::json!(l);
+        assert_eq!(records(&v), vec![
+            rec("exon9gc", "update_variants", 0, 1, serde_json::Value::Null),
+            rec("g.42130692G>A", "fuzzy_match", 3, 2, opt(&["*14/*36+*10"])),
+            rec("g.42129130C>G", "fuzzy_match", 3, 2, opt(&["*36+*10/*114"])),
+            rec("g.42129033C>T", "fuzzy_match", 1, 0, opt(&["*36+*10/*65"])),
+        ], "{v}");
+    }
+
+    /// *1 = NA, *2 = g.42127941G>A g.42126611C>G, *34 = g.42127941G>A, *39 = g.42126611C>G
+    /// (data/star_table.txt). `*1_*2` and `*34_*39` have one token profile, so they share one
+    /// record. A call that names no raw's multiset uses all raws.
+    #[test]
+    fn fuzzy_raws_with_one_profile_share_records_and_an_unnamed_call_uses_all_raws() {
+        let sc = get_hap_table(crate::data::STAR_TABLE, &[]);
+        let vc = strings(&["g.42126611C>G", "g.42127941G>A", "g.42129130C>G"]);
+        let sites = sites_from("*1_*2", &sc);
+        let opt = |l: &[&str]| serde_json::json!(l);
+
+        let raws = ["*1_*2", "*34_*39"];
+        let raw = strings(&raws);
+        let mut i = input(&sc, &sites, &vc, "*1/*2;*34/*39", &raw);
+        i.call_info = Some("fuzzy_match(score=1.0)");
+        let v = rank_with_table(i, &table_of(&raws));
+        assert_eq!(records(&v), vec![rec("g.42129130C>G", "fuzzy_match", 1, 0, opt(&["*1/*2", "*34/*39"]))], "{v}");
+
+        let raws = ["*1_*2", "*1_*34"];
+        let raw = strings(&raws);
+        let mut i = input(&sc, &sites, &vc, "*1/*1", &raw);
+        i.call_info = Some("fuzzy_match(score=1.0)");
+        let v = rank_with_table(i, &table_of(&raws));
+        assert_eq!(records(&v), vec![
+            rec("g.42129130C>G", "fuzzy_match", 1, 0, opt(&["*1/*2"])),
+            rec("g.42126611C>G", "fuzzy_match", 1, 0, opt(&["*1/*34"])),
+            rec("g.42129130C>G", "fuzzy_match", 1, 0, opt(&["*1/*34"])),
+        ], "{v}");
+    }
+
+    /// A cn3 retry (`retry_add_one_copy`): *1 = NA, *2 = g.42127941G>A g.42126611C>G
+    /// (data/star_table.txt). g.42127941G>A is observed once (N - 2) and the matched raw
+    /// `*1_*2_*2` has it twice. Exactly one record, at that site, with that site's reads.
+    #[test]
+    fn retry_record_names_the_promoted_site_and_its_option() {
+        let sc = get_hap_table(crate::data::STAR_TABLE, &[]);
+        let sites = sites_from("*1_*2_*2", &sc);
+        let vc = strings(&["g.42126611C>G", "g.42126611C>G", "g.42127941G>A"]);
+        let raw = strings(&["*1_*2_*2"]);
+        let mut i = input(&sc, &sites, &vc, "*1/*2x2", &raw);
+        i.cnvcall = "cn3";
+        let v = rank_with_table(i, &table_of(&["*1_*2_*2", "*1_*1_*2"]));
+        assert_eq!(v["Matching_path"], "retry_add_one_copy", "{v}");
+        assert_eq!(records(&v), vec![rec("g.42127941G>A", "retry_add_one_copy", 1, 2, serde_json::json!(["*1/*2x2"]))], "{v}");
+        let s = sites.iter().find(|s| s.name == "g.42127941G>A").unwrap();
+        let p = &v["Decision_provenance"][0];
+        assert_eq!((p["Original_alt"].as_u64(), p["Original_ref"].as_u64()), (Some(s.alt as u64), Some(s.ref_ as u64)), "{v}");
+    }
+
+    /// Spec "Call rank": `Call_rank` is the best rank over the call's `;` options. Reads drawn
+    /// from `*1_*2`; the call names `*1/*4` first and `*1/*2` second.
+    #[test]
+    fn resolver_narrowed_call_finds_its_rank() {
+        let sc = get_hap_table(crate::data::STAR_TABLE, &[]);
+        let sites = sites_from("*1_*2", &sc);
+        let table = table_of(&["*1_*4", "*1_*2", "*1_*10"]);
+        let raw = strings(&["*1_*4"]);
+        let rank_of = |call: &str| {
+            let vc = tokens("*1_*4", &sc);
+            let v = rank_with_table(input(&sc, &sites, &vc, call, &raw), &table);
+            (v["Call_rank"].as_u64(), v["Call_delta_composite_log10_likelihood"].as_f64())
+        };
+        let (alone, _) = rank_of("*1/*4");
+        assert!(alone.unwrap() > 1, "the first option alone ranks below 1: {alone:?}");
+        assert_eq!(rank_of("*1/*4;*1/*2"), (Some(1), Some(0.0)));
+        assert_eq!(rank_of("*1/*2;*1/*4"), (Some(1), Some(0.0)));
+    }
+
+    /// Spec "Ranking": ties are broken by the canonical (sorted) key. All sites masked, so every
+    /// entry ties; the keys run in the reverse of the label order.
+    #[test]
+    fn canonical_key_breaks_ties() {
+        let sc = get_hap_table(crate::data::STAR_TABLE, &[]);
+        let mut sites = sites_from("*1_*1", &sc);
+        sites.iter_mut().for_each(|s| s.mask = Some("strand_bias_all"));
+        let table = table_of(&["*1_*9", "*1_*6", "*1_*4", "*1_*3", "*1_*2", "*1_*10", "*1_*1"]);
+        let vc: Vec<String> = Vec::new();
+        let raw = strings(&["*1_*9"]);
+        let v = rank_with_table(input(&sc, &sites, &vc, "*1/*9", &raw), &table);
+        let listed: Vec<&str> = v["Candidates"].as_array().unwrap().iter().map(|e| e["Genotype"].as_str().unwrap()).collect();
+        assert_eq!(listed, ["*1/*9", "*1/*6", "*1/*4", "*1/*3", "*1/*2"], "{v}");
+        assert!(v["Candidates"].as_array().unwrap().iter().all(|e| e["Rank"] == 1), "{v}");
     }
 }
